@@ -1,0 +1,27 @@
+class CobraMain
+
+	shared
+
+		var _willTimeIt as bool
+
+		pro willTimeIt from var
+		
+		def main
+			startTime = DateTime.now
+			try
+				CommandLine().run()
+			finally
+				if _willTimeIt
+					print 'timeit = [DateTime.now.subtract(startTime)]'
+
+		def printEx(ex as Exception)
+			print
+			if true
+				print ex
+			else
+				print '[ex.getType.name]:'
+				print ex.message
+				if ex.innerException
+					print 'inner exception:'
+					.printEx(ex.innerException to !)
+			print

@@ -1,0 +1,1530 @@
+interface ITypeProvider
+	"""
+	A type provider can provide essential types and serve as a place
+	they are "uniqued" in order to avoid type duplication.
+	"""
+
+	def typeForName(name as String) as IType
+
+	def typeOrNilForName(name as String) as IType?
+
+	get boolType as BoolType
+
+	get charType as CharType
+
+	get decimalType as DecimalType
+
+	get floatType as FloatType
+
+	get intType as IntType
+
+	get dynamicType as DynamicType
+
+	get nilType as NilType
+
+	get numberType as NumberType
+
+	get passThroughType as PassThroughType
+
+	get typeType as TypeType
+
+	get unspecifiedType as UnspecifiedType
+
+	get voidType as VoidType
+
+	# TODO: def nilableType ... just like .variType. cache and get "is" testing
+	
+	def variType(type as IType) as VariType
+
+
+class BasicTypeProvider
+	implements ITypeProvider
+	"""
+	TODO: rename to TypeProvider, change to a "mix-in" and have the Compiler class inherit it
+	"""
+
+	var _boolType			as BoolType?
+	var _charType			as CharType?
+	var _decimalType		as DecimalType?
+	var _dynamicType		as DynamicType?
+	var _floatType			as FloatType?
+	var _intType			as IntType?
+	var _nilType			as NilType?
+	var _numberType			as NumberType?
+	var _passThroughType	as PassThroughType?
+	var _typeType			as TypeType?
+	var _unspecifiedType	as UnspecifiedType?
+	var _voidType			as VoidType?
+	var _variTypes			as Dictionary<of IType, VariType>?
+
+	def typeForName(name as String) as IType
+		assert false, 'TODO'
+		return CobraType()
+
+	def typeOrNilForName(name as String) as IType?
+		assert false, 'TODO'
+		return nil
+
+	get boolType as BoolType
+		if _boolType is nil
+			_boolType = BoolType()
+		return _boolType to !
+
+	get charType as CharType
+		if _charType is nil
+			_charType = CharType()
+		return _charType to !
+
+	get decimalType as DecimalType
+		if _decimalType is nil
+			_decimalType = DecimalType()
+		return _decimalType to !
+
+	get dynamicType as DynamicType
+		if _dynamicType is nil
+			_dynamicType = DynamicType()
+		return _dynamicType to !
+
+	get floatType as FloatType
+		if _floatType is nil
+			_floatType = FloatType()
+		return _floatType to !
+
+	get intType as IntType
+		if _intType is nil
+			_intType = IntType()
+		return _intType to !
+
+	get nilType as NilType
+		if _nilType is nil
+			_nilType = NilType()
+		return _nilType to !
+
+	get numberType as NumberType
+		if _numberType is nil
+			_numberType = NumberType()
+		return _numberType to !
+
+	get passThroughType as PassThroughType
+		if _passThroughType is nil
+			_passThroughType = PassThroughType()
+		return _passThroughType to !
+
+	get typeType as TypeType
+		if _typeType is nil
+			_typeType = TypeType()
+		return _typeType to !
+
+	get unspecifiedType as UnspecifiedType
+		if _unspecifiedType is nil
+			_unspecifiedType = UnspecifiedType()
+		return _unspecifiedType to !
+
+	get voidType as VoidType
+		if _voidType is nil
+			_voidType = VoidType()
+		return _voidType to !
+
+	def variType(type as IType) as VariType
+		if _variTypes is nil
+			_variTypes = Dictionary<of IType, VariType>()
+		else if _variTypes.containsKey(type)
+			return _variTypes[type]
+		_variTypes[type] = vt = VariType(type)
+		return vt
+
+
+interface ITypeProxy
+	inherits INode
+	"""
+	An ITypeProxy is a node that represents/stands-in for a type.
+	Its .realType property returns that type, often by locating it among symbols.
+	Implemented by CobraType, AbstractTypeIdentifier, NilableTypeProxy and ClrTypeProxy.
+	"""
+	
+	# TODO: See above NOTE and consider adding name below. Also see _bindBase in Boxes.cobra which would benefit from .name
+#	get name as String
+#		"""
+#		Return the name of the type.
+#		"""
+
+	get realType as IType
+		"""
+		Returns the type that this node represents or .throwError if the type cannot be located.
+		"""
+
+
+class AbstractTypeProxy
+	# CC: is abstract
+	inherits Node
+	implements ITypeProxy
+
+	get realType as IType # CC: is abstract
+		throw Exception('abstract')
+
+
+class TypeProxy
+	inherits AbstractTypeProxy
+	"""
+	Once in awhile you might need to pass or use an ITypeProxy even though you already know the type (probably because it is a builtin type such as `int` or `dynamic`.
+	In that case, you can use TypeProxy(someType)
+	"""
+	
+	var _type as IType
+	
+	def init(type as IType)
+		_type = type
+	
+	get realType as IType is override
+		return _type
+
+
+class NilableTypeProxy
+	inherits AbstractTypeProxy
+	"""
+	Returns the type proxy it is given wrapped in a NilableType.
+	Used when scanning, for example, method arguments in DLLs. See _scan* in Box.
+	"""
+	
+	var _innerType as ITypeProxy
+	
+	def init(innerType as ITypeProxy)
+		_innerType = innerType
+
+	get innerTypeProxy as ITypeProxy
+		return _innerType
+
+	def addMinFields
+		base.addMinFields
+		.addField('innerTypeProxy', .innerTypeProxy)
+
+	get realType as IType is override
+		return NilableType(_innerType.realType)
+
+
+class VariTypeProxy
+	inherits AbstractTypeProxy
+	"""
+	Returns the type proxy it is given wrapped in a VariType.
+	Used when scanning, for example, method arguments in DLLs. See _scan* in Box.
+	"""
+	
+	var _innerType as ITypeProxy
+	
+	def init(innerType as ITypeProxy)
+		_innerType = innerType
+
+	get innerTypeProxy as ITypeProxy
+		return _innerType
+
+	def addMinFields
+		base.addMinFields
+		.addField('innerTypeProxy', .innerTypeProxy)
+
+	get realType as IType is override
+		return VariType(_innerType.realType)
+
+
+class ClrTypeProxy
+	inherits AbstractTypeProxy
+	"""
+	Acts as an ITypeProxy where the CLR type is known.
+	Typically used when scanning DLLs.
+	"""
+
+	shared
+	
+		var _cobraNameForSharpGenericNameCache = Dictionary<of String, String>()
+		
+		def cobraNameForSharpBoxName(name as String) as String
+			"""
+			Returns 'Foo' for 'Foo' and 'Foo<of,>' for 'Foo`2'
+			In other words, works for generic and non-generic classes, structs and interfaces.
+			Does *not* work for arrays, pointers, etc.
+			"""
+			if '`' not in name
+				return name
+			if _cobraNameForSharpGenericNameCache.containsKey(name)
+				return _cobraNameForSharpGenericNameCache[name]
+			else
+				parts = name.split(c'`')
+				count = int.parse(parts[1]) to int # CC: axe cast
+				cobraName = parts[0] + '<of'
+				for i = 1 .. count
+					cobraName += ','
+				cobraName += '>'
+				_cobraNameForSharpGenericNameCache[name] = cobraName
+				return cobraName				
+
+	var _clrType as Type
+
+	def init(clrType as Type)
+		base.init
+		_clrType = clrType
+
+	def addMinFields
+		base.addMinFields
+		.addField('clrType', _clrType)
+
+	get realType as IType is override
+		return _realType(_clrType)
+		
+	def _realType(clrType as Type) as IType
+		# TODO: having problems with System.Configuration
+		if clrType.namespace  # a generic param has no namespace
+			if clrType.namespace == 'System.Configuration'
+				return _hack(clrType)
+			if clrType.namespace.startsWith('Mono.')
+				# TODO: having problems with this too
+				# error: Cannot find top level namespace "Mono" of CLR type "Mono.Security.X509.X509Certificate".
+				# error: Cannot find top level namespace "Mono" of CLR type "Mono.Security.X509.X509Store".
+				return _hack(clrType)
+
+		# handle primitive types
+		# TODO: either map primitive CLR types to their Cobra types, or make them compatible so the following is not even necessary
+		if clrType is $sharp('typeof(System.Boolean)')
+			return .compiler.boolType
+		if clrType is $sharp('typeof(System.Char)')
+			return .compiler.charType
+		if clrType is $sharp('typeof(System.Int32)')
+			return .compiler.intType
+		if clrType is $sharp('typeof(System.Double)')
+			return .compiler.floatType
+
+		# handle nested types, like arrays and pointers, with recursive calls
+		if clrType.isArray
+			# assert clrType.name.endsWith(r'[]') # could be [,] so TODO: handle multidim arrays
+			return ArrayType(_realType(clrType.getElementType to !))
+		else if clrType.isPointer
+			assert clrType.name.endsWith('*')
+			# TODO: handle pointer types
+			return _realType(clrType.getElementType to !)
+		else if clrType.isByRef
+			assert clrType.name.endsWith('&')
+			# TODO: handle ref types
+			return _realType(clrType.getElementType to !)
+
+		# generic parameters
+		if clrType.isGenericParameter
+			return GenericParam(clrType)
+
+		# compute type name
+		typeName = clrType.name
+		if '`' in typeName
+			# generic like IComparable`1
+			assert r'[' not in typeName
+			typeName = .cobraNameForSharpBoxName(typeName)
+		else if clrType.isNested		
+			typeName = 'Object'
+			# TODO: handle nested types
+		else if typeName == 'IBuiltInEvidence' or typeName == 'IConstantMembershipCondition'
+			# TODO: wow really weird.  2007-11-20.  problem on Mono. How about on .NET?
+			typeName = 'IMembershipCondition'
+		else if $sharp(r'char.IsLetterOrDigit(typeName[typeName.Length-1])')
+			pass
+		else
+			.throwError('Cannot locate CLR type "[_clrType]".')
+
+		# compute namespace
+		nameParts = clrType.namespace.split(c'.')
+		member = .compiler.symbolForName(nameParts[0], true, false)
+		if member inherits NameSpace
+			curNS = member
+		else
+			.throwError('Cannot find top level namespace "[nameParts[0]]" of CLR type "[clrType.fullName]".')
+		i = 1
+		while i < nameParts.length
+			possible = curNS.declForName(nameParts[i])
+			if possible is nil
+				# .throwError('Cannot find "[nameParts[i]]" at component [i+1] of CLR type "[clrType.fullName]".')
+				# TODO:
+				# error: Cannot find "Xml" at component 2 of CLR type "System.Xml.XmlNode".
+				# error: Cannot find "ObjectModel" at component 3 of CLR type "System.Collections.ObjectModel.Collection`1[[System.Net.Mail.AlternateView, System, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089]]".
+				return _hack(clrType)
+			else if possible inherits NameSpace
+				curNS = possible
+			else
+				.throwError('Found "[nameParts[i]]" at component [i+1] of CLR type "[clrType.fullName]", but it is a [possible.englishName].')
+			i += 1
+
+		# return namespace member
+		member = curNS.declForName(typeName)
+		if member inherits IType
+			if clrType.isGenericType and not clrType.isGenericTypeDefinition
+				# So we have something like ICollection<of KeyValuePair<of TKey,TValue>> which is all CLR types.
+				# We need the Cobra types of those args so we can construct the Cobra type from the generic cobra type
+				# otherwise, we would just end up returning the generic definition.
+				args = List<of IType>()
+				for genArg in clrType.getGenericArguments
+					args.add(_realType(genArg))
+				member = (member to Box).constructedTypeFor(args)
+			return member 
+		else
+			.throwError('Cannot locate CLR type "[_clrType]".')
+		return .compiler.intType  # CC: to make C# code gen happy.
+
+	def _hack(clrType as Type) as IType
+		if clrType.isInterface
+			return ClrTypeProxy($sharp('typeof(ICloneable)')).realType
+		else
+			return ClrTypeProxy(Object).realType
+
+
+interface IType
+	inherits ITypeProxy, IMember
+
+	def isAssignableTo(type as IType) as bool
+
+	def isDescendantOf(type as IType) as bool
+
+	def isStrictDescendantOf(type as IType) as bool
+
+	get isDynamic as bool
+		"""
+		Returns true if the type is a dynamic type.
+		You cannot use `t inherits DynamicType` because a NilableType gives false for that even though it may be dynamic.
+		"""
+
+	get isReference as bool
+		"""
+		Returns true if the type is a reference type, such as a class, interface or nilable type.
+		And as opposed to value type such as a struct, int, etc.).
+		"""
+
+	def isComparableTo(t as IType) as bool
+		"""
+		Returns true if this type can be compared to the given type via comparison operators such as `>`, `<=`, etc.
+		"""
+
+	def isEquatableTo(t as IType) as bool
+		"""
+		Returns true if this type can be compared to the given type via `is`, `is not`, `==` and `<>`.
+		"""
+
+	def secondaryConstructedTypeFor(box as Box, gpToType as Dictionary<of GenericParam, IType>) as IType
+		"""
+		Makes a new generic type, if needed, using the given map from generic params to types.
+		Returns this type if no generic construction is necessary.
+		This method is invoked during the type construction for return types, parameter types, etc.
+		"""
+
+	def greatestCommonDenominatorWith(type as IType) as IType
+		"""
+		Return the most specific type that is compatible with both this type and the arg.
+		The worst case scenarious are Object and Object? since all types are compatible
+		with Object. Used for at least if() expressions, list literals and dictionary
+		literals.
+		"""
+
+	get innerType as IType?
+		"""
+		Used by the enumerable for statement to infer the type of the control variable.
+		Examples:
+		 	List<of int> --> int
+			List<of dynamic> --> dynamic
+			ArrayList --> Object
+			String --> char
+			Object --> nil
+		"""
+
+	get superType as IType?
+		"""
+		Returns the super type of this type.
+		If an implementor has multiple super types (interfaces do), then this method should
+		return nil and other methods such as isDescendantOf() and memberForName() must be
+		sure to take the multiple super types into consideration.
+		"""
+
+	def memberForName(name as String) as IMember?
+		"""
+		Used for `foo.bar` where this type is the type of `foo`.
+		Should return members that are inherited (if any).
+		"""
+
+	## Code gen
+
+	get csInit as String
+
+	get sharpNameComponent as String
+		"""
+		Returns a string that refers to this type and is suitable for embedding in a larger
+		identifier (meaning there will be no punction, spaces or C# comments).
+		"""
+
+	get sharpRef as String
+		"""
+		Returns a string that refers to this type.
+		Examples: 'int'  'List<String>'  'object'
+		"""
+
+	get sharpParamRef as String
+		"""
+		Returns a string that refers to this type including any necessary parameter declaration
+		specification such as C# 'params' or 'out'. Invoked by Param.writeSharpDef.
+		"""
+
+
+class CobraType
+	inherits Node
+	implements IType, ITypeProxy
+	"""
+	This is the parent type of all other types.
+	It exists for organizational purposes.
+	No actual expression is ever directly assigned this type.
+	If you are looking for "dynamic", see DynamicType.
+	If you are looking for the type of types, see TypeType.
+	If you are looking for "object", see ObjectType.
+	"""
+
+	var _parentNameSpace as NameSpace?
+	var _superType as IType?
+	var _isUsed as bool
+
+	def init
+		base.init
+
+	get englishName as String  # CC: is abstract
+		assert false, '[.getType.name], [this]'
+		throw OverrideException(.getType)
+
+	get name as String
+		return .getType.toString
+
+	pro parentNameSpace from var
+
+	get isCallable as bool
+		return true
+
+	get isDynamic as bool
+		return false
+
+	get isMethod as bool
+		return false
+
+	get isReference as bool
+		throw OverrideException(.getType)
+		return false
+
+	get isShared as bool
+		return true
+
+	def isComparableTo(t as IType) as bool
+		if t inherits NilableType
+			# CC: t = t.theWrappedType
+			$sharp('t = ((NilableType)t).TheWrappedType')
+		compareTo = .memberForName('compareTo')
+		if compareTo and compareTo.isMethod and compareTo.resultType is .compiler.intType and t.isDescendantOf(this)
+			# TODO: check that the compareTo can take a `t` as an argument
+			return true
+		if t inherits DynamicType
+			return true
+		return false
+
+	def isEquatableTo(t as IType) as bool
+		if t inherits NilableType
+			# CC: b = b.theWrappedType
+			$sharp('t = ((NilableType)t).TheWrappedType')
+		if .isAssignableTo(t) or t.isAssignableTo(this)
+			return true
+		return false
+
+	get requiresThis as bool
+		return false
+
+	get resultType as IType?
+		return this
+
+	get typeForIdentifier as IType
+		return .compiler.typeType
+
+	get typeForReceiver as IType
+		return this
+
+	get innerType as IType?
+		return nil
+
+	get realType as IType
+		return this
+
+	get superType from var
+
+	def secondaryConstructedTypeFor(box as Box, gpToType as Dictionary<of GenericParam, IType>) as IType
+		return this
+
+	def greatestCommonDenominatorWith(type as IType) as IType
+		if this is type
+			return this
+		if type inherits NilableType
+			return type.greatestCommonDenominatorWith(this)
+		if type inherits NilType
+			return NilableType(this)
+		if .isDescendantOf(type)
+			return type
+		if type.isDescendantOf(this)
+			return this
+		if type inherits DynamicType
+			return type
+		# TODO: following is a guess -- haven't really thought about following both superTypes at the same type or if there is even any point
+		if .superType and type.superType
+			return .superType.greatestCommonDenominatorWith(type.superType to !)
+		else
+			return .compiler.libraryType('System', 'Object')
+
+	def isAssignableTo(type as IType) as bool
+		require
+			.compiler
+		body
+			if type is .compiler.passThroughType
+				return true
+			if type is .compiler.dynamicType
+				return true
+			if type is .compiler.libraryType('System', 'Object')
+				return true
+			# TODO: remove this:
+			if type inherits GenericParam
+				return true
+			# TODO: would this be needed if not for qualified types?
+			if type inherits WrappedType
+				return .isAssignableTo(type.theWrappedType to passthrough) # CC: do something here
+			return .isDescendantOf(type)
+
+	def isDescendantOf(type as IType) as bool
+		"""
+		Returns true if this type is a subtype (direct or indirect) of type.
+		"""
+		if not _didBindInh
+			.bindInh
+		if this is type
+			return true
+		curType = this to IType?
+		counter = 0
+		while true
+			if curType is type
+				return true
+			curType = curType.superType
+			if curType is nil
+				break
+			counter += 1
+			assert counter < 1000
+		return false
+
+	def isStrictDescendantOf(type as IType) as bool
+		if type is this
+			return false
+		else
+			return .isDescendantOf(type)
+
+	pro isUsed from var
+
+	def declForName(name as String) as IMember?
+		"""
+		Returns nil by default.
+		"""
+		return nil
+
+	def memberForName(name as String) as IMember?
+		"""
+		Returns a named member of System.Object by default.
+		"""
+		objectClass = .compiler.libraryType('System', 'Object')
+		return objectClass.memberForName(name)
+
+	def equals(obj as Object?) as bool is override
+		if obj is nil
+			return false
+		if obj inherits CobraType
+			return .serialNum.equals(obj.serialNum)
+		else
+			return false
+
+	def getHashCode as int is override
+		return .serialNum.getHashCode
+
+	def unNilReturnType
+		# ack! apparently CobraType inherits IMember
+		pass
+		
+
+	## Bind Inheritance
+
+	var _didBindInh as bool
+	
+	get didBindInh from var
+	
+	def bindInh
+		if not _didBindInh
+			_didBindInh = true
+			_bindInh
+
+	def _bindInh
+		"""
+		Subclasses can override to bind inheritance. Specifically, to set _superType.
+		"""
+		pass
+
+
+	## Code gen
+
+	get csInit as String
+		throw OverrideException(.getType)
+
+	get sharpName as String
+		return .name
+
+	get sharpNameComponent as String
+		name = .name
+		i = name.indexOf('/*')  # example: /*dynamic*/object
+		if i <> -1
+			j = name.indexOf('*/', i)
+			name = name[:i] + name[j+2:]
+		name = name.replace('.', '_').replace('<', '_').replace('>', '_').replace(', ', '_')
+		return name
+
+	get sharpRef as String
+		return .sharpName
+
+	get sharpParamRef as String
+		return .sharpRef
+
+	def writeSharpTestInvocation(sw as SharpWriter)
+		pass
+
+
+class ValueType
+	inherits CobraType
+
+	get englishName as String is override
+		return 'primitive type'
+
+	get isReference as bool is override
+		return false
+
+	def equals(obj as Object?) as bool is override
+		if obj is nil
+			return false
+		if not obj inherits CobraType
+			return false
+		if .getType is obj.getType
+			return true
+		return false
+
+	def getHashCode as int is override
+		return .getType.getHashCode
+
+
+class PrimitiveType
+	inherits ValueType
+	"""
+	The base class of BoolType, CharType, etc.
+	Used in part for classification purposes (`t inherits PrimitiveType`).
+	"""
+
+	def _bindInh
+		base._bindInh
+		_superType = .compiler.libraryClass('System.Object')
+
+	def isComparableTo(t as IType) as bool
+		r = base.isComparableTo(t)
+		if not r and t is this
+			r = true
+		return r
+
+
+class BoolType
+	inherits PrimitiveType
+
+	def init
+		base.init
+
+	get name as String is override
+		return 'bool'
+
+	get csInit as String is override
+		return 'false'
+
+
+class CharType
+	inherits PrimitiveType
+
+	def init
+		base.init
+
+	get name as String is override
+		return 'char'
+
+	def isComparableTo(b as IType) as bool
+		r = base.isComparableTo(b)
+		if not r and b is .compiler.libraryType('System', 'String')
+			r = true
+		return r
+
+	def isEquatableTo(t as IType) as bool
+		r = base.isEquatableTo(t)
+		if not r and t is .compiler.libraryType('System', 'String')
+			r = true
+		return r
+
+	get csInit as String is override
+		return '(char)0'
+
+
+class DecimalType
+	inherits NumberType
+
+	def init
+		base.init
+
+	get name as String is override
+		return 'decimal'
+
+	def isComparableTo(t as IType) as bool
+		r = base.isComparableTo(t)
+		if not r and t inherits IntType
+			r = true
+		return r
+
+
+class DynamicType
+	inherits CobraType
+
+	get englishName as String is override
+		return 'basic type'
+
+	get name as String is override
+		return 'dynamic'
+
+	def isAssignableTo(type as IType) as bool is override
+		return true
+
+	def isComparableTo(type as IType) as bool is override
+		return true
+
+	def isEquatableTo(type as IType) as bool is override
+		return true
+
+	get isDynamic as bool is override
+		return true
+
+	get isReference as bool is override
+		return true
+
+	get innerType as IType? is override
+		return this
+
+	get csInit as String is override
+		return 'null'
+
+	get sharpName as String is override
+		return '/*dynamic*/object'
+
+	def greatestCommonDenominatorWith(type as IType) as IType is override
+		if this is type
+			return this
+		if type inherits NilableType
+			return NilableType(this)
+		if type inherits NilType
+			return NilableType(this)
+		return this
+
+
+class FloatType
+	inherits NumberType
+
+	def init
+		base.init
+
+	get name as String is override
+		return 'float'
+
+	get sharpName as String is override
+		return 'double'
+
+	def isComparableTo(t as IType) as bool
+		r = base.isComparableTo(t)
+		if not r and t inherits IntType
+			r = true
+		return r
+
+
+class IntType
+	inherits NumberType
+
+	def init
+		base.init
+
+	get name as String is override
+		return 'int'
+
+	def isAssignableTo(type as IType) as bool
+		if type is .compiler.decimalType
+			return true
+		if type is .compiler.floatType
+			return true
+		return base.isAssignableTo(type)
+
+	def isComparableTo(t as IType) as bool
+		r = base.isComparableTo(t)
+		if not r and (t inherits DecimalType or t inherits FloatType)
+			r = true
+		return r
+
+
+class NilableType
+	inherits WrappedType
+
+	def init(t as IType)
+		base.init(t)
+
+	get name as String is override
+		return _wrappedType.name + '?'
+
+	get isDynamic as bool is override
+		return _wrappedType.isDynamic
+
+	get isReference as bool is override
+		return _wrappedType.isReference
+
+	# TODO: I think the following is appropriate, but come up with a test case for it first.
+	#get innerType
+	#	return .wrappedType.innerType
+
+	def isAssignableTo(type as IType) as bool is override
+		if type inherits PassThroughType
+			return true
+		if type inherits NilableType
+			return _wrappedType.isAssignableTo(type.theWrappedType)
+		return false
+
+	def isComparableTo(b as IType) as bool is override
+		if b inherits NilType
+			return true
+		else
+			return _wrappedType.isComparableTo(b)
+
+	def isDescendantOf(type as IType) as bool
+		return base.isDescendantOf(type) and _wrappedType.isDescendantOf(type)
+
+	def isEquatableTo(b as IType) as bool is override
+		if b inherits NilType
+			return true
+		else
+			return _wrappedType.isEquatableTo(b)
+
+	def memberForName(name as String) as IMember? is override
+		return _wrappedType.memberForName(name)
+
+	def greatestCommonDenominatorWith(type as IType) as IType is override
+		if this is type
+			return this
+		if type inherits NilType
+			return this
+		if type inherits NilableType
+			if _wrappedType is type.theWrappedType
+				return this
+			else
+				return NilableType(_wrappedType.greatestCommonDenominatorWith(type.theWrappedType))
+		return NilableType(_wrappedType.greatestCommonDenominatorWith(type))
+
+	get csInit as String is override
+		return 'null'
+
+	get sharpRef as String is override
+		return _wrappedType.sharpRef + if(not _wrappedType.isReference, '?', '')
+
+
+class NilType
+	inherits CobraType
+
+	get name as String is override
+		return 'nil'
+
+	get isReference as bool is override
+		return true
+
+	def isAssignableTo(type as IType) as bool is override
+		if this is type
+			return true
+		if type is .compiler.passThroughType
+			return true
+		if type inherits NilableType
+			return true
+		return false
+
+	def greatestCommonDenominatorWith(type as IType) as IType is override
+		if this is type
+			return this
+		if type inherits NilableType
+			return type
+		else
+			return NilableType(type)
+
+# TODO:
+#	def checkBinaryOp(self, op, right, compiler):
+#		RootType.checkBinaryOp(self, op, right, compiler)
+#		if op=='TO':
+#			from Expressions import TypeExpr
+#			type = right.realType
+#			assert types, right
+#			assert not inherits(type, NilType)
+#			if not inherits(type, NilableType) and type is not tpassthrough:
+#				.throwError('Cannot cast nil to a non-nil type.')
+
+	get csInit as String is override
+		return 'null'
+
+
+class NumberType
+	inherits PrimitiveType
+	"""
+	The base class for int, float and decimal.
+	"""
+
+	get csInit as String is override
+		return '0'
+
+
+class PassThroughType
+	inherits CobraType
+	"""
+	This is a temporary helper type used while Cobra is still deficient in type checking mostly
+	due to its inability to look up methods, properties, etc.
+
+	Originally it overrode .isDescendantOf to always return true, but this mislead the C#
+	body generation. The override was removed and now you have to check for it explicitly.
+	"""
+
+	def init
+		base.init
+
+	get englishName as String is override
+		return 'basic type'
+
+	get isReference as bool is override
+		return true
+
+	get name as String is override
+		return 'passthrough'
+
+	get innerType as IType? is override
+		return this
+
+	def isAssignableTo(type as IType) as bool is override
+		return true
+
+	get csInit as String is override
+		return 'null'
+
+	get sharpRef as String is override
+		return 'object/*passthrough*/'
+
+
+class VoidType
+	inherits ValueType  # TODO: change to CobraType
+	"""
+	This type is used only for methods that don't declare a return type and therefore cannot return
+	anything.
+	"""
+
+	def init
+		base.init
+
+	get englishName as String is override
+		return 'void type'
+
+	get name as String is override
+		return 'void'
+
+	get csInit as String is override
+		throw Exception('Cannot init a void type.')
+
+
+##
+## Wrapped Types
+##
+
+class WrappedType
+	inherits CobraType
+
+	var _wrappedType as IType
+	var _hashCode as int?
+
+	def init(wrappedType as IType)
+		base.init  # TODO: ? pass wrappedType.superType
+		assert not wrappedType inherits NameSpace  # TODO: remove this when NameSpace is no longer an IType
+		_wrappedType = wrappedType
+
+	def addRefFields is override
+		base.addRefFields
+		.addField('wrappedType', _wrappedType)
+
+	def equals(obj as Object?) as bool is override
+		if this is obj
+			return true
+		if obj is nil
+			return false
+		if .getType is not obj.getType
+			return false
+		# at this point, not the identical object, but the class of obj is the same as ours
+		if obj inherits WrappedType
+			return _wrappedType.equals(obj._wrappedType)
+		else
+			throw FallThroughException([this, obj])
+
+	def getHashCode as int is override
+		if _hashCode is nil
+			_hashCode = _wrappedType.getHashCode   # TODO: should be combined with something else so no collision with the actual wrapped type.
+		return _hashCode to !
+
+	# CC: this should work, but C# don't dig it. maybe for that reason we can't do it even when generating IL since we want C# to feel comfortable with Cobra based libraries
+	#get wrappedType from _wrappedType
+
+	get theWrappedType as IType
+		return _wrappedType
+
+	get innerType as IType? is override
+		return _wrappedType.innerType
+
+	get csInit as String is override
+		return _wrappedType.csInit
+
+	def secondaryConstructedTypeFor(box as Box, gpToType as Dictionary<of GenericParam, IType>) as IType is override
+		thisType = .getType
+		return thisType(_wrappedType.secondaryConstructedTypeFor(box, gpToType))
+
+
+class ArrayType
+	inherits WrappedType
+	"""
+	Represents a .NET array.
+	Only single dimension arrays have been tested and are officially supported. These are common in
+	the BCL as return types and sometimes as parameters. Multi-dim and jagged arrays are not popular.
+	Also, most projects can get by just fine with nested List<of>s.
+	TODO: Nevertheless, this should be expanded.
+	TODO: Get this related to System.Array.
+	"""
+
+	test
+		a1 = ArrayType(IntType())
+		a2 = ArrayType(IntType())
+		assert a1 is not a2
+		assert a1 == a2
+
+	var _box as Box?
+	
+	def init(wrappedType as IType)
+		base.init(wrappedType)
+
+	get englishName as String is override
+		return 'array of ' + ''  # TODO: causes the compiler to choke: if(wrappedType, wrappedType.name, wrappedTypeNode.name)
+
+	get innerType as IType? is override
+		return _wrappedType
+
+	get isReference as bool is override
+		return true
+
+	get name as String is override
+		return _wrappedType.name+r'[]'
+
+	def isAssignableTo(type as IType) as bool is override
+		if base.isAssignableTo(type)
+			return true
+		if type inherits ArrayType
+			if _wrappedType == type.theWrappedType
+				return true
+		return false
+
+	def _bindInh
+		base._bindInh
+		ienum = .compiler.libraryBox('System.Collections.Generic.IEnumerable<of>')
+		_superType = ienum.constructedTypeFor([.theWrappedType])
+
+	def memberForName(name as String) as IMember?
+		member = base.memberForName(name)
+		if member is nil
+			if _box is nil
+				# TODO: make members based on System.Array
+				_box = Class(Token.empty, '[.getType.name]_[.serialNum]', List<of IType>(), List<of String>(), nil, List<of ITypeProxy>(), nil)
+				indexer = Indexer(Token.empty, _box, r'[]', [Param(Token('', 1, 1, 1, 'ID', 'index', nil), .compiler.intType)], _wrappedType, List<of String>(), '')
+				_box.addDecl(indexer)
+				lengthProp = Property(Token.empty, _box, 'length', .compiler.intType, List<of String>(), '')
+				_box.addDecl(lengthProp)
+				_box.bindAll
+			member = _box.symbolForName(name, true)
+		return member
+		
+	get sharpRef as String is override
+		return '[_wrappedType.sharpRef]' + r'[]'
+
+	get csInit as String is override
+		return 'null'
+
+
+class VariType
+	inherits ArrayType
+	"""
+	Represents the type for variable number of arguments:
+		def sumInts(nums as vari int)
+	Not valid for non-parameters such as locals and class fields.
+	"""
+
+	def init(wrappedType as IType)
+		base.init(wrappedType)
+
+	get englishName as String is override
+		return 'variable args type'
+
+	get innerType as IType? is override 
+		return _wrappedType
+
+	get name as String is override
+		return 'vari ' + _wrappedType.name
+
+	get sharpRef as String is override
+		return '[_wrappedType.sharpRef]' + r'[]'
+
+	get sharpParamRef as String is override
+		return 'params ' + .sharpRef
+
+
+class UnspecifiedType
+	inherits CobraType
+	"""
+	This is for the compiler's internal use.
+	See CobraParser.localVarDecl and the methods that use it.
+	"""
+
+	pass
+
+
+class TypeType
+	inherits CobraType
+
+	def init
+		base.init
+
+	get englishName as String is override
+		return 'type for types'
+
+	get isReference as bool is override
+		return true
+
+	get name as String is override
+		return 'Type'
+
+	def isAssignableTo(type as IType) as bool is override
+		b = base.isAssignableTo(type)
+		b = b or type is .compiler.libraryType('System', 'Type')
+		return b
+
+	get csInit as String is override
+		return 'null'
+
+
+class AbstractTypeIdentifier
+	inherits SyntaxNode
+	implements ITypeProxy
+	"""
+	The ancestor class for specific kinds of type identifiers including TypeIdentifier, GenericTypeIdentifier, WrappedTypeIdentifier and more.
+	"""
+
+	var _name as String
+	var _actualType as IType? is private
+	var _didResolveType as bool is private
+
+	def init(token as IToken, name as String)
+		base.init(token)
+		_name = name
+
+	def init(token as IToken, name as String, type as IType)
+		.init(token, name)
+		_actualType = type
+		_didResolveType = true
+
+	def addMinFields is override
+		base.addMinFields
+		.addField('name', _name)
+		.addField('didResolveType', _didResolveType)
+
+	def addRefFields is override
+		base.addSubFields
+		.addField('actualType', _actualType)
+
+	get name from var
+
+	get actualType from var
+
+	get didResolveType from var
+	
+	get realType as IType
+		ensure .actualType
+		if not .didResolveType
+			_actualType = _resolveType()  # CC: axe parens
+			assert .actualType
+			_didResolveType = true
+		assert _actualType
+		return _actualType to !
+
+	def equals(other as Object?) as bool is override
+		if other is nil
+			return false
+		if this is other
+			return true
+		if other inherits AbstractTypeIdentifier
+			if _actualType and other._actualType
+				return _actualType.equals(other._actualType)
+			else
+				return _name.equals(other._name)
+		return false
+
+	def getHashCode as int is override
+		return _name.getHashCode
+
+	def memberFrom(container as IContainer) as IMember?
+		"""
+		Used to get the real member represented by this type identifier in container.
+		Used for qualified types such as:
+			System.Windows.Forms.Control
+			System.Collections.Generic.List<of String>
+		The default implementation is:
+			return container.memberForName(.name)
+		Generics have to do more work, though.
+		"""
+		return container.memberForName(.name)
+
+	def _resolveType as IType # CC: is abstract
+		"""
+		Invoked by .realType only when needed.
+		Subclasses must override to compute and return the actual type that this identifier represents (or invoke `.throwError('...')`).
+		Subclasses should not bother with other operations such as checking or setting _actualType or _didResolveType to true.
+		Subclasses need not invoke `base`.
+		"""
+		return nil to passthrough
+
+
+class WrappedTypeIdentifier
+	inherits AbstractTypeIdentifier
+
+	var _typeId as AbstractTypeIdentifier
+
+	def init(token as IToken, typeId as AbstractTypeIdentifier)
+		require
+			token.text.length
+		ensure
+			.name.length
+		body
+			base.init(token, token.text)
+			_typeId = typeId
+
+	def addMinFields
+		base.addMinFields
+		.addField('typeId', _typeId)
+		
+	get theWrappedTypeIdentifier from _typeId
+
+	def _bindInt is override
+		_typeId.bindInt
+		base._bindInt
+
+	def _bindImp is override
+		_typeId.bindImp
+		base._bindImp
+
+
+class ArrayTypeIdentifier
+	inherits WrappedTypeIdentifier
+
+	def init(token as IToken, typeId as AbstractTypeIdentifier)
+		base.init(token, typeId)
+
+	def memberFrom(container as IContainer) as IMember? is override
+		return container.memberForName(.theWrappedTypeIdentifier.name)
+
+	def _resolveType as IType is override
+		return ArrayType(_typeId.realType)
+		
+
+class NilableTypeIdentifier
+	inherits WrappedTypeIdentifier
+
+	def init(token as IToken, typeId as AbstractTypeIdentifier)
+		base.init(token, typeId)
+
+	def _resolveType as IType is override
+		return NilableType(_typeId.realType)
+
+
+class VariTypeIdentifier
+	inherits WrappedTypeIdentifier
+	
+	def init(token as IToken, typeId as AbstractTypeIdentifier)
+		base.init(token, typeId)
+
+	def _resolveType as IType is override
+		return VariType(_typeId.realType)
+
+
+class TypeIdentifier
+	inherits AbstractTypeIdentifier
+	"""
+	Created by CobraParser.type for identifiers found where types are
+	expected.
+
+	Cobra allows forward references so even though types are expected in
+	places like the return type of a method, they cannot be turned into
+	actual types until the bindInt phase (or bindImp for expressions).
+	"""
+
+	def init(token as IToken)
+		require
+			token.which=='ID'
+			token.text.length
+		ensure
+			.name.length
+		body
+			base.init(token, token.text)
+
+	def init(token as IToken, type as IType)
+		require
+			token.text.length
+		ensure
+			.name.length
+		body
+			base.init(token, token.text, type)
+
+	def init(token as IToken, name as String, type as IType)
+		"""
+		Use this to dictate a name other than what is specified by the token.
+		Used for QualifiedTypes, for example, that are created from multiple tokens.
+		"""
+		require
+			name.length
+		ensure
+			.name.length
+		body
+			base.init(token, name, type)
+			assert name == token.text
+
+	def _resolveType as IType is override
+		# don't need to check "basic types" like int, bool, etc. here. the parser does those.
+		if Utils.isCapped(_name)
+			symbol = .compiler.symbolForName(.name, true, false)  # nested enum and class types are capped and can be members of the current class
+		else
+			symbol = nil
+		if symbol is nil
+			sugg = ''
+			if not Utils.isCapped(_name)
+				sugg = Utils.capped(_name)
+				other = .compiler.symbolForName(sugg, true, false)
+				sugg = if(other, ' Try "[sugg]".', '')
+			.throwError('Cannot find type for "[_name]".[sugg]')
+		if symbol inherits ITypeProxy
+			return symbol.realType
+		else
+			throw FallThroughException(symbol)
+
+
+class GenericTypeIdentifier
+	inherits AbstractTypeIdentifier
+	"""
+	The parser produces these when it encounters "List<of String>", for example.
+	"""
+
+	var _rootName as String    # ex: 'List'
+	var _fullName as String    # ex: 'List<of String>'
+	var _typeRefName as String # ex: 'List<of>' 'IDictionary<of,>' -- matches the actual box
+
+	var _typeNodes as List<of ITypeProxy>
+
+	def init(token as IToken, rootName as String, typeNodes as List<of ITypeProxy>, fullName as String)
+		require
+			token.which=='OPEN_GENERIC'
+			rootName.length
+			fullName.length
+		body
+			base.init(token, fullName)
+			_rootName = rootName
+			_typeNodes = typeNodes
+			_fullName = fullName
+			_typeRefName = _rootName + '<of'
+			# TODO: String(c',', _typeNodes.count-1) ?
+			for i = 0 .. _typeNodes.count-1
+				_typeRefName += ','
+			_typeRefName += '>'
+			_name = _typeRefName
+
+	def memberFrom(container as IContainer) as IMember? is override
+		# happens for a qualified generic. See ../Tests/160-qualified/200-qual-generic.cobra
+		genericType = container.memberForName(_typeRefName)
+		assert genericType
+		return _locateType(genericType to !)
+
+	def _resolveType as IType is override
+		genericType = .compiler.symbolForName(_typeRefName, Utils.isCapped(_name), false)
+		if genericType is nil
+			.throwError('Cannot find a generic type named "[_typeRefName]".')
+		return _locateType(genericType to !)
+
+	def _locateType(genericType as IMember) as IType
+		if genericType inherits Box
+			if not genericType.isGeneric
+				.throwError('"[_rootName]" is not a generic type.')
+			types = List<of IType>()
+			for tn in _typeNodes
+				types.add(tn.realType)
+			if genericType.genericParams.count <> types.count
+				.throwError('The generic type "[_rootName]" expects [genericType.genericParams.count] type arguments, not [types.count].')
+			t = genericType.constructedTypeFor(types)
+			assert t.isGeneric
+			# assert not t.isGenericDef  Wrong! If some of the parameters are generic, then the constructed type could have generic params...
+			# ... hmmm, but am I using the wrong terms? Maybe the returned type is an open or closed constructed type and never a generic def. TODO: resolve this.
+			return t
+		else if genericType inherits IType
+			.throwError('"[_rootName]" is not a generic type.')
+			return nil to passthrough
+		else
+			assert false, 'When does this happen?'
+			.throwError('The definition for "[_fullName]" is not a type.')
+			return nil to passthrough
+
+
+class QualifiedTypeIdentifier
+	inherits AbstractTypeIdentifier
+
+	var _typeNodes as List<of AbstractTypeIdentifier>
+
+	def init(typeNodes as List<of AbstractTypeIdentifier>)
+		require typeNodes.count > 1
+		base.init(typeNodes[0].token, '(uninitialized name)')
+		_typeNodes = typeNodes
+		sb = StringBuilder()
+		sep = ''
+		for t in typeNodes
+			sb.append(sep)
+			sb.append(t.name)
+			sep = '.'
+		_name = sb.toString
+		# TODO: would it be useful to set the _token.text to the name? Maybe it would help with syntax highlighting
+
+	get typeNodes from var
+	
+	def _resolveType as IType is override
+		member = .compiler.symbolForName(_typeNodes[0].name, true, false)
+		i = 1
+		while i < _typeNodes.count and member <> nil
+			if member inherits IContainer
+				m = _typeNodes[i].memberFrom(member)
+				if m
+					$sharp('member = m')
+				else
+					.throwError('Cannot find "[_typeNodes[i].name]" at component [i+1] of qualified type.')
+				i += 1
+			else
+				.throwError('"[member]" cannot contain additional members.')
+		if member inherits NameSpace  # TODO: remove when NameSpace is no longer an IType
+			.throwError('The definition for "[_name]" is a namespace, not a type.')
+		if member inherits IType
+			return member
+		else
+			.throwError('The definition for "[_name]" is not a type.')
+			return nil to passthrough  # CC: axe when 'always throws' for methods is available
