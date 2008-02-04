@@ -1,0 +1,246 @@
+"""
+For ClassVar, see Members.cobra.
+"""
+
+interface IVar
+	inherits INamedNode
+
+	pro type as IType?
+
+	pro isAssignedTo as bool
+		"""
+		Defaults to false and is set to true when an assignment to the variable is encountered.
+		This can then be inspected to generate warnings.
+		"""
+
+	pro ifInheritsStack as Stack<of IType>
+
+	get useSharpNameStack as Stack<of String>
+
+	get sharpAssignmentNames as List<of String>?
+		"""
+		Return the C# names to assign to above and beyond the sharpName.
+		This in support of if-inherits.
+		"""
+
+
+class AbstractLocalVar
+	inherits NamedNode
+	implements IVar
+	"""
+	The base class for Param and LocalVar.
+	"""
+
+	var _type as IType?
+	var _typeNode as ITypeProxy?
+	var _isImplicit as bool
+	var _isTracked as bool
+	var _ifInheritsStack = Stack<of IType>()
+	var _useSharpNameStack = Stack<of String>()  # for if-inherits
+	var _isAssignedTo as bool
+
+	def init(token as IToken, type as IType, isImplicit as bool)
+		base.init(token, token.text)
+		_type = type
+		assert not _type inherits NameSpace  # TODO: can remove with NameSpace is no longer an IType
+		_init(isImplicit)
+
+	def init(token as IToken, typeNode as ITypeProxy, isImplicit as bool)
+		base.init(token, token.text)
+		_typeNode = typeNode
+		_init(isImplicit)
+
+	def init(name as String, typeNode as ITypeProxy)
+		base.init(name)
+		_typeNode = typeNode
+		_init(false)
+
+	def _init(isImplicit as bool)
+		_isImplicit = isImplicit
+		_isTracked = false
+		if _isImplicit
+			sharpPrefix = ''
+		else if Utils.isSharpKeyWord(.name)
+			sharpPrefix = '@'  # C# supports @ as a valid first character for identifiers to escape those that are keywords
+		else
+			sharpPrefix = ''
+		_useSharpNameStack.push(sharpPrefix+.name)
+
+	pro ifInheritsStack from var
+
+	pro isAssignedTo from var
+
+	get isImplicit from var
+
+	pro isTracked from var
+
+	get useSharpNameStack from var
+
+	def addMinFields
+		base.addMinFields
+		if _isImplicit
+			.addField('isImplicit', _isImplicit)
+		.addField('isTracked', _isTracked)
+
+	def addRefFields
+		base.addRefFields
+		.addField('typeNode', _typeNode)
+		.addField('type', _type)
+
+	def toString as String is override
+		type = if(_type, .type.name, "(no type)")
+		return '[.getType.name]([.serialNum], [.token], [.name], [type])'
+
+	def _bindInt
+		base._bindInt
+		_resolveType
+		assert _type
+
+	def _bindImp
+		base._bindImp
+		_resolveType
+
+	def _resolveType
+		require _type or _typeNode
+		if _type
+			return
+		if _typeNode inherits IType
+			_type = _typeNode
+			return
+		_type = _typeNode.realType
+		if _type is nil
+			.throwError('Cannot resolve type.')  # TODO: add the name of the wrappedTypeNode or something
+
+	pro type as IType
+		get
+			require _type
+			return if(_ifInheritsStack.count, _ifInheritsStack.peek to !, _type to !)
+		set
+			require .compiler
+			assert _type is nil or _type is .compiler.unspecifiedType
+			assert not _ifInheritsStack.count
+			_type = value
+
+	get typeNode from var
+
+	get typeForIdentifier as IType is override
+		return .type
+
+	get typeForReceiver as IType is override
+		assert _type
+		return if(_ifInheritsStack.count, _ifInheritsStack.peek to !, _type to !)
+
+	get sharpAssignmentNames as List<of String>
+		return List<of String>(_useSharpNameStack)
+
+	get sharpName as String is override
+		return _useSharpNameStack.peek to !
+
+
+class Param
+	inherits AbstractLocalVar
+
+	enum KindEnum
+		Value
+		InOut
+		Out
+		
+	var _isMissingType as bool
+	var _kind as KindEnum
+
+	def init(token as IToken, type as IType)
+		.init(token, type, false)
+
+	def init(token as IToken, typeNode as ITypeProxy)
+		.init(token, typeNode, false)
+
+	def init(token as IToken, type as IType, isImplicit as bool)
+		base.init(token, type, isImplicit)
+
+	def init(token as IToken, typeNode as ITypeProxy, isImplicit as bool)
+		base.init(token, typeNode, isImplicit)
+
+	def init(name as String, typeNode as ITypeProxy)
+		base.init(name, typeNode)
+
+	pro isMissingType from var
+		"""
+		Returns true if parameter was declared with no type.
+		Currently, such a parameter is given the `dynamic` type.
+		In the future, the type may be inferred for an anon method in the context it is used (a specific delegate or event).
+		"""
+
+	pro kind from var
+
+	get isInOut as bool
+		return .kind == KindEnum.InOut
+
+	get isOut as bool
+		return .kind == KindEnum.Out
+		
+	def constructedFor(box as Box, gpToType as Dictionary<of GenericParam, IType>) as Param
+		ensure
+			result is not this
+		body
+			p = .memberwiseClone to Param
+			p._type = p._type.secondaryConstructedTypeFor(box, gpToType)
+			return p
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		if .type.isReference and not .type inherits NilableType
+			sw.write(r'[NotNull] ')
+		branch .kind
+			on KindEnum.Value: pass
+			on KindEnum.InOut: sw.write('ref ')
+			on KindEnum.Out: sw.write('out ')
+		sw.write('[.type.sharpParamRef] [.sharpName]')
+
+	def writeSharpDefSansReferenceLabels(sw as SharpWriter)
+		"""
+		Writes the parameter declaration but without C# "out" or "ref"--these are not available for
+		contract methods (require_foo and ensure_foo) because contracts cannot modify arguments.
+		"""
+		# skip the [NotNull] as well since it's not really needed
+		sw.write('[.type.sharpRef] [.sharpName]')		
+
+
+class LocalVar
+	inherits AbstractLocalVar
+
+	def init(token as IToken, type as IType)
+		.init(token, type, false)
+
+	def init(token as IToken, typeNode as ITypeProxy)
+		.init(token, typeNode, false)
+
+	def init(token as IToken, type as IType, isImplicit as bool)
+		base.init(token, type as IType, isImplicit)
+
+	def init(token as IToken, typeNode as ITypeProxy, isImplicit as bool)
+		base.init(token, typeNode, isImplicit)
+
+	def addMinFields
+		base.addMinFields
+		.addField('isTracked', _isTracked)
+
+
+class ResultVar
+	inherits LocalVar
+	"""
+	The implicit variable `result` used in `ensure` blocks.
+	"""
+
+	var _sharpName as String
+
+	def init(token as IToken, codePart as AbstractMethod)
+		base.init(_makeToken(token, codePart), codePart.resultType, true)
+		_sharpName = codePart.sharpResultVarName
+
+	def _makeToken(token as IToken, codePart as AbstractMethod) as IToken is shared
+		token = token.copy
+		token.text = 'result'
+		return token
+
+	get sharpName as String is override
+		return _sharpName

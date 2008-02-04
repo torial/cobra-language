@@ -1,0 +1,2862 @@
+"""
+Rules:
+	* Do not invoke .bindFoo on any type that an expression discovers during its own .bindImp.
+"""
+
+interface IExpr
+	"""
+	This is mainly used for categorization.
+	To see what really makes an expression, see the Expr class.
+	"""
+	def toCobraSource as String
+
+
+enum ArgumentLabel
+	None
+	Out
+	InOut
+
+
+class Expr
+	is abstract
+	inherits Stmt
+	implements IExpr
+
+	var _type as IType?
+	var _receiverType as IType?
+		"""
+		The type for receiving messages which can be different than the
+		_type in a static situation such as `ChessPiece.Color` (where
+		Color is an enum). The type of that expression, if assigned to a
+		local var, is Type. But if accessed with a further dot
+		`ChessPiece.Color.Black`, then the type is the Color
+		enumeration itself--the receiverType.
+
+		For a runtime access (ex: `user.name`) the two types are
+		conceptually the same (ex: `String`) and _receiverType is left
+		nil.
+
+		_receiverType is used in memberForName() to look up members such
+		as "Black".
+
+		TODO: rename to _typeForMemberAccess
+		"""
+	var _contextType as IType?
+	var _isParened as bool
+	var _argumentLabel = ArgumentLabel.None
+
+	def init(token as IToken)
+		base.init(token)
+
+	def addRefFields is override
+		base.addRefFields
+		.addField('type', _type)
+
+	pro argumentLabel from var
+		"""
+		Indicates the label for an argument such as 'out' or 'inout'.
+		"""
+
+	pro type from var
+
+	pro receiverType as IType?  # TODO: consider renaming to typeForReceiver
+		"""
+		This property returns the .type if there was no receiver type explicitly set because the type of an expression is its receiver type by default.
+		"""
+		get
+			return _receiverType ? _type
+		set
+			_receiverType = value
+
+	pro contextType from var
+		"""
+		The type expected where this expression is being used.
+		Normally this is the same type as the expression, but it can be different, for example when
+		assigning a dynamic-typed expression to a static-typed variable, the type of the variable
+		becomes the context type.
+		"""
+
+	get curCodeMember as AbstractMethod? is protected
+		"""
+		Returns the current code member during "bind imp" and "write sharp".
+		"""
+		return if(.compiler.codeMemberStack.count, .compiler.codeMemberStack.peek, nil)
+
+	def canBeAssignedTo(type as IType) as bool
+		require
+			.didBindImp
+			.type
+		body
+			return .type.isAssignableTo(type)
+
+	def toCobraSource as String
+		return '[.getType.name].toCobraSource'
+
+	get isCalling as bool
+		"""
+		Return true is this expression is making a call.
+		The default implementation returns false.
+		You might think "inherits CallExpr" would suffice, but MemberExpr and IdentifierExpr can
+		also return true when they refer to methods or inits.
+		"""
+		return false
+
+	def isKindOf(type as IType) as bool
+		require
+			.type
+			.compiler
+		body
+			return .type.isDescendantOf(type)
+
+	pro isParened from var
+		"""
+		Set by the parser if this expression was wrapped in parenthesis.
+		TODO: Consider enhancing toCobraSource to make use of this!
+		"""
+
+	def memberForName(name as String) as IMember?
+		require
+			.didBindImp
+			.type
+		body
+			return .receiverType.memberForName(name)
+
+	get binarySuperNode as BinaryOpExpr
+		require
+			.superNode inherits BinaryOpExpr
+		body
+			return .superNode to BinaryOpExpr
+
+	def bindImp as INode is override
+		base.bindImp
+		assert .didBindImp, this
+		.postBindImpAssertType
+		return this
+
+	def postBindImpAssertType
+		"""
+		This is broken out because in rare cases, it doesn't apply. (Those classes override this to
+		do nothing.)
+		"""
+		if not .hasError
+			assert .type, this
+
+	def _bindImp is override
+# TODO:
+#		ensure
+#			.type
+		body
+			base._bindImp
+
+	def _isSequence(type as IType) as bool
+		if type inherits NilableType
+			return _isSequence(type.theWrappedType to passthrough)
+		# TODO: check for ISliceable which would have a .getSlice
+		if type.isDescendantOf(.compiler.libraryType('System.String'))
+			return true
+		# if type.isDescendantOf(.compiler.libraryType('System.Array'))
+		if type inherits ArrayType
+			return true
+		if type.isDescendantOf(.compiler.libraryType('System.Collections.IList'))
+			return true
+		# TODO: is ArrayList redundant with IList above? I think so.
+		if type.isDescendantOf(.compiler.libraryType('System.Collections.ArrayList'))
+			return true
+		genericList = .compiler.libraryType('System.Collections.Generic.List<of>')
+		if type.isDescendantOf(genericList)
+			return true
+		if type inherits Box
+			if type.genericDef is genericList
+				return true
+		genericIList = .compiler.libraryType('System.Collections.Generic.IList<of>')
+		if type.isDescendantOf(genericIList)
+			return true
+		if type inherits Box
+			if type.genericDef is genericIList
+				return true
+		if type.isDynamic
+			return true
+		return false
+
+	## Code gen
+
+	def writeSharpDefInContext(sw as SharpWriter)
+		.writeSharpDefInContext(sw, true)
+
+	def writeSharpDefInContext(sw as SharpWriter, parens as bool)
+		"""
+		When an expression is used where a particular type is expected, such as:
+			# assignment
+			x = y
+			# argument passing
+			obj.foo(x, y)
+			obj[x, y]
+		it may need C# typecasting--particularly if it is dynamic typed expression.
+		This method relies on having had its .contextType set beforehand.
+		This method should be invoked instead of `writeSharpDef` in any situation where .contextType was set.
+		"""
+		type = .type
+		cast = _contextType and type.isDynamic
+		if cast
+			if parens
+				sw.write('(')
+			sw.write('([_contextType.sharpRef])(')
+		.writeSharpDef(sw)
+		if cast
+			sw.write(')')
+			if parens
+				sw.write(')')
+
+	def writeSharpDef(sw as SharpWriter) is override
+		base.writeSharpDef(sw)
+		branch .argumentLabel
+			on ArgumentLabel.None:  pass
+			on ArgumentLabel.Out:   sw.write('out ')
+			on ArgumentLabel.InOut: sw.write('ref ')
+		.writeSharpDef(sw, true)
+
+	def writeSharpDef(sw as SharpWriter, parens as bool)
+		pass
+
+	def writeSharpStmt(sw as SharpWriter) is override
+		assert .didBindImp
+		sw.node(this)
+		.writeSharpSetLine(sw)
+		.writeSharpDef(sw, false)
+		sw.write(';\n')
+
+	def writeSharpBreakdown(sw as SharpWriter)
+		sw.write(r'new object[] { 0')
+		.writeSharpBreakdownItems(sw)
+		sw.write('}, ')
+
+	get willWriteSharpBreakdownItems as bool
+		return _argumentLabel <> ArgumentLabel.Out
+
+	def writeSharpBreakdownItems(sw as SharpWriter)
+		if .willWriteSharpBreakdownItems
+			src = Utils.sharpStringLiteralFor(.toCobraSource)
+			sw.write(', [src], ')
+			.writeSharpDefForBreakdown(sw)
+
+	def writeSharpDefForBreakdown(sw as SharpWriter)
+		.writeSharpDef(sw)
+
+
+interface IPotentialTypeExpr
+	inherits IExpr
+	"""
+	An implementor of IPotentialType *could* be a representation of a type.
+	This is implemented by expressions such as DotExpr, IdentifierExpr, IndexExpr and TypeExpr.
+	It "inherits IExpr" to emphasize and verify that fact. This interface is not for statements, classes, etc.
+	"""
+
+	get potentialType as IType?
+		"""
+		Returns the type that this object represents, or nil if it does not represent a type.
+		Should be asked for only during "bind implementation" or later.
+		"""
+
+
+class NameExpr
+	is abstract
+	inherits Expr
+	"""
+	The base class for IdentifierExpr and AsExpr.
+	"""
+	# TODO: is abstract
+
+	var _name as String
+	var _definition as INamedNode?
+		"""
+		In practice, definitions include:
+			* Class, Struct, Interface
+			* NameSpace, EnumDecl
+			* ClassVar, LocalVar, Param
+		There may be others, but at least those have been observed in practice.
+		"""
+
+	def init(token as IToken)
+		base.init(token)
+		_name = token.text
+
+	def addMinFields
+		base.addMinFields
+		.addField('name', _name)
+
+	def addRefFields
+		base.addRefFields
+		.addField('definition', _definition)
+
+	get definition from var
+
+	get name from var
+
+	def memberForName(name as String) as IMember? is override
+		or require
+			.definition
+		body
+			return _definition.typeForReceiver.memberForName(name)
+
+	get asSharp as String
+		return _definition.sharpName
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		sw.write(.asSharp)
+
+
+class AsExpr
+	inherits NameExpr
+	"""
+	i as int = 5
+	The "i as int" is an AsExpr.
+	"""
+
+	var _asToken as IToken  # the identifier vs. the `as` keyword which is the main token
+	var _typeNode as ITypeProxy
+
+	def init(token as IToken, nameToken as IToken, typeNode as ITypeProxy)
+		base.init(nameToken)
+		_asToken = token
+		_typeNode = typeNode
+
+	def addMinFields is override
+		base.addMinFields
+		.addField('name', _name)
+
+	def addSubFields is override
+		base.addSubFields
+		.addField('typeNode', _typeNode)
+
+	def _bindImp is override
+		base._bindImp
+		_type = _typeNode.realType
+		assert _type, _typeNode
+		# make the local var if necessary (usually is)
+		definition = .compiler.findLocal(_name)
+		if definition is nil
+			newVar = LocalVar(_token, _type)
+			newVar.bindAll
+			.compiler.codeMemberStack.peek.addLocal(newVar)
+			_definition = newVar
+		else
+			if definition.type<>_type
+				.throwError('Cannot redeclare "[.name]" as a different type. Earlier type is "[definition.type.name]".')
+				# TODO: would be nice to point to earlier location. definition would need to carry source location info
+			else
+				_definition = definition
+
+	def bindImp as INode
+		base.bindImp
+		# don't want to say isUsed=true if the AsExpr is the left hand side like in:
+		#		x as int = 5
+		# but if it is the right hand side like so:
+		#		_x = x as int = 5
+		# then it is, in fact, being used.
+		if _definition and .superNode inherits BinaryOpExpr
+			if .binarySuperNode.right is this
+				# case: x = y as int
+				_definition.isUsed = true
+			else if .binarySuperNode.superNode inherits BinaryOpExpr and .binarySuperNode is .binarySuperNode.binarySuperNode.right
+				# case: x = y as int = 5
+				# recall that assign is right-to-left associative
+				_definition.isUsed = true
+		return this
+
+	def afterStatementBindImp is override
+		base.afterStatementBindImp
+		if not .type inherits NilableType
+			if .type.isReference
+				.throwError('Must initialize this non-nil object type, or change the type to nilable (suffix a ?).')
+
+	def writeSharpStmt(sw as SharpWriter) is override
+		# this happens for declarations like "i as int"
+		sw.write('// [_name] as [_type.name]\n')
+
+
+class CallExpr
+	inherits Expr
+	implements IDotRightExpr
+	"""
+	A CallExpr may be on the right side of a dot expression as in `obj.foo(x, y)` but it could also be `SomeType()` or `_someMember(x, y)`.
+	
+	It might be a nice clean up in the future to treat `_someMember(x, y)` as `._someMember(x, y)` and transform `SomeType()` to
+	something like an InstantiateExpr. But right now there is no provision for _bindImp being able to transform the current instance.
+	"""
+
+	var _name as String
+	var _args as List<of Expr>
+	var _definition as INamedNode?
+	var _isNew as bool  # "Exception('foo')" would be a CallExpr that isNew
+	var _willWriteSharpNew = true
+	var _isCallOnSystemType as bool  # "t()" where t is of System.Type would be a CallExpr that isCallOnSystemType
+	var _altForm as Expr?  # TODO: having to check for _altForm all over the place sucks. Change _bindImp to return 'same' and change .bindImp to require its return value to be used
+	var _assignments as List<of AssignExpr> # for calls that are _isNew, this contains the assignments which are interpreted as property assignments
+	var _isForAttribute as bool
+
+	def init(token as IToken, name as String, args as List<of Expr>)
+		base.init(token)
+		_name = name
+		_args = args
+		_definition = nil
+		_assignments = List<of AssignExpr>()
+
+	def addMinFields is override
+		base.addMinFields
+		.addField('name', _name)
+
+	def addRefFields is override
+		base.addRefFields
+		.addField('definition', _definition)
+
+	def addSubFields is override
+		base.addSubFields
+		.addField('isNew', _isNew)
+		.addField('isCallOnSystemType', _isCallOnSystemType)
+		.addField('args', _args)
+
+	get altForm from var
+
+	get assignments from var
+
+	get hasError as bool is override
+		if base.hasError
+			return true
+		for arg in _args
+			if arg.hasError
+				return true
+		return false
+
+	get isCalling as bool is override
+		return true
+
+	pro isForAttribute from var
+		"""
+		Returns true when the call expr is being used for the purpose of an attribute as opposed to
+		normal expression in normal code.
+		"""
+		
+	get isNew from var
+	
+	get name from var
+
+	get args from var
+
+	get definition from var
+
+	get member as IMember?
+		return _definition to? IMember
+
+	get type as IType?
+		return if(_altForm, _altForm.type, base.type)
+
+	pro willWriteSharpNew from var
+		"""
+		Only checked when .isNew. Conditionally set to false in DotExpr._writeSharpDef.
+		"""
+
+	def _bindImp is override
+		base._bindImp
+
+		# check for EnumName(MemberA, MemberB)
+		if not _superNode inherits DotExpr
+			if _definition is nil and Utils.isCapped(.name)
+				defin = .compiler.symbolForName(.name, true, false)
+				if defin inherits EnumDecl
+					_altForm = EnumCallExpr(.token, _name, _args, defin)
+					_altForm.bindImp  # CC: combine this line into above
+					_type = _altForm.type
+					return
+
+		num = 1
+		for arg in _args
+			try
+				if arg inherits AssignExpr
+					arg.right.bindImp  # 'x=y' has special treatment in arguments
+				else
+					arg.bindImp
+			catch ne as NodeException
+				ne.prefixMessage('For "[_name]" arg [num]: ')
+				.compiler.recordError(ne)
+			num += 1
+
+		definition as INamedNode?
+		type as IType?
+
+		if _definition is nil  or  _type is nil
+			handled = false
+			if _superNode inherits DotExpr
+				if this is _superNode.right
+					checkName = _name
+					while checkName.startsWith('_')
+						checkName = checkName.substring(1)
+					if _superNode.left.type inherits Box and Utils.startsNonLower(checkName)
+						.throwError('Methods must start with lowercase letters (not counting underscores). The name is \"[_name]\".')
+					# handle foo.bar() where this is the `bar()` part
+					if not _superNode.left.didBindImp
+						assert _superNode.left.hasError, _superNode.left
+						# we get here for Cobra code like "obj.foo.bar(x)" where "foo" is not found
+						_type = .compiler.passThroughType
+						return
+					possibleDefinition = _superNode.left.memberForName(_name)
+					if possibleDefinition is nil
+						lrt = _superNode.left.receiverType
+						if lrt.isDynamic
+							type = .compiler.dynamicType
+						else if lrt is .compiler.passThroughType or lrt inherits PrimitiveType  # TODO: lame: bailing out on PrimitiveType so float.parse() will work. See Tests\150-basics-two\510-number-parse.cobra
+							if _name=='toString'
+								type = .compiler.libraryType('System.String')
+							else
+								type = .compiler.passThroughType
+						else
+							.throwError('Cannot find a definition for "[_name]" in "[_superNode.left.receiverType.name]".')
+					else
+						if not possibleDefinition.isCallable
+							.throwError('Cannot call "[_name]" because it is a "[possibleDefinition.englishName]".')
+						definition = possibleDefinition
+						type = possibleDefinition.resultType
+					handled = true
+			if handled
+				assert type
+			else
+				# handle instantiation such Car() or t() (where t is a System.Type)
+				canBeUndottedMember = .compiler.canNameBeUndottedMember(_name)
+				if canBeUndottedMember
+					assert .compiler.boxStack.count
+					definition = .compiler.symbolForName(_name, canBeUndottedMember, false) to passthrough
+				else if not .isForAttribute  # otherwise .compiler.codeMemberStack is empty (so no .findLocal), plus Cobra doesn't allow lowercase members anyway
+					definition = .compiler.findLocal(_name)
+				if definition is nil
+					.throwError('Cannot find "[_name]".')
+				_isCallOnSystemType = not definition inherits Box and not definition inherits GenericParam and not definition inherits Method and not definition inherits MemberOverload
+			if definition
+				if definition inherits IVar
+					# such as having:
+					#	t as Type
+					#	...
+					#	x = t()
+					if definition.type.isDynamic or definition.type.isDescendantOf(.compiler.libraryType('System.Type'))
+						type = .compiler.dynamicType
+					else
+						.throwError('Cannot call a variable of type [definition.type.name].')
+				else if definition inherits Box
+					if definition inherits Interface
+						.throwError('Cannot instantiate an interface.')
+					else if definition inherits Class or definition inherits Struct
+						# constructing an instance of a class or struct
+						type = definition
+					else
+						# not ever expected since the three Box types are covered above
+						throw FallThroughException(definition)
+				else if definition inherits GenericParam
+					# TODO: check that the GenericParam is callable (has the callable constraint)
+					type = definition
+				else if definition inherits BoxMember
+					type = definition.resultType  # NOTE: used to have .realType at the end
+					if definition inherits MemberOverload
+						pass  # TODO handle overloads (1)
+					else
+						args = _args
+						hasVari = false
+						for param in definition.params
+							if param.type inherits VariType
+								hasVari = true
+						if hasVari
+							# TODO handle variable number of args (4)
+							pass
+						else
+							check = true
+							if not definition.hasParams
+								if .name == 'toString'
+									# HACK
+									# this enables someFloat.toString('0.0')
+									# can remove when primitives know their CLR types and look up their methods
+									pass
+								else if args.count
+									.throwError('The method "[definition.name]" is expecting 0 arguments, but [args.count] are being supplied in this call.')
+							else
+								params = definition.params
+								if args.count <> params.count
+									if _name=='toString'  # TODO because many structs like Decimal have a toString() overload which cannot currently be expressed in SystemInterfaces.cobra
+										check = false
+									else
+										.throwError('The method "[definition.name]" is expecting [params.count] argument[Utils.plural(params)], but [args.count] are being supplied in this call.')
+								if check
+									for i = 0 .. args.count
+										arg = args[i]
+										param = params[i]
+										if arg.hasError
+											break
+										if arg inherits AssignExpr  # assignments in arguments have special treatment
+											break
+										assert arg.didBindImp, arg
+										assert param.didBindInt, param
+										if arg.canBeAssignedTo(param.type)
+											arg.contextType = param.type
+										else
+											if false
+												print
+												print '<> arg = ' stop
+												arg.writeDeepString
+												print '<> param = ' stop
+												param.writeDeepString
+											.throwError('Argument [i+1] of method "[_name]" expects type [param.type.name], but the call is supplying type [arg.type.name].')
+				else
+					throw FallThroughException(definition)
+			if type is nil
+				type = .compiler.passThroughType
+			_definition = definition
+			if _definition
+				definition.isUsed = true
+			_type = type
+		_isNew = _definition inherits Box or _definition inherits GenericParam
+		if not _altForm and not _isNew
+			for arg in _args
+				if arg inherits AssignExpr
+					.recordError('Cannot make assignments in arguments. This syntax is reserved in the future for keyword arguments.')
+		else if _isNew
+			for arg in _args
+				if arg inherits AssignExpr
+					_assignments.add(arg)
+		assert _type, 'this=[this], def=[_definition]'
+		if .args.count == 0 and .superNode inherits DotExpr and (.definition inherits Method or .definition inherits MemberOverload)
+			.compiler.warning(this, 'Unnecessary parentheses. You can remove them.')
+
+	def postBindImpAssertType
+		if _altForm
+			_altForm.postBindImpAssertType
+		else
+			base.postBindImpAssertType
+
+	def toCobraSource as String is override
+		sb = StringBuilder()
+		sb.append(_name)
+		sb.append('(')
+		sep = ''
+		for arg in _args
+			sb.append(sep)
+			sb.append(arg.toCobraSource)
+			sep = ', '
+		sb.append(')')
+		return sb.toString
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		if _altForm
+			_altForm.writeSharpDef(sw, parens)
+			return
+		name = .name
+		if _isCallOnSystemType
+			defi = _definition
+			what = if(defi inherits Class, 'typeof([_definition.sharpName])', defi.sharpName)
+			if defi inherits IVar
+				if defi.type.isDynamic
+					what = '(System.Type)' + what
+			sw.write('Activator.CreateInstance([what]')
+			sep = ', '
+			for arg in _args
+				sw.write(sep)
+				arg.writeSharpDefInContext(sw)
+			sw.write(')')
+			return
+		if _isNew
+			if parens
+				sw.write('(')
+			if _willWriteSharpNew
+				sw.write('new ')
+		else
+			if .superNode inherits DotExpr  # otherwise, code could be: _underscoredDoesNotRequireDot()
+				name = Utils.capped(name)
+		sw.write('[name](')
+		sep = ''
+		for arg in _args
+			sw.write(sep)
+			arg.writeSharpDefInContext(sw)
+			sep = ', '
+		sw.write(')')
+		if _isNew and parens
+			sw.write(')')
+
+	def writeSharpBreakdownItems(sw as SharpWriter) is override
+		if _altForm
+			_altForm.writeSharpBreakdownItems(sw)
+			return
+		# leaving out the base call is intentional:
+		# base.writeSharpBreakdownItems(sw)
+		sw.write(', +1')
+		for expr in _args
+			expr.writeSharpBreakdownItems(sw)
+		sw.write(', -1')
+
+
+class EnumCallExpr
+	inherits Expr
+	"""
+	Represents an enumeration call like: AnchorStyle(Left, Right)
+	Created by CallExpr._bindImp
+	"""
+
+	var _name as String
+	var _args as List<of Expr>
+	var _definition as EnumDecl?
+	var _members as List<of EnumMember>
+		"""
+		Parallels the args with the enum members found during _bindImp.
+		"""
+
+	def init(token as IToken, name as String, args as List<of Expr>, definition as EnumDecl)
+		require Utils.isCapped(name)
+		base.init(token)
+		_name = name
+		_args = args
+		_definition = definition
+		_members = List<of EnumMember>()
+	
+	get name from var
+	
+	get args from var
+	
+	get definition from var
+	
+	get hasError as bool is override
+		if base.hasError
+			return true
+		for arg in _args
+			if arg.hasError
+				return true
+		return false
+
+	def toCobraSource as String is override
+		sb = StringBuilder()
+		sb.append(_name)
+		sb.append('(')
+		sep = ''
+		for arg in _args
+			sb.append(sep)
+			sb.append(arg.toCobraSource)
+			sep = ', '
+		sb.append(')')
+		return sb.toString
+
+	def _bindImp
+		base._bindImp
+		if not _definition
+			possible = .compiler.symbolForName(.name, true, false)
+			if not possible
+				.throwError('Cannot locate enumeration type "[.name]".')
+			else if possible inherits EnumDecl
+				_definition = possible
+			else
+				.throwError('"[.name]" is not an enumeration type.')
+		if not _type
+			_type = _definition
+		# TODO: support EnumName(someInt) and EnumName(someString) (and multiple args)
+		for arg in _args
+			if arg inherits IdentifierExpr
+				member = _definition.memberForName(arg.name) to EnumMember?
+				if member
+					arg.setDefinition(member)
+					_members.add(member)  # for use in code generation
+				else
+					arg.recordError('Cannot find "[arg.name]" in enumeration "[.name]"')
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		if parens
+			sw.write('(')
+		if _args.count == 0
+			sw.write('default([_definition.sharpRef])')
+		else
+			sep = ''
+			for member in _members
+				sw.write(sep)
+				sw.write(member.sharpRef)
+				sep = '|'
+		if parens
+			sw.write(')')
+
+	def writeSharpBreakdownItems(sw as SharpWriter)
+		base.writeSharpBreakdownItems(sw)
+		sw.write(', +1')
+		for member in _members
+			sw.write(', ')
+			sw.write(member.sharpRef)
+		sw.write(', -1')
+
+
+class ForExpr
+	inherits Expr
+
+	var _nameExpr as NameExpr
+	var _var as IVar?
+	var _varNumber as int
+	var _what as Expr
+	var _whereExpr as Expr?
+	var _getExpr as Expr
+
+	def init(token as IToken, nameExpr as NameExpr, what as Expr, whereExpr as Expr?, getExpr as Expr)
+		base.init(token)
+		_nameExpr = nameExpr
+		_what = what
+		_whereExpr = whereExpr
+		_getExpr = getExpr
+
+	def addSubFields
+		base.addSubFields
+		.addField('nameExpr', _nameExpr)
+		.addField('var', _var)
+		.addField('what', _what)
+		.addField('whereExpr', _whereExpr)
+		.addField('getExpr', _getExpr)
+
+	def _bindImp
+		base._bindImp
+		_what.bindImp  # bind first because it may be needed for type inference
+		if not _isSequence(_what.type to !)
+			.throwError('Cannot enumerate values of type "[_what.type.name]". You can enumerate IList<of>.') # TODO: strings, arrays, IList and IList<of>.')
+		_var = .bindVar(_nameExpr)
+		if _nameExpr.definition
+			if _nameExpr.definition inherits IVar
+				_var = _nameExpr.definition to IVar
+			else
+				.throwError('Expecting a variable not a [_nameExpr.definition.getType.name].')  # TODO: what's the best way to report what was found?
+		else
+			assert _nameExpr.hasError, _nameExpr
+		_varNumber = .compiler.curBox.makeNextPrivateSerialNumber
+		if _whereExpr
+			_whereExpr.bindImp
+			if _whereExpr.type is not .compiler.boolType
+				_whereExpr = TruthExpr(_whereExpr).bindAll to TruthExpr  # CC: axe cast when have "as same"
+		_getExpr.bindImp
+		ilist = .compiler.libraryBox('System.Collections.Generic.IList<of>')
+		_type = ilist.constructedTypeFor([_getExpr.type to !])
+
+	def inferredType as IType? is override
+		assert _what.type
+		return _what.type.innerType
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		# C#:  CobraImp.For(stuff, delegate(x as int) { return x*x })
+		# C#:  CobraImp.For(stuff, delegate(x as int) { if (x<0) return x*x; })
+		inType = _what.type.innerType
+		outType = _getExpr.type
+		sw.write('CobraImp.For<[inType.sharpRef],[outType.sharpRef]>(')
+		_what.writeSharpDef(sw, false)
+		sw.write(', ')
+		helperName = '_lh_for_[_var.name]_[_varNumber]'
+		if _whereExpr is nil
+			sw.write('delegate([inType.sharpRef] [helperName]) {\n')
+			sw.indent
+			sw.write('[_var.sharpName] = [helperName];\n')
+			sw.write('return ')
+			_getExpr.writeSharpDef(sw, false)
+			sw.write(';\n')
+			sw.dedent
+			sw.write('})')
+		else
+			outHelperName = helperName + '_out'
+			sw.write('delegate([inType.sharpRef] [helperName], out [outType.sharpRef] [outHelperName]) {\n')
+			sw.indent
+			sw.write('[_var.sharpName] = [helperName];\n')
+			sw.write('if (')
+			_whereExpr.writeSharpDef(sw, false)
+			sw.write(') {\n')
+			sw.indent
+			sw.write('[outHelperName] = ')
+			_getExpr.writeSharpDef(sw, false)
+			sw.write(';\n')
+			sw.write('return true;\n')
+			sw.dedent
+			sw.write('} else {\n')
+			sw.indent
+			sw.write('[outHelperName] = [outType.sharpInit];\n')
+			sw.write('return false;\n')
+			sw.dedent
+			sw.write('}\n')
+			sw.dedent
+			sw.write('})')
+
+
+class IdentifierExpr
+	inherits NameExpr
+	implements IPotentialTypeExpr
+	
+	def init(token as IToken, name as String, definition as INamedNode?)
+		base.init(token)
+		_name = name
+		_definition = definition
+
+	def setDefinition(value as INamedNode?)
+		# cannot override definition with a set, because base does not do a set
+		_definition = value
+
+	get isCalling as bool is override
+		assert _definition
+		return _definition.isMethod
+
+	get isTypeReference as bool
+		"""
+		Returns true if this identifier directly names a type.
+		"""
+		require .didBindImp
+		r = .definition inherits Box and _type.isDescendantOf(.compiler.libraryType('System.Type'))
+		assert not r or not .definition.sharpName.startsWith('_lh')
+		return r
+		
+	get potentialType as IType?
+		# overridden to return the type this identifier represents in those cases when it does represent a type such an "int" or a class
+		assert .didBindImp
+		assert .type
+		assert .compiler
+		if .type.isDescendantOf(.compiler.typeType) or .type inherits Box
+			assert .definition
+			defi = .definition
+			if defi inherits IType
+				return defi
+			else
+				throw FallThroughException(defi)
+		else
+			return nil
+
+	def _bindImp is override
+		base._bindImp
+		if _definition is nil
+			canBeUndottedMember = .compiler.canNameBeUndottedMember(_name)
+			if canBeUndottedMember
+				assert .compiler.boxStack.count
+				_definition = .compiler.symbolForName(_name, canBeUndottedMember, false) to passthrough
+			else
+				_definition = .compiler.findLocal(_name)
+			if _definition is nil and not canBeUndottedMember
+				if _superNode inherits BinaryOpExpr
+					if _superNode.right is this
+						curBox = .compiler.boxStack.peek
+						definition = curBox.symbolForName(_name, true)
+						if definition
+							.throwError('You must refer to non-underscored members with a leading dot (.). Member name is "[_name]".')
+			if _definition is nil and (not _superNode inherits BinaryOpExpr or .binarySuperNode.op<>'ASSIGN')
+				.errorUnknownId(.name)
+				throw FallThroughException()
+		if _type is nil
+			if _definition
+				_type = _definition.typeForIdentifier
+				_receiverType = _definition.typeForReceiver
+			else
+				if .binarySuperNode inherits AssignExpr and this is .binarySuperNode.left
+					pass  # let the AssignExpr have its chance at type inference
+				else
+					.errorUnknownId(.name)
+					throw FallThroughException()
+
+	def bindImp as INode
+		base.bindImp
+		if _definition
+			_definition.isUsed = true
+		return this
+
+	def errorUnknownId(name as String)  # TODO: see if 'name' parameter can be axed
+		require name.length
+		msg = 'Unknown identifier: "[name]".'
+		if .compiler.unknownSuggestions.containsKey(name)
+			sug = .compiler.unknownSuggestions[name] to ?
+		if sug and sug.length
+			msg += ' Maybe you should try "[sug]".'
+		.throwError(msg)
+
+	def postBindImpAssertType is override
+		# TODO: document why this is disabled
+		pass
+
+	def afterStatementBindImp
+		base.afterStatementBindImp
+		if not .hasError
+			if not .isCalling
+				if .definition inherits IVar
+					.throwError('A simple reference to a variable or parameter cannot be a statement.')
+				else
+					.throwError('A single identifier cannot be a statement (unless it is an underscored method invocation such as "_foo").')
+
+	def toCobraSource as String is override
+		return _name
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		sw.write(.sharpName)
+
+	get sharpName as String
+		assert .didBindImp
+		assert .definition
+		assert not .type inherits UnspecifiedType
+		if .superNode inherits DotExpr
+			assert this is not (.superNode to DotExpr).right  # should be a CallExpr or MemberExpr instead
+		defi = .definition
+		if .isTypeReference
+			# C# often requires typeof(Foo) instead of just plain Foo
+			if .superNode is nil or (.superNode inherits BinaryOpExpr and not .superNode inherits DotExpr and not .superNode inherits InheritsExpr) #(.superNode inherits AssignExpr and (.superNode to AssignExpr).right is this)
+				return 'typeof(' + defi.sharpName + ')'
+		return defi.sharpName
+
+	def writeSharpStmt(sw as SharpWriter) is override
+		assert .isCalling
+		sw.write('[_name]();')
+
+	get sharpAssignmentNames as List<of String>?
+		require
+			.didBindImp
+			.definition
+		body
+			if _definition inherits IVar
+				return _definition.sharpAssignmentNames
+			else
+				return nil
+
+	def writeSharpDefForBreakdown(sw as SharpWriter)
+		sharpName = .sharpName
+		if (.type inherits TypeType or .isKindOf(.compiler.libraryType('System.Type'))) and .definition inherits IType and 'typeof(' not in sharpName
+			sw.write('typeof([.sharpName])')
+		else
+			base.writeSharpDefForBreakdown(sw)
+
+
+class IfExpr
+	inherits Expr
+
+	var _cond as Expr
+	var _tpart as Expr
+	var _fpart as Expr
+
+	def init(token as IToken, cond as Expr, tpart as Expr, fpart as Expr)
+		base.init(token)
+		_cond = cond
+		_tpart = tpart
+		_fpart = fpart
+
+	def addSubFields is override
+		base.addSubFields
+		.addField('cond', _cond)
+		.addField('tpart', _tpart)
+		.addField('fpart', _fpart)
+
+	get hasError as bool is override
+		if base.hasError
+			return true
+		if _cond.hasError
+			return true
+		if _tpart.hasError
+			return true
+		if _fpart.hasError
+			return true
+		return false
+
+	def _bindImp is override
+		base._bindImp
+		tpart = _tpart
+		fpart = _fpart
+		hadError = false
+		try
+			_cond.bindImp
+		catch ne as NodeException
+			.compiler.recordError(ne)
+			hadError = true
+		if not hadError and not _cond.type.isDescendantOf(.compiler.boolType)
+			_cond = TruthExpr(_cond).bindAll to TruthExpr  # CC: axe cast when "as same"
+		try
+			_tpart.bindImp
+		catch ne as NodeException
+			.compiler.recordError(ne)
+			hadError = true
+		try
+			_fpart.bindImp
+		catch ne as NodeException
+			.compiler.recordError(ne)
+			hadError = true
+		if hadError
+			_type = .compiler.passThroughType
+			return
+		assert tpart.type
+		assert fpart.type
+		_type = tpart.type.greatestCommonDenominatorWith(fpart.type to !)
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		sw.write('(')
+		_cond.writeSharpDef(sw)
+		sw.write('?')
+		_tpart.writeSharpDef(sw)
+		sw.write(':')
+		_fpart.writeSharpDef(sw)
+		sw.write(')')
+
+	def toCobraSource as String is override
+		return 'if([_cond.toCobraSource], [_tpart.toCobraSource], [_fpart.toCobraSource])'
+
+	def writeSharpBreakdownItems(sw as SharpWriter)
+		base.writeSharpBreakdownItems(sw)
+
+		sw.write(', +1') # indent
+
+		_cond.writeSharpBreakdownItems(sw)
+		# only one of the target expressions is actually evaluated
+
+		# tpart:
+		src = Utils.sharpStringLiteralFor(_tpart.toCobraSource)
+		sw.write(', [src], new CobraDirectString(')
+		_cond.writeSharpDefForBreakdown(sw)
+		sw.write(' ? CobraCore.ToTechString(')
+		_tpart.writeSharpDefForBreakdown(sw)
+		sw.write(') : "(not-evaluated)")')
+
+		# fpart:
+		src = Utils.sharpStringLiteralFor(_fpart.toCobraSource)
+		sw.write(', [src], new CobraDirectString(')
+		_cond.writeSharpDefForBreakdown(sw)
+		sw.write(' ? "(not-evaluated)" : CobraCore.ToTechString(')
+		_fpart.writeSharpDefForBreakdown(sw)
+		sw.write('))')
+
+		sw.write(', -1') # dedent
+
+
+class IndexExpr
+	inherits Expr
+	implements IPotentialTypeExpr  # because String[] is a type, not an indexer invocation
+
+	var _target as Expr
+	var _args as List<of Expr>
+	var _isArrayType as bool
+	var _definition as IMember?
+	
+	def init(token as IToken, target as Expr, args as List<of Expr>)
+		base.init(token)
+		_target = target
+		_args = args
+
+	def addSubFields is override
+		base.addSubFields
+		.addField('target', _target)
+		.addField('args', _args)
+
+	get isArrayType from var
+
+	get definition from var
+
+	get target from var
+
+	get args from var
+
+	get hasError as bool is override
+		if base.hasError
+			return true
+		if _target.hasError
+			return true
+		for arg in _args
+			if arg.hasError
+				return true
+		return false
+
+	get potentialType as IType?
+		assert .didBindImp
+		return if(.isArrayType, .type, nil)
+	
+	def _bindImp is override
+		base._bindImp
+		_target.bindImp
+		args = _args
+		if args.count == 0
+			if _target.isKindOf(.compiler.libraryType('System.Type')) or _target.type inherits TypeType  # TODO: lameness. Make TypeType() inherit System.Type, or lose TypeType and/or have an .isAType property and use everywhere
+				if _target inherits IPotentialTypeExpr and (pt = (_target to IPotentialTypeExpr).potentialType)
+					_type = ArrayType(pt)
+					_isArrayType = true
+					return
+				else
+					.throwError('Unknown array type.')
+			else
+				.throwError('Invalid index expression or array type.')
+		hasArgError = false
+		for arg in args
+			try
+				arg.bindImp
+			catch ne as NodeException
+				hasArgError = true
+				.compiler.recordError(ne)
+		target = .target
+		if hasArgError or target.hasError
+			_type = .compiler.passThroughType
+		else if _type is nil
+			# CC: use a list comprehension to get the types
+			argTypes = List<of IType>()
+			for arg in args
+				argTypes.add(arg.type to !)
+			_definition = target.memberForName(r'[]')  # TODO: will this need to be 'Index' to match DLLs/C#/VB?
+			if _definition is nil
+				if target.receiverType is .compiler.passThroughType
+					_type = .compiler.passThroughType
+					return
+				if target.receiverType.isDynamic
+					_type = .compiler.dynamicType
+					return
+				.throwError('Cannot find an indexer in "[target.toCobraSource]" whose type is "[target.receiverType.name]".')
+			assert _definition
+			if _definition inherits MemberOverload
+				# TODO
+				pass
+			else if _definition inherits Indexer
+				indexer = _definition
+				params = indexer.params
+				if args.count <> params.count
+					.throwError('The method "[_definition.name]" is expecting [params.count] argument[Utils.plural(params)], but [args.count] are being supplied in this call.')
+				for i = 0 .. args.count
+					arg = args[i]
+					param = params[i]
+					if arg.hasError
+						break
+					assert arg.didBindImp, arg
+					assert param.didBindInt, param
+					if arg.canBeAssignedTo(param.type)
+						arg.contextType = param.type
+					else
+						if false
+							print '<> arg = ' stop
+							arg.writeDeepString
+							print '<> param = ' stop
+							param.writeDeepString
+						.throwError('Argument [i+1] of indexer expects type [param.type.name], but the call is supplying type [arg.type.name].')
+			else
+				throw FallThroughException(_definition)
+			_type = _definition.resultType
+			assert _type
+
+	def toCobraSource as String is override
+		sb = StringBuilder()
+		sb.append(_target.toCobraSource)
+		sb.append(r'[')
+		sep = ''
+		for arg in _args
+			sb.append(sep)
+			sb.append(arg.toCobraSource)
+			sep = ', '
+		sb.append(']')
+		return sb.toString
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		if _target.type.isDynamic
+			sw.write('CobraImp.GetIndexerValue(')
+			_target.writeSharpDef(sw, false)
+			for expr in _args
+				sw.write(', ')
+				expr.writeSharpDef(sw, false)
+			sw.write(')')
+			return
+		if parens
+			sw.write('(')
+		if _target inherits IdentifierExpr
+			if _target.isKindOf(.compiler.libraryType('System.Type'))
+				# here we're favoring "Foo[]" being an array type rather than a shared indexer
+				sw.write(_target.name)
+				handled = true
+		if not handled
+			_target.writeSharpDef(sw)
+		sw.write(r'[')
+		sep = ''
+		for expr in _args
+			sw.write(sep)
+			expr.writeSharpDefInContext(sw)
+			sep = ', '
+		sw.write(']')
+		if parens
+			sw.write(')')
+
+	def writeSharpBreakdownItems(sw as SharpWriter)
+		base.writeSharpBreakdownItems(sw)
+		sw.write(', +1')
+		_target.writeSharpBreakdownItems(sw)
+		for expr in _args
+			expr.writeSharpBreakdownItems(sw)
+		sw.write(', -1')
+
+
+class IsNilExpr
+	inherits Expr
+
+	var _expr as Expr
+
+	def init(token as IToken, expr as Expr)
+		base.init(token)
+		_expr = expr
+
+	get hasError as bool is override
+		if base.hasError
+			return true
+		if _expr.hasError
+			return true
+		return false
+
+	def _bindImp is override
+		base._bindImp
+		_expr.bindImp
+		_type = .compiler.boolType
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		if parens
+			sw.write('(')
+		sw.write('(')
+		_expr.writeSharpDef(sw)
+		sw.write(')')
+		sw.write('==null')
+		if parens
+			sw.write(')')
+
+	def writeSharpBreakdownItems(sw as SharpWriter)
+		base.writeSharpBreakdownItems(sw)
+		_expr.writeSharpBreakdownItems(sw)
+
+
+class IsNotNilExpr
+	inherits Expr
+
+	var _expr as Expr
+
+	def init(token as IToken, expr as Expr)
+		base.init(token)
+		_expr = expr
+
+	get hasError as bool is override
+		if base.hasError
+			return true
+		if _expr.hasError
+			return true
+		return false
+
+	def _bindImp is override
+		base._bindImp
+		_expr.bindImp
+		_type = .compiler.boolType
+
+	def toCobraSource as String is override
+		return '[_expr.toCobraSource] is not nil'
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		if parens
+			sw.write('(')
+		sw.write('(')
+		_expr.writeSharpDef(sw)
+		sw.write(')')
+		sw.write('!=null')
+		if parens
+			sw.write(')')
+
+	def writeSharpBreakdownItems(sw as SharpWriter)
+		base.writeSharpBreakdownItems(sw)
+		_expr.writeSharpBreakdownItems(sw)
+
+
+class MemberExpr
+	inherits Expr
+	implements IDotRightExpr
+	"""
+	Example members are fields and properties and methods without arguments.
+	"""
+
+	var _name as String
+	var _definition as IMember?
+	var _isReference as bool
+
+	def init(token as IToken)
+		.init(token, token.text)
+
+	def init(token as IToken, name as String)
+		base.init(token)
+		_name = name
+
+	def addMinFields is override
+		base.addMinFields
+		.addField('name', _name)
+		.addField('isReference', _isReference)
+
+	def addRefFields is override
+		base.addRefFields
+		.addField('definition', _definition)
+
+	get args as List<of Expr>
+		return List<of Expr>()
+
+	get definition from var
+
+	pro isReference from var
+		"""
+		Returns true if this member expression is a _reference_ to a member instead of an invocation to it.
+		This is set by RefExpr and otherwise is false.
+		"""
+
+	get member as IMember?
+		return _definition
+
+	get isCalling as bool is override
+		assert _definition
+		return _definition.isMethod
+
+	get name from var
+
+	def _bindImp is override
+		base._bindImp
+		assert .superNode inherits BinaryOpExpr
+		assert .binarySuperNode.op == 'DOT'
+		assert .binarySuperNode.right is this
+		if _definition is nil or _type is nil
+			if not .binarySuperNode.left.didBindImp
+				assert .binarySuperNode.left.hasError, .binarySuperNode.left
+				# we get here for Cobra code like "obj.foo.bar" where "foo" is not found
+				_type = .compiler.passThroughType
+				return
+			_definition = .binarySuperNode.left.memberForName(_name)
+			if _definition is nil
+				if .binarySuperNode.left.receiverType is .compiler.passThroughType
+					_type = .compiler.passThroughType
+					return
+				if .binarySuperNode.left.receiverType.isDynamic
+					_type = .compiler.dynamicType
+					return
+				if Utils.isCapped(_name)
+					sugg = 'If the name is essentially correct, try the lowercase version ("[Utils.uncapped(_name)]") instead.'
+				else
+					sugg = ''
+				left = .binarySuperNode.left
+				isBoxAccess = left inherits IdentifierExpr and (left to IdentifierExpr).definition inherits Box  # like "Console.writeLine" where the receiver is a literal class or struct reference
+				whoseTypeIs = if(isBoxAccess, '', ' whose type is "[left.receiverType.name]"')
+				.throwError('Cannot find a definition for "[_name]" in "[left.toCobraSource]"[whoseTypeIs]. [sugg]')
+			assert _definition
+			if _definition inherits IType
+				effectiveType as IType = .compiler.typeType  # namespace, class, interface
+				receiverType as IType? = _definition
+			else
+				effectiveType = _definition.resultType
+				receiverType = nil
+			_type = effectiveType
+			# TODO: there should be a subclass of BinaryOpExpr called DotExpr and it should do the following work and maybe even the work above.
+			# TODO: _receiverType = receiverType
+			.binarySuperNode.definition = _definition  # TODO: is this needed?
+			.binarySuperNode.type = .type  # the type of foo.bar is what bar returns. A MemberExpr is the "bar" part.
+			.binarySuperNode.receiverType = receiverType
+		assert _type
+
+	def toCobraSource as String is override
+		return _name
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		assert .superNode inherits DotExpr
+		sw.write(Utils.capped(_name))
+		if _definition and (_definition.isMethod or _name=='toString') and not _isReference
+			sw.write('()')
+
+	def writeSharpBreakdownItems(sw as SharpWriter) is override
+		pass
+
+
+class OldExpr
+	inherits Expr
+
+	var _expr as Expr
+	var _sharpVarName as String?
+
+	def init(token as IToken, expr as Expr)
+		base.init(token)
+		_expr = expr
+
+	pro sharpVarName from var
+
+	get name as String
+		return 'old'
+
+	get hasError as bool is override
+		if base.hasError
+			return true
+		if _expr.hasError
+			return true
+		return false
+
+	def addSubFields is override
+		base.addSubFields
+		.addField('expr', _expr)
+
+	def _bindImp is override
+		base._bindImp
+		.curCodeMember.addOldExpr(this)  # will set the sharpVarName
+		_expr.bindImp
+		_type = _expr.type
+		assert _type
+
+	def writeSharpAssignment(sw as SharpWriter)
+		require
+			.didBindImp
+			.sharpVarName
+			.type
+		body
+			sw.write('[.type.sharpRef] [_sharpVarName] = ')
+			_expr.writeSharpDef(sw)
+			sw.write(';\n')
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		assert _sharpVarName
+		# this gets called when generating the `ensure` code
+		sw.write(_sharpVarName)
+
+
+class PostCallExpr
+	inherits Expr
+	"""
+	Covers cases like:
+		obj[i]('x')
+		String[](10)
+		Foo.Bar.Baz[](0)
+	For "bar.foo('x')" that's a binary dot expression with a CallExpr on the right hand side.
+	For "Car()" or "someType()" that's also a CallExpr.
+	"""
+
+	shared
+	
+		def isTargetAcceptable(expr as Expr) as bool
+			"""
+			Returns true if the given expression can be called.
+			Do not pass expressions that fail this test to the PostCallExpr init.
+			"""
+			return expr inherits TypeExpr or expr inherits IndexExpr
+
+	var _expr as Expr
+	var _args as List<of Expr>
+
+	def init(token as IToken, expr as Expr, args as List<of Expr>)
+		require expr inherits TypeExpr or expr inherits IndexExpr
+		# TODO: I think the allowance of IndexExpr can be axed when AST transforms are supported and IndexExpr recognizes when it represents an array type
+		base.init(token)
+		_expr = expr
+		_args = args
+
+	def addSubFields is override
+		base.addSubFields
+		.addField('expr', _expr)
+		.addField('args', _args)
+
+	get hasError as bool is override
+		if base.hasError
+			return true
+		if _expr.hasError
+			return true
+		for arg in _args
+			if arg.hasError
+				return true
+		return false
+
+	def _bindImp is override
+		base._bindImp
+		for arg in _args
+			try
+				arg.bindImp
+			catch ne as NodeException
+				.compiler.recordError(ne)
+		_expr.bindImp
+		if _expr inherits TypeExpr
+			# instantiation
+			assert _expr.containedType
+			_type = _expr.containedType
+		else if _expr inherits IndexExpr
+			# could be array instantiation or calling the result of stuff[i] which could be System.Type, a delegate or what-have-you
+			if (target = _expr.target) inherits IPotentialTypeExpr
+				_type = target.potentialType
+				assert _type, target
+			else
+				assert false, 'what is this? _expr=[_expr]'
+		else
+			# one example where this happened: x to SomeType()
+			# which yielded: PostCallExpr(expr=ToExpr(...))
+			# TODO: can probably make this an error now
+			assert false, 'what is this? _expr=[_expr]'
+
+	def toCobraSource as String is override
+		sb = StringBuilder()
+		sb.append(_expr.toCobraSource)
+		sb.append('(')
+		sep = ''
+		for arg in _args
+			sb.append(sep)
+			sb.append(arg.toCobraSource)
+			sep = ', '
+		sb.append(')')
+		return sb.toString
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		if parens
+			sw.write('(')
+		isArrayCreation = false
+		if _expr inherits TypeExpr
+			sw.write('new ')  # TODO: move down?
+			at = _expr.containedType
+			if at inherits ArrayType
+				# arrays are a very different case
+				# example: int[](10)
+				sw.write(at.theWrappedType.sharpRef)
+				isArrayCreation = true
+		if not isArrayCreation  # CC: combine next if when if-inherits gets smarter
+			if _expr inherits IndexExpr
+				subExpr = _expr.target
+				if subExpr.isKindOf(.compiler.libraryType('System.Type')) or subExpr.type inherits TypeType  # TODO: more "check System.Type and TypeType" lameness
+					# example: String[](10)
+					sw.write('new ')
+					if subExpr inherits IdentifierExpr
+						# special case to avoid IdentifierExpr from generating: typeof(Foo)
+						sw.write(subExpr.name)
+					else
+						subExpr.writeSharpDef(sw, false)
+					isArrayCreation = true
+		if not isArrayCreation
+			_expr.writeSharpDef(sw)
+		sw.write(if(isArrayCreation, r'[', '('))
+		sep = ''
+		for arg in _args
+			sw.write(sep)
+			arg.writeSharpDef(sw, false)
+			sep = ','
+		sw.write(if(isArrayCreation, r']', ')'))
+		if parens
+			sw.write(')')
+
+	def writeSharpBreakdownItems(sw as SharpWriter)
+		base.writeSharpBreakdownItems(sw)
+		sw.write(', +1')
+		_expr.writeSharpBreakdownItems(sw)
+		for expr in _args
+			expr.writeSharpBreakdownItems(sw)
+		sw.write(', -1')
+
+
+class RefExpr
+	inherits Expr
+	"""
+	A `ref` expression is used to refer to a method without invoking it:
+		ref obj.foo
+		ref _foo
+	"""
+
+	var _expr as Expr
+	
+	def init(token as IToken, expr as Expr)
+		base.init(token)
+		_expr = expr
+
+	def addSubFields
+		base.addSubFields
+		.addField('expr', _expr)
+
+	get expr from var
+
+	get hasError as bool is override
+		if base.hasError
+			return true
+		if _expr.hasError
+			return true
+		return false
+
+	def _bindImp is override
+		base._bindImp
+		_expr.bindImp
+		if _expr inherits DotExpr
+			right = _expr.right
+			if right inherits MemberExpr
+				if right.definition inherits AbstractMethod
+					right.isReference = true
+				else
+					.throwError('Only methods can be referenced, not [right.definition.englishName].')
+			else if right inherits CallExpr
+				.throwError('Cannot call a method that is preceded by `ref`.')
+			else
+				throw FallThroughException([this, _expr, right])
+		else if _expr inherits IdentifierExpr
+			if _expr.definition inherits AbstractMethod
+				pass
+			else
+				.throwError('Only methods can be referenced, not [(_expr.definition to dynamic).englishName].')
+		else
+			.throwError('Unexpected reference. Refer to methods after `ref` or remove `ref`.')
+		_type = .compiler.libraryType('System.Delegate')  # TODO: won't be sufficient for long
+
+	def toCobraSource as String is override
+		return 'ref ' + _expr.toCobraSource
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		if parens
+			sw.write('(')
+		_expr.writeSharpDef(sw, false)
+		if parens
+			sw.write(')')
+
+	def writeSharpBreakdownItems(sw as SharpWriter)
+		base.writeSharpBreakdownItems(sw)
+		# TODO
+
+
+class SharpExpr
+	inherits Expr
+
+	var _expr as StringLit
+
+	def init(token as IToken, expr as Expr)
+		base.init(token)
+		if expr inherits StringLit  # TODO:? make this an arg type
+			_expr = expr
+		else
+			assert false, expr
+
+	get hasError as bool is override
+		if base.hasError
+			return true
+		if _expr.hasError
+			return true
+		return false
+
+	def toCobraSource as String is override
+		return "$sharp('[_expr.toCobraSource]')"
+
+	def _bindImp is override
+		base._bindImp
+		_type = .compiler.passThroughType
+		_expr.bindImp
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		if parens
+			sw.write('(')
+		sw.write(_expr.token.value)
+		if parens
+			sw.write(')')
+
+
+class SliceExpr
+	inherits Expr
+	"""
+	Just like Python slices.
+	"""
+
+	var _target as Expr
+	var _start as Expr?
+	var _stop as Expr?
+	var _step as Expr?
+
+	def init(token as IToken, target as Expr, start as Expr?, stopp as Expr?, stepp as Expr?)
+		base.init(token)
+		_target = target
+		_start = start
+		_stop = stopp
+		_step = stepp
+
+	def addSubFields
+		base.addSubFields
+		.addField('target', _target)
+		.addField('start', _start)
+		.addField('stop', _stop)
+		.addField('step', _step)
+
+	get hasError as bool is override
+		if base.hasError
+			return true
+		if _target.hasError
+			return true
+		if _start and _start.hasError
+			return true
+		if _stop and _stop.hasError
+			return true
+		if _step and _step.hasError
+			return true
+		return false
+
+	def _bindImp
+		base._bindImp
+		intType = .compiler.intType
+		try
+			_target.bindImp
+		catch ne as NodeException
+			.compiler.recordError(ne)
+		success
+			if not _isSequence(_target.type to !)
+				.throwError('Cannot slice values of type "[_target.type.name]". You can slice strings, arrays, IList and IList<of>.')
+		if _start
+			try
+				_start.bindImp
+			catch ne as NodeException
+				.compiler.recordError(ne)
+			success
+				if _start.type.isDynamic
+					_start.contextType = intType
+				else if not _start.isKindOf(intType)
+					_start.recordError('The start index of the slice is type "[_start.type.name]", but should be "int".')
+		if _stop
+			try
+				_stop.bindImp
+			catch ne as NodeException
+				.compiler.recordError(ne)
+			success
+				if _stop.type.isDynamic
+					_stop.contextType = intType
+				else if not _stop.isKindOf(intType)
+					_stop.recordError('The stop index of the slice is type "[_stop.type.name]", but should be "int".')
+		if _step
+			try
+				_step.bindImp
+			catch ne as NodeException
+				.compiler.recordError(ne)
+			success
+				if _step.type.isDynamic
+					_step.contextType = intType
+				else if not _step.isKindOf(intType)
+					_step.recordError('The step of the slice is type "[_step.type.name]", but should be "int".')
+		if _target.hasError
+			_type = .compiler.passThroughType
+		else
+			_type = _target.type
+
+	def toCobraSource as String is override
+		sb = StringBuilder()
+		sb.append(_target.toCobraSource)
+		sb.append(r'[')
+		if _start
+			sb.append(_start.toCobraSource)
+		sb.append(':')
+		if _stop
+			sb.append(_stop.toCobraSource)
+		if _step
+			sb.append(':')
+			sb.append(_step.toCobraSource)
+		sb.append(']')
+		return sb.toString
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		sw.write('CobraImp.GetSlice(')
+		isArray = _target.type inherits ArrayType
+		if isArray
+			sw.write('(System.Array)(')  # or C# can't disambiguate the GetSlice() overloads
+		_target.writeSharpDef(sw, false)
+		if isArray
+			sw.write(')')
+		sw.write(',')
+		if _start is nil
+			sw.write('null')
+		else
+			_start.writeSharpDefInContext(sw, false)
+		sw.write(',')
+		if _stop is nil
+			sw.write('null')
+		else
+			_stop.writeSharpDefInContext(sw, false)
+		sw.write(',')
+		if _step is nil
+			sw.write('null')
+		else
+			_step.writeSharpDefInContext(sw, false)
+		sw.write(')')
+
+	def writeSharpBreakdownItems(sw as SharpWriter)
+		base.writeSharpBreakdownItems(sw)
+		sw.write(', +1')
+		_target.writeSharpBreakdownItems(sw)
+		if _start
+			_start.writeSharpBreakdownItems(sw)
+		if _stop
+			_stop.writeSharpBreakdownItems(sw)
+		if _step
+			_step.writeSharpBreakdownItems(sw)
+		sw.write(', -1')
+
+
+class TruthExpr
+	inherits Expr
+	"""
+	A truth expr wraps an expression such that it can be used where a bool is expected in .NET/C#.
+	For example, if passed an integer typed expression, the truth expression will wrap it with a
+	comparison 0!=expr.
+	Statically typed bools are passed straight through.
+	The `dynamic` and `dynamic?` types use a run-time service.
+	Other nilable types are checked for nil.
+	"""
+
+	enum SharpTreatment
+		AsIs
+		InvokeRuntime
+		CompareToNull
+		CompareToZero
+		CompareToZeroChar
+		
+	var _expr as Expr
+	var _origExpr as Expr
+	var _notExpr as UnaryOpExpr?
+	var _sharpTreatment as SharpTreatment
+	
+	def init(expr as Expr)
+		.init(expr, nil)
+
+	def init(expr as Expr, notExpr as UnaryOpExpr?)
+		"""
+		Pass the notExpr if the truth expression is the target of the not operator.
+		This affects warnings generated by TruthExpr.
+		"""
+		base.init(expr.token)
+		_origExpr = _expr = expr
+		_notExpr = notExpr
+
+	def addMinFields is override
+		base.addMinFields
+		.addField('sharpTreatment', _sharpTreatment)
+
+	def addSubFields is override
+		base.addSubFields
+		.addField('expr', _expr)
+		.addField('sharpTreatment', _sharpTreatment)
+
+	get expr from var
+
+	get hasError as bool is override
+		if base.hasError
+			return true
+		if _expr.hasError
+			return true
+		return false
+
+	get notExpr from var
+
+	def _bindImp
+		base._bindImp
+		_expr.bindImp
+		type = _expr.type
+		if type is .compiler.boolType
+			_sharpTreatment = SharpTreatment.AsIs
+		else if type inherits NumberType
+			_sharpTreatment = SharpTreatment.CompareToZero
+		else if $sharp('_expr is NilLiteral')
+			.compiler.warning(this, 'The value nil will always evaluate to false.')
+			_expr = BoolLit(_expr.token, false)
+			_expr.bindImp
+		else if type inherits NilableType
+			if type.theWrappedType inherits DynamicType
+				_sharpTreatment = SharpTreatment.InvokeRuntime
+			else
+				_sharpTreatment = SharpTreatment.CompareToNull
+		else if type inherits DynamicType
+			_sharpTreatment = SharpTreatment.InvokeRuntime
+		else if _expr.isKindOf(.compiler.passThroughType)
+			_sharpTreatment = SharpTreatment.InvokeRuntime
+		else if type.isReference
+			_sharpTreatment = SharpTreatment.CompareToNull
+		else if type inherits CharType
+			_sharpTreatment = SharpTreatment.CompareToZeroChar
+		else
+			throw FallThroughException(this)
+		if type.isReference and not type inherits NilableType and not type inherits NilType and not type inherits PassThroughType and not type inherits DynamicType
+			hint = 'You can remove the expression'
+			if _notExpr
+				if _expr.isKindOf(.compiler.libraryBox('System.String'))
+					hint += ' or check for an empty string.'
+				else if type inherits ArrayType
+					hint += ' or check for an empty array.'
+				else if _expr.isKindOf(.compiler.libraryBox('System.Collections.ICollection')) or _expr.isKindOf(.compiler.libraryBox('System.Collections.Generic.ICollection<of>'))
+					hint += ' or check for an empty collection.'
+				else
+					hint += '.'
+				.compiler.warning(_notExpr, 'The expression "[_notExpr.toCobraSource]" (of type "[type.name]") will never evaluate to false because the expression is not nilable. [hint]')
+			else
+				if _expr.isKindOf(.compiler.libraryBox('System.String'))
+					hint += ' or check for non-empty strings with ".length".'
+				else if type inherits ArrayType
+					hint += ' or check for non-empty arrays with ".length".'
+				else if _expr.isKindOf(.compiler.libraryBox('System.Collections.ICollection')) or _expr.isKindOf(.compiler.libraryBox('System.Collections.Generic.ICollection<of>'))
+					hint += ' or check for non-empty collections with ".count".'
+				else
+					hint += '.'
+				.compiler.warning(this, 'The expression "[_expr.toCobraSource]" (of type "[type.name]") will always evaluate to true because it is not nilable. [hint]')
+		_type = .compiler.boolType
+
+	def toCobraSource as String is override
+		return _origExpr.toCobraSource
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		lparen = if(parens, '(', '')
+		rparen = if(parens, ')', '')
+		branch _sharpTreatment
+			on SharpTreatment.AsIs
+				_expr.writeSharpDef(sw, parens)
+			on SharpTreatment.InvokeRuntime
+				sw.write('CobraImp.IsTrue(')
+				_expr.writeSharpDef(sw, false)
+				sw.write(')')				
+			on SharpTreatment.CompareToZero
+				sw.write('[lparen]0!=')
+				_expr.writeSharpDef(sw, true)
+				sw.write(rparen)
+			on SharpTreatment.CompareToZeroChar
+				sw.write("[lparen]'\\0'!=")
+				_expr.writeSharpDef(sw, true)
+				sw.write(rparen)
+			on SharpTreatment.CompareToNull
+				sw.write('[lparen]null!=')
+				_expr.writeSharpDef(sw, true)
+				sw.write(rparen)
+
+	def writeSharpBreakdownItems(sw as SharpWriter) is override
+		# leaving out the base class is intentional:
+		# base.writeSharpBreakdownItems(sw, isFirstExpr)
+		_expr.writeSharpBreakdownItems(sw)
+
+
+class TypeExpr
+	inherits Expr
+	implements IPotentialTypeExpr, ITypeProxy
+	"""
+	Unlike the other expressions that implement IPotentialType, a TypeExpr always represents a type.
+	Hence it implements ITypeProxy as well.
+	"""
+	
+	var _typeNode as ITypeProxy?
+	var _containedType as IType?
+
+	def init(token as IToken, typeNode as ITypeProxy)
+		base.init(token)
+		_typeNode = typeNode
+
+	def init(typeNode as ITypeProxy)
+		.init((typeNode to ISyntaxNode).token, typeNode)  # TODO: hmmm this is kind of weird
+
+	def init(token as IToken, type as IType)
+		base.init(token)
+		_containedType = type
+		_receiverType = type
+
+	get hasError as bool is override
+		return base.hasError or .typeNode.hasError
+
+	get containedType from var
+
+	get potentialType as IType?
+		return .realType
+
+	get realType as IType
+		assert .didBindImp
+		assert _containedType
+		return _containedType to !
+		
+	get typeNode from var
+
+	def addRefFields is override
+		base.addRefFields
+		.addField('containedType', _containedType)
+
+	def addSubFields is override
+		base.addSubFields
+		.addField('typeNode', _typeNode)
+
+	def toCobraSource as String is override
+		assert _containedType
+		return _containedType.name
+
+	def _bindImp is override
+		base._bindImp
+		if _typeNode
+			_containedType = _receiverType = _typeNode.realType
+		_type = .compiler.typeType
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		sw.write(_containedType.sharpRef)
+
+	def writeSharpDefForBreakdown(sw as SharpWriter) is override
+		sw.write('typeof(')
+		.writeSharpDef(sw)
+		sw.write(')')
+
+
+class UnaryOpExpr
+	inherits Expr
+
+	var _op as String
+	var _expr as Expr
+
+	def init(token as IToken, op as String, expr as Expr)
+		require op in ['MINUS', 'PLUS', 'NOT']
+		base.init(token)
+		_op = op
+		_expr = expr
+
+	def addMinFields
+		base.addMinFields
+		.addField('op', _op)
+
+	def addSubFields
+		base.addSubFields
+		.addField('expr', _expr)
+
+	get hasError as bool is override
+		if base.hasError
+			return true
+		if _expr.hasError
+			return true
+		return false
+
+	get op from var
+
+	get expr from var
+
+	def _bindImp is override
+		base._bindImp
+		_expr.bindImp
+		if _type is nil
+			_type = _expr.type
+		branch _op
+			on 'MINUS'
+				_type = _expr.type
+			on 'PLUS'
+				_type = _expr.type
+			on 'NOT'
+				if _expr.type is not .compiler.boolType
+					_expr = TruthExpr(_expr, this).bindAll to TruthExpr
+					_type = .compiler.boolType
+			else
+				throw FallThroughException(_op)
+
+	def toCobraSource as String is override
+		branch _op
+			on 'MINUS': op = '-'
+			on 'PLUS': op = '+'
+			on 'NOT': op = 'not '
+			else: throw FallThroughException(_op)
+		return op + _expr.toCobraSource
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		if _op == 'PLUS'
+			if parens
+				sw.write('(')
+			_expr.writeSharpDef(sw, false)
+			if parens
+				sw.write(')')
+			return
+		if _expr.type.isDynamic
+			specs = OperatorSpecs.unaryOpSpecsByCobraText
+			assert specs.containsKey(.token.text)
+			spec = specs[.token.text]
+			opText = Utils.sharpStringLiteralFor(spec.opMethodName)
+			sw.write('CobraImp.DynamicOp([opText], ')
+			_expr.writeSharpDef(sw, false)
+			sw.write(')')
+			return
+		if parens
+			sw.write('(')
+		branch _op
+			on 'MINUS'
+				sw.write('-')
+			on 'NOT'
+				sw.write('!')
+			else
+				throw FallThroughException(_op)
+		_expr.writeSharpDef(sw)
+		if parens
+			sw.write(')')
+
+	def writeSharpBreakdownItems(sw as SharpWriter)
+		base.writeSharpBreakdownItems(sw)
+		sw.write(', +1')
+		_expr.writeSharpBreakdownItems(sw)
+		sw.write(', -1')
+
+
+##
+## Literals
+##
+
+class Literal
+	inherits Expr
+
+	def init(token as IToken)
+		base.init(token)
+
+	get asSharp as String
+		return ''
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		sw.write(.asSharp)
+
+
+class AtomicLiteral
+	inherits Literal
+
+	var _text as String
+
+	def init(token as IToken)
+		base.init(token)
+		_text = token.text
+
+	def bindImp as INode is override
+		base.bindImp
+		.checkType
+		return this
+
+	def checkType
+		assert _type, this
+
+	def _bindImp is override
+		base._bindImp
+
+	def toCobraSource as String is override
+		return _text
+
+	get willWriteSharpBreakdownItems as bool is override
+		return false
+
+
+class BoolLit
+	inherits AtomicLiteral
+
+	var _value as bool
+
+	def init(token as IToken)
+		require token.text in ['true', 'false']
+		base.init(token)
+		_value = token.text=='true'
+
+	def init(token as IToken, value as bool)
+		base.init(token)
+		_value = value
+
+	def _bindImp is override
+		base._bindImp
+		_type = .compiler.boolType
+
+	get asSharp as String is override
+		return if(_value, 'true', 'false')
+
+
+class CharLit
+	inherits AtomicLiteral
+
+	var _value as String  # TODO: should probably be char
+
+	def init(token as IToken)
+		require
+			token.which in ['CHAR_LIT_SINGLE', 'CHAR_LIT_DOUBLE']
+			token.value inherits String
+		body
+			base.init(token)
+			_value = token.value to String
+
+	def _bindImp is override
+		base._bindImp
+		_type = .compiler.charType
+
+	get asSharp as String is override
+		return "'" + _value.toString + "'"
+
+
+class DecimalLit
+	inherits AtomicLiteral
+
+	var _value as decimal
+
+	def init(token as IToken)
+		require token.value inherits decimal
+		base.init(token)
+		_value = token.value to decimal
+
+	def _bindImp is override
+		base._bindImp
+		_type = .compiler.decimalType
+
+	get asSharp as String is override
+		return _value.toString + 'm'
+
+
+class FloatLit
+	inherits AtomicLiteral
+
+	var _value as float
+
+	def init(token as IToken)
+		require token.value inherits float
+		base.init(token)
+		_value = token.value to float
+
+	def _bindImp is override
+		base._bindImp
+		_type = .compiler.floatType
+
+	get asSharp as String is override
+		s = _value.toString
+		if s.indexOf('.')==-1
+			s += '.0'
+		return s
+
+
+class IntegerLit
+	inherits AtomicLiteral
+
+	var _value as int
+
+	def init(token as IToken)
+		require token.value inherits int
+		base.init(token)
+		_value = token.value to int
+
+	def init(token as IToken, value as int)
+		base.init(token)
+		_value = value
+
+	def _bindImp is override
+		base._bindImp
+		_type = .compiler.intType
+
+	get asSharp as String is override
+		return _value.toString
+
+
+class NilLiteral
+	inherits AtomicLiteral
+
+	def init(token as IToken)
+		base.init(token)
+
+	def _bindImp is override
+		base._bindImp
+		_type = .compiler.nilType
+
+	get asSharp as String is override
+		return 'null'
+
+
+class StringLit
+	inherits AtomicLiteral
+
+	var _string as String  # String contents (with no surrounding quotes or escaping)
+
+	def init(token as IToken)
+		require token.which.startsWith('STRING')
+		base.init(token as IToken)
+		_string = token.value to String
+
+	get string from var
+
+	def _bindInt is override
+		if not _type
+			_type = .compiler.libraryType('System.String')
+		base._bindInt
+
+	def _bindImp is override
+		if not _type
+			_type = .compiler.libraryType('System.String')
+		base._bindImp
+
+	def toCobraSource as String is override
+		return .token.text
+
+	get asSharp as String is override
+		return Utils.sharpStringLiteralFor(_string)
+
+
+class StringSubstLit
+	inherits Literal
+
+	var _items as List<of Expr>
+
+	def init(items as List<of Expr>)
+		require items.count
+		base.init(items[0].token)
+		if true
+			_items = items
+		else
+			# TODO: the efficient, but not debugged case
+			# CC: potential
+			# _items = for item in items if not item inherits StringLit or item.string get item
+			_items = List<of Expr>()
+			for item in _items
+				if item inherits StringLit and not (item to StringLit).string.length
+					continue
+				_items.add(item)
+			assert _items.count
+
+	def addSubFields is override
+		base.addSubFields
+		.addField('items', _items)
+
+	get hasError as bool is override
+		if base.hasError
+			return true
+		for item in _items
+			if item.hasError
+				return true
+		return false
+
+	def toCobraSource as String is override
+		sb = StringBuilder()
+		for item in _items
+			if item inherits StringLit
+				sb.append(item.token.text)
+			else
+				sb.append(item.toCobraSource)
+		return sb.toString
+
+	def _bindImp is override
+		base._bindImp
+		for item in _items
+			try
+				item.bindImp
+			catch ne as NodeException
+				.compiler.recordError(ne)
+		if not _type
+			_type = .compiler.libraryType('System.String')
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		if _items.count>1
+			sw.write('CobraImp.MakeString(')
+		sep = ''
+		for item in _items
+			sw.write(sep)
+			if item inherits StringLit
+				item.writeSharpDef(sw, true)  # CC: axe the "true" when the bug about overload groups crossing inheritance is fixed
+			else if item inherits FormattedExpr
+				sw.write('CobraImp.ToString(')
+				item.expr.writeSharpDef(sw)
+				sw.write(',')
+				sw.write(Utils.sharpStringLiteralFor(item.format))
+				sw.write(')')
+			else
+				sw.write('CobraImp.ToString(')
+				item.writeSharpDef(sw, false)
+				sw.write(')')
+			sep = ','
+		if _items.count>1
+			sw.write(')')
+
+
+class FormattedExpr
+	inherits Expr
+	"""
+	This is used exclusively for string substitutions that have formatting:
+		'[i:N]'
+	"""
+
+	var _expr as Expr
+	var _format as String
+
+	def init(expr as Expr, format as String)
+		base.init(expr.token)
+		_expr = expr
+		_format = format
+
+	get expr from var
+
+	get format from var
+
+	get hasError as bool is override
+		if base.hasError
+			return true
+		if _expr.hasError
+			return true
+		return false
+
+	def toCobraSource as String is override
+		return '[_expr.toCobraSource]:[_format]'
+
+	def _bindImp is override
+		base._bindImp
+		_expr.bindImp
+		_type = .compiler.libraryType('System.String')
+
+
+class ThisOrBaseLit
+	inherits AtomicLiteral
+
+	def init(token as IToken, box as Box)
+		base.init(token)
+		_type = box
+
+
+class BaseLit
+	inherits ThisOrBaseLit
+
+	def init(token as IToken, box as Box)
+		base.init(token, box)
+
+	def checkType is override
+		pass
+
+	def memberForName(name as String) as IMember? is override
+		assert .didBindImp
+		assert _type
+		t = .receiverType
+		if t.superType
+			t = t.superType
+		return t.memberForName(name)
+
+	get asSharp as String is override
+		return 'base'
+
+	def toCobraSource as String is override
+		return 'base'
+
+
+class ThisLit
+	inherits ThisOrBaseLit
+
+	# TODO: somewhere it has to be error checked that you're not assigning to
+	# "this" (unless C# allows that which I doubt)
+
+	def init(token as IToken, box as Box)
+		base.init(token, box)
+
+	get isExplicit as bool
+		"""
+		Returns true if the `this` literal was explicitly present as in `this.foo` vs. implicitly present as in `.foo`.
+		"""
+		return .token.which <> 'DOT'
+
+	get asSharp as String is override
+		return 'this'
+
+	def toCobraSource as String is override
+		return 'this'
+
+
+class VarLit
+	inherits AtomicLiteral
+
+	var _propertyMember as ProperDexerXetter?
+	var _name as String
+	var _var as IVar?
+
+	def init(token as IToken, propertyMember as ProperDexerXetter)
+		base.init(token)
+		_propertyMember = propertyMember
+		_name = '_'+propertyMember.parent.name
+
+	def _bindImp is override
+		possible = _propertyMember.parent.box.symbolForName(_name, true)
+		if possible is nil
+			.throwError('Cannot find a class variable named "[_name]".')
+		else if possible inherits IVar
+			_var = possible
+		else
+			assert false, possible
+		_type = _var.type
+		_propertyMember = nil  # don't need this reference anymore
+		base._bindImp
+
+	get asSharp as String is override
+		return _name
+
+
+class CompositeLiteral
+	inherits Literal
+
+	def init(token as IToken)
+		base.init(token)
+
+
+class SequenceLit
+	is abstract
+	inherits CompositeLiteral
+
+	var _exprs as List<of Expr>
+
+	def init(token as IToken, exprs as List<of Expr>)
+		base.init(token)
+		_exprs = exprs
+
+	def addSubFields is override
+		base.addSubFields
+		.addField('exprs', _exprs)
+
+	get hasError as bool is override
+		if base.hasError
+			return true
+		for expr in _exprs
+			if expr.hasError
+				return true
+		return false
+
+	def _bindImp is override
+		base._bindImp
+		exceptions = List<of NodeException>()
+		for expr in _exprs
+			try
+				expr.bindImp
+			catch ne as NodeException
+				exceptions.add(ne)
+		if exceptions.count
+			throw NodeMultiException(exceptions)
+		if _type is nil
+			exprs = _exprs
+			if exprs.count==0
+				type = .compiler.dynamicType to IType
+			else
+				type = exprs[0].type to !
+				i = 1
+				while i<exprs.count
+					exprs[i].bindImp
+					type = exprs[i].type.greatestCommonDenominatorWith(type)
+					i += 1
+				# TODO: get rid of this hack:
+				if type.getType.name=='CobraType'
+					type = .compiler.libraryType('System.Object')
+			_type = _makeTypeWith(type)
+
+	def _makeTypeWith(type as IType) as IType is abstract
+
+	get openingBracket as String is abstract
+
+	def toCobraSource as String is override
+		sb = StringBuilder(.openingBracket)
+		sep = ''
+		for expr in _exprs
+			sb.append(sep)
+			sb.append(expr.toCobraSource)
+			sep = ', '
+		sb.append(']')
+		return sb.toString
+
+	def writeSharpBreakdownItems(sw as SharpWriter) is override  # CC: axe is override
+		base.writeSharpBreakdownItems(sw)
+		sw.write(', +1')
+		for expr in _exprs
+			expr.writeSharpBreakdownItems(sw)
+		sw.write(', -1')
+
+
+class ListLit
+	inherits SequenceLit
+
+	# CC: should just inherit this because no initializers are defined
+	def init(token as IToken, exprs as List<of Expr>)
+		base.init(token, exprs)
+
+	def _makeTypeWith(type as IType) as IType is override
+		return .compiler.libraryClass('System.Collections.Generic.List<of>').constructedTypeFor([type])
+
+	get openingBracket as String is override
+		return r'['
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		innerType = (_type to Box).genericParams[0]
+		sw.write('CobraImp.MakeList<[innerType.sharpRef]>(typeof([_type.sharpRef])')
+		if _exprs.count
+			sw.write(', ')
+			sep = ''
+			for expr in _exprs
+				sw.write(sep)
+				expr.writeSharpDef(sw, false)
+				sep = ', '
+		sw.write(')')
+
+
+class ArrayLit
+	inherits SequenceLit
+
+	# CC: should just inherit this because no initializers are defined
+	def init(token as IToken, exprs as List<of Expr>)
+		base.init(token, exprs)
+
+	def _makeTypeWith(type as IType) as IType is override
+		return ArrayType(type)
+
+	get openingBracket as String is override
+		return r'@['
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		sw.write('new [_type.sharpRef] { ')
+		if _exprs.count
+			sep = ''
+			for expr in _exprs
+				sw.write(sep)
+				expr.writeSharpDef(sw, false)
+				sep = ', '
+		sw.write(' }')
+
+
+class DictLit
+	inherits CompositeLiteral
+
+	var _entries as List<of List<of Expr>>
+
+	def init(token as IToken, entries as List<of List<of Expr>>)
+		base.init(token)
+		_entries = entries
+
+	def addSubFields is override
+		base.addSubFields
+		.addField('_entries', _entries)
+
+	get hasError as bool is override
+		if base.hasError
+			return true
+		for entry in _entries
+			for expr in entry
+				if expr.hasError
+					return true
+		return false
+
+	def _bindImp is override
+		base._bindImp
+		hadError = false
+		for entry in _entries
+			try
+				entry[0].bindImp
+			catch ne as NodeException
+				.compiler.recordError(ne)
+				hadError = true
+			try
+				entry[1].bindImp
+			catch ne as NodeException
+				.compiler.recordError(ne)
+				hadError = true
+		if hadError
+			return
+		if .type is nil
+			entries = _entries
+			if _entries.count==0
+				keyType = valueType = .compiler.dynamicType to IType
+			else
+				keyType   = entries[0][0].type to !
+				valueType = entries[0][1].type to !
+				i = 1
+				while i<entries.count
+					keyType   = entries[i][0].type.greatestCommonDenominatorWith(keyType)
+					valueType = entries[i][1].type.greatestCommonDenominatorWith(valueType)
+					i += 1
+			_type = .compiler.libraryClass('System.Collections.Generic.Dictionary<of,>').constructedTypeFor([keyType, valueType])
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		assert (_type to Box).genericParams.count==2
+		keyType   = (_type to Box).genericParams[0]
+		valueType = (_type to Box).genericParams[1]
+		sw.write('CobraImp.MakeDict<[keyType.sharpRef],[valueType.sharpRef]>(typeof([_type.sharpRef])')
+		if _entries.count
+			sw.write(', ')
+			sep = ''
+			for entry in _entries
+				sw.write(sep)
+				entry[0].writeSharpDef(sw)
+				sw.write(',')
+				entry[1].writeSharpDef(sw)
+				sep = ', '
+		sw.write(')')
+
+	def writeSharpBreakdownItems(sw as SharpWriter) is override  # CC: axe is override
+		base.writeSharpBreakdownItems(sw)
+		sw.write(', +1')
+		for entry in _entries
+			# CC: keyExpr, valueExpr = entry
+			keyExpr = entry[0]
+			valueExpr = entry[1]
+			keyExpr.writeSharpBreakdownItems(sw)
+			valueExpr.writeSharpBreakdownItems(sw)
+		sw.write(', -1')
+
+
+class ToNilableOrNotExpr
+	is abstract
+	inherits Expr
+	"""
+	The abstract base class for ToNilableExpr and ToNonNilableExpr which have much in common.
+	"""
+	
+	var _rightTok as IToken
+	var _expr as Expr
+
+	def init(opToken as IToken, rightTok as IToken, expr as Expr)
+		base.init(opToken)
+		_rightTok = rightTok
+		_expr = expr
+
+	get rightTok from var
+	
+	get expr from var
+
+	def _bindImp
+		base._bindImp
+		_expr.bindImp
+
+	def toCobraSource as String is override
+		sb = StringBuilder()
+		sb.append(_expr.toCobraSource)
+		sb.append(' to ')
+		sb.append(_rightTok.text)
+		return sb.toString
+
+	def writeSharpBreakdownItems(sw as SharpWriter)
+		base.writeSharpBreakdownItems(sw)
+		_expr.writeSharpBreakdownItems(sw)
+
+
+class ToNilableExpr
+	inherits ToNilableOrNotExpr
+	"""
+	Casts an expression to the nilable version of its type.
+	
+	When coding in Cobra:
+
+	You would do this primarily when the expression is on the right hand side of an assignment and
+	you want the left hand var to by implicitly typed as nilable so you can assign nil to it later.
+	
+	ex: name = obj.name to ?
+	ex: age = customer.age to ?
+	"""
+	
+	def init(opToken as IToken, rightTok as IToken, expr as Expr)
+		base.init(opToken, rightTok, expr)
+
+	def _bindImp
+		base._bindImp
+		if _expr.type inherits NilableType
+			_type = _expr.type
+			.compiler.warning(this, 'The given expression is already nilable so "to ?" is redundant. You can remove it.')  # TODO: needs test case
+		else
+			_type = NilableType(_expr.type)
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		if _expr.type.isReference
+			# In C#/.NET, reference types are always "nilable"
+			_expr.writeSharpDef(sw)
+		else
+			# ex: ((int?)x)
+			# ex: ((Color?)Color.Black)
+			sw.write('(([_expr.type.sharpRef]?)')
+			_expr.writeSharpDef(sw, false)
+			sw.write(')')
+
+
+class ToNonNilableExpr
+	inherits ToNilableOrNotExpr
+	"""
+	Casts an expression to the non-nilable version of its type.
+	
+	When coding in Cobra:
+
+	You would do this when trying to use a nilable expression where a non-nil type is expected and
+	you know that at run-time the expression won't actually by nil (presumably due to the logic of
+	your code).
+	
+	Or you might do this to affect type inference.
+	
+	ex: name = obj.name to !
+	ex: obj.foo(age to !)
+	"""
+	
+	def init(opToken as IToken, rightTok as IToken, expr as Expr)
+		base.init(opToken, rightTok, expr)
+
+	def _bindImp
+		base._bindImp
+		if (et = _expr.type) inherits NilableType
+			_type = et.theWrappedType
+		else
+			.compiler.warning(this, 'The given expression is already non-nilable so "to !" is redundant. You can remove it.') # TODO: needs test case
+			_type = _expr.type
+
+	def writeSharpDef(sw as SharpWriter, parens as bool) is override
+		type = _expr.type
+		if type inherits NilableType and not (type to NilableType).theWrappedType.isReference
+			# ex: (x).Value
+			# ex: (obj.foo).Value
+			sw.write('(')
+			_expr.writeSharpDef(sw, false)
+			sw.write(').Value')
+		else
+			# TODO: wrap in a run-time setting. something like, (CobraCore._willCheckNonNilCast?CobraImp.CheckNonNil<...>(...):expr)
+			# TODO: provide a compile time setting to remove check
+			sw.write('CobraImp.CheckNonNil<[type.sharpRef]>([.sharpThis], [Utils.sharpStringLiteralFor(_expr.toCobraSource)], ')
+			_expr.writeSharpDef(sw, false)
+			sw.write(', [.sharpSourceSite])')
