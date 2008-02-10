@@ -1,0 +1,1812 @@
+use System.Reflection
+
+
+class Box
+	is abstract
+	inherits Container<of IBoxMember>
+	implements IType, IParentSpace, INameSpaceMember, IBoxMember
+	"""
+	The abstract base class for:
+		* Class
+		* Interface
+		* Struct
+	These are collectively known as "boxes".
+	Note that of all the types, only Boxes can be generic. Which makes them special.
+	"""
+
+	# TODO: need to override greatestCommonDenominatorWith() to handle base interfaces
+
+	var _genericParams as List<of IType>  # as in generic parameters
+	var _genericDef as Box?
+	var _constructedTypes as Dictionary<of String, Box>?
+
+	var _baseClass as Class?
+	var _baseInterfaceProxies as List<of ITypeProxy>
+	var _baseInterfaces as List<of Interface>
+
+	var _overloads as List<of MemberOverload>
+	var _nextPrivateSerialNumber = 1001
+
+	var _attribs as AttributeList
+
+	var _invariants as List<of Expr>
+	var _testMethod as TestMethod?
+
+	var _clrType as Type?
+	var _needScanClrType as bool
+	var _membersToUnNil as String?
+	var _defaultMemberName as String?
+		"""
+		An Indexer in CLR is known by being a property with arguments whose name matches the .memberName of a box-level DefaultMemberAttribute.
+		"""
+
+	def init(token as IToken, name as String, paramList as List<of IType>, isNames as List<of String>, attribs as AttributeList, baseInterfaceNodes as List<of ITypeProxy>, docString as String?)
+		base.init(token, name, isNames, docString)
+		_attribs = attribs
+		_genericParams = paramList
+		for i = 0 .. _genericParams.count
+			p = _genericParams[i]
+			if p inherits GenericParam
+				p.index = i
+		_baseInterfaceProxies = baseInterfaceNodes
+		_baseInterfaces = List<of Interface>()
+		_overloads = List<of MemberOverload>()
+		_invariants = List<of Expr>()
+
+	def _initClrType(t as Type)
+		_clrType = t
+		_needScanClrType = true
+		_scanGenericArgs
+
+	def _scanClrType
+		"""
+		Subclasses should invoke base and then invoke the various _scanFoo methods that are appropriate for them.
+		"""
+		_needScanClrType = false
+		# print '<> _scanClrType for [.name] in [_parentNameSpace.fullName], class is [.getType.name]'
+
+	def addMinFields
+		base.addMinFields
+		.addField('didBindInh', .didBindInh)
+		.addField('isGeneric', .isGeneric)
+		.addField('isGenericDef', .isGenericDef)
+		.addField('needsConstruction', .needsConstruction)
+
+	def addRefFields
+		base.addRefFields
+		.addField('genericDef', _genericDef)
+		.addField('baseClass', _baseClass)
+		.addField('clrType', _clrType)
+
+	def addSubFields
+		base.addSubFields
+		.addField('genericParams', _genericParams)
+		.addField('baseInterfaces', _baseInterfaces)
+		.addField('baseInterfaceProxies', _baseInterfaceProxies)
+		.addField('clrType', _clrType)
+
+	def toTraceString as String
+		sb = StringBuilder('[.getType.name]([.name], [.serialNum], ')
+		if _genericParams.count
+			sb.append('genericParams=[CobraCore.toTechString(_genericParams)], ')
+		if not .didBindInh
+			sb.append('not ')
+		sb.append('didBindInh, ')
+		if not .didBindInt
+			sb.append('not ')
+		sb.append('didBindInt, ')
+		sb.append('clrType=[.clrType]')
+		sb.append(')')
+		return sb.toString
+
+	get baseClass from var
+
+	get baseInterfaces from var
+
+	get canHaveDetailedStackTrace as bool
+		"""
+		Normally returns true, but will return false for some key run-time support classes that help *implement* the DST.
+		Otherwise, those classes could easily cause infinite recursion / stack overflow.
+		Examples include CobraFrame and SourceSite.
+
+		Note that returning true does not mean that the -dst option is turned on.
+		Returning true only means that this box *can* have code instrumentation for DST.
+		"""
+		# TODO: use a class level attribute instead of hard-coded names. DetailedStackTrace(false)
+		return .name not in @['CobraFrame', 'SourceSite']  # otherwise, stack overflow
+
+	get clrType from var
+
+	get constructedTypes as IDictionary<of String, Box>
+		"""
+		The return value is a shallow copy to prevent outside modification of a generic's constructedTypes cache.
+		This property exists primarily for debugging/display.
+		"""
+		return Dictionary<of String, Box>(_constructedTypes)
+
+	get defaultAccessLevel as String is override
+		return 'public'
+
+	get isFromAssembly as bool
+		"""
+		Returns true if this box was read from an assembly (usually a .dll, but could be an .exe) as opposed to be source based.
+		This is independent of language. If the DLL was written in Cobra, this still returns true.
+		"""
+		ensure
+			.isSystemObjectClass implies result
+			result implies .clrType or (.genericDef and .genericDef.clrType)
+			not result implies .clrType is nil
+		body
+			return _clrType or (_genericDef and _genericDef._clrType)
+		
+	get invariants from var
+
+	get hasInvariants as bool
+		"""
+		Returns true if the box has any invariant conditions whether directly or through inheritance.
+		"""
+		if _invariants.count
+			return true
+		if _baseClass
+			return _baseClass.hasInvariants
+		else
+			return false
+
+	get isSystemObjectClass as bool
+		return _baseClass is nil and .name == 'Object' and .parentNameSpace and .parentNameSpace.fullName == 'System'
+
+	pro membersToUnNil from var
+
+	pro parentNameSpace as NameSpace?
+		get
+			return base.parentNameSpace
+		set
+			# a box needs to be tied to its local namespace, not the unified one
+			assert (value and .token.text <> '(empty)') implies not value.isUnified
+			base.parentNameSpace = value
+
+	get overloads from var
+
+	get rootName as String
+		ensure
+			'<' not in result
+			.name.startsWith(result)
+		body
+			name = .name
+			i = name.indexOf('<')
+			if i <> -1  # List<of>, Dictionary<of,>
+				name = name[0:i]
+			return name
+
+	get qualifiedRootName as String
+		require
+			.parentNameSpace
+		ensure
+			not result.startsWith('.')
+			not result.endsWith('.')
+			not .parentNameSpace.isRoot implies '.' in result
+		body
+			nameSpaces = List<of NameSpace>()
+			ns = .parentNameSpace
+			while ns and not ns.isRoot
+				nameSpaces.add(ns to !)
+				assert ns is not ns.superNameSpace
+				ns = ns.superNameSpace
+			nameSpaces.reverse
+			name = Utils.join('.', for ns in nameSpaces get ns.name)
+			if name.length
+				name += '.'
+			name += .rootName
+			return name
+
+	get superType as IType? is override
+		or require true
+		if not _didBindInh
+			.bindInh
+		assert .didBindInh
+		return _baseClass
+
+	pro testMethod from var
+
+	get isFake as bool
+		return 'fake' in _isNames
+
+	def isDescendantOfInterface(inter as Interface) as bool
+		if _baseInterfaces.count == 0 and _baseInterfaceProxies.count
+			.bindInh
+		if .compiler
+			inter.bindInh
+		if this is inter
+			return true
+		assert .serialNum <> inter.serialNum
+		assert _baseInterfaceProxies.count == 0 or _baseInterfaces.count == _baseInterfaceProxies.count
+		for bit in _baseInterfaces
+			if bit.isDescendantOfInterface(inter)
+				return true
+		return false
+
+	def interfaceMemberForName(name as String) as IBoxMember?
+		m = .declForName(name)
+		if m
+			return m
+		for inter in _baseInterfaces
+			m = inter.interfaceMemberForName(name)
+			if m
+				break
+		return m
+
+	def makeNextPrivateSerialNumber as int
+		n = _nextPrivateSerialNumber
+		_nextPrivateSerialNumber += 1
+		return n
+
+	def memberForName(name as String) as IMember?
+		if _clrType
+			_prepLibraryBox
+		else
+			.completeMemberConstructionIfNeeded
+		return base.memberForName(name)
+
+	def registerOverload(ol as MemberOverload)
+		require
+			ol.name.length
+			ol not in _overloads
+		body
+			_overloads.add(ol)
+			_declsByName[ol.name] = ol
+			_declsByName[ol.name.toLower] = ol
+
+	def addDeclFromOverload(decl as IBoxMember, ol as MemberOverload)
+		require
+			ol in .overloads
+			decl.name == ol.name
+		body
+			_declsInOrder.add(decl)
+
+	def paramForName(name as String) as IType?
+		# TODO: make faster
+		for param in _genericParams
+			if name==param.name
+				return param
+		return nil
+
+	def symbolForName(name as String, haveThis as bool) as IMember?
+		return .symbolForName(name, haveThis, true)
+
+	def symbolForName(name as String, haveThis as bool, checkNameSpace as bool) as IMember?
+		"""
+		Unlike the inherited .declForName, this method follows the
+		inheritance chain and provides options for haveThis.
+		"""
+		if name == _name
+			return this
+		p = .paramForName(name)
+		if p
+			if haveThis
+				.throwError('Cannot refer to a generic parameter ("[name]") through `this`.')
+			else
+				return p
+		x = .declForName(name) to IMember?
+		if x is nil and _baseClass
+			x = _baseClass.symbolForName(name, haveThis, false)
+		if x is nil
+			x = .interfaceMemberForName(name)
+		if x and not haveThis
+			if x.requiresThis
+				x = nil
+		if x is nil and checkNameSpace
+			nameSpace = .parentNameSpace
+			if not .name.startsWith('ArrayType_')  # TODO: axe this guard when ArrayType.memberForName's TODO to read System.Array is done
+				if .didBindInt
+					assert nameSpace
+			if nameSpace
+				assert not nameSpace.isUnified
+				x = nameSpace.symbolForName(name)
+		return x
+
+	## INamedNode
+
+	get typeForIdentifier as IType is override
+		assert .compiler
+		# return .compiler.typeType
+		return .compiler.libraryType('System.Type')
+
+	get typeForReceiver as IType is override
+		return this
+
+	## IType
+
+	get sharpNameComponent as String is override
+		name = .name
+		i = name.indexOf('/*')  # example: /*dynamic*/object
+		if i <> -1
+			j = name.indexOf('*/', i)
+			name = name[:i] + name[j+2:]
+		# qualified types and generics need cleanup
+		for ch in '.<>, '
+			name = name.replace(ch, c'_')
+		return name
+
+	get innerType as IType? is override
+		if _clrType
+			_prepLibraryBox
+		else
+			.completeMemberConstructionIfNeeded
+		if this is .compiler.libraryType('System.String')  # TODO: hacky
+			return .compiler.charType
+# can a for loop go through an IEnumerator<of>?
+#		if .isConstructed and .genericDef is .compiler.libraryBox('System.Collections.Generic.IEnumerator<of>')
+#			return .genericParams[0]
+		getEnum = .symbolForName('getEnumerator', true)
+		if getEnum
+			assert getEnum.didBindInt
+			# can have two getEnumerators -- one generic and the other not. favor the generic one
+			if getEnum inherits MemberOverload
+				for member in getEnum.members
+					if member inherits Method
+						if member.resultType <> .compiler.libraryType('System.Object')
+							# implementing IEnumerable<of T> which requires two `getEnumerator` members
+							getEnum = member
+							break
+			rt = getEnum.resultType
+			if rt is .compiler.passThroughType
+				return rt
+			if rt.isDynamic
+				return rt
+			if rt inherits NilableType
+				# nilable is not a concern; unwrap it:
+				rt = rt.theWrappedType
+			if rt inherits Box and (rt to Box).isGeneric
+				# TODO: this is a hack. should check for IEnumerator and 'current' like we do for non-generics further below
+				# assert not rt.isGenericDef
+				it = (rt to Box).genericParams[0]
+				if it inherits GenericParam
+					#it = .typeForGenericParam(it) # CC: this fails because IType on the right is more general than GenericParam on the left. But I'm thinking Cobra should allow you to back up to the original type if you like
+					return .typeForGenericParam(it)
+				else
+					return it
+			else
+				if rt.isDescendantOf(.compiler.libraryType('System.Collections.IEnumerator'))
+					return rt.memberForName('current').resultType
+				else
+					throw FallThroughException(rt)
+		return nil
+
+	def isEquatableTo(t as IType) as bool
+		r = base.isEquatableTo(t)
+		if not r and t inherits CharType and this is .compiler.libraryType('System.String')  # TODO: hacky? could this be determined by looking for a static == operator overload?
+			r = true
+		if not r and ('dynamic' in .name or 'dynamic' in t.name)  # TODO: hacky
+			r = true
+		return r
+
+	def isComparableTo(t as IType) as bool
+		r = base.isComparableTo(t)
+		if not r and t inherits CharType and this is .compiler.libraryType('System.String')  # TODO: hacky? could this be determined by looking for a static == operator overload?
+			r = true
+		if not r and ('dynamic' in .name or 'dynamic' in t.name)  # TODO: hacky
+			r = true
+		return r
+
+	## Binding
+
+	def bindInh
+		if _didBindInh
+			return
+		base.bindInh
+		.compiler.boxStack.push(this)
+		try
+			if _needScanClrType
+				_scanClrType
+			_bindBase
+			# structs, classes and interfaces can all have 0 or more interfaces they inherit/implement
+			if _baseInterfaceProxies.count <> _baseInterfaces.count  # otherwise, already done
+				assert _baseInterfaces.count == 0
+				for interfaceProxy in _baseInterfaceProxies
+					try
+						baseWhat = interfaceProxy.realType
+						if baseWhat inherits Interface
+							_baseInterfaces.add(baseWhat)
+						else
+							_badInterfaceError(baseWhat)
+					catch ne as NodeException
+						.compiler.recordError(ne)
+		finally
+			.compiler.boxStack.pop
+		_didBindInh = true
+
+	def bindInt as INode
+		# because DLL boxes get bindInh and bindInt on demand, check this:
+		if _genericDef
+			assert _genericDef is not this
+			if not _genericDef.didBindInt and not _genericDef.isBindingInt
+				_genericDef.bindInt
+			assert _genericDef.didBindInt or _genericDef.isBindingInt
+		if _clrType
+			_prepLibraryBox
+		else if not _didBindInh
+			.bindInh
+		if _genericDef
+			assert _genericDef is not this
+			assert _genericDef.didBindInt or _genericDef.isBindingInt
+		return base.bindInt
+
+	def _bindInt
+		# Note that .bindInt (not this method, _bindInt) already ensures that if this box is constructed, its generic def binds int *first*.
+		# Therefore, everthing below has already happened for a constructed box's generic def.
+		base._bindInt
+		.compiler.boxStack.push(this)
+		try
+			errorCount = .compiler.errors.count
+			if _needScanClrType
+				_scanClrType
+			if _baseClass
+				_baseClass.bindInt
+			for interf in _baseInterfaces
+				interf.bindInt
+			for param in _genericParams
+				param.bindInt
+			if not .isConstructed  # because constructed boxes are already taken care of by way of their generic type def
+				.unNilReturnTypes(this)
+			for attrib in _attribs
+				try
+					attrib.bindInt
+				catch ne as NodeException
+					.compiler.recordError(ne)
+			for invari in _invariants
+				invari.bindInt
+			for decl in _declsInOrder
+				assert not decl is this
+				.compiler.boxMemberStack.push(decl)
+				try
+					decl.bindInt
+				catch ne as NodeException
+					.compiler.recordError(ne)
+				finally
+					.compiler.boxMemberStack.pop
+			_finishOverloads
+			if _testMethod
+				_testMethod.bindInt
+			if _constructedTypes
+				if .compiler.errors.count <= errorCount  # completing construction on constructed types leads to chaos if this generic def had errors during bind interface
+					for ct in _constructedTypes.values
+						assert ct is not this
+						ct.completeMemberConstructionIfNeeded
+						ct.bindInt
+		finally
+			.compiler.boxStack.pop
+
+	def _bindBase
+		# invoked by _bindInt
+		_baseClass = .compiler.libraryClass('System.Object')
+
+	def _badInterfaceError(type as IType)
+		.throwError('Cannot inherit "[type.name]" which is a [type.englishName].')
+
+	def _finishOverloads
+		# this method is broken out so Class can override and deal with inheritance and overloads
+		for ol in _overloads
+			try
+				ol.bindInt
+			catch ne as NodeException
+				.compiler.recordError(ne)
+
+	def _bindImp
+		base._bindImp
+		assert .didBindInt
+		.compiler.boxStack.push(this)
+		try
+			for attrib in _attribs
+				try
+					attrib.bindImp
+				catch ne as NodeException
+					.compiler.recordError(ne)
+			for invari in _invariants
+				invari.bindImp
+			for decl in _declsInOrder
+				assert not decl is this
+				.compiler.boxMemberStack.push(decl)
+				try
+					decl.bindImp
+				catch ne as NodeException
+					.compiler.recordError(ne)
+				finally
+					.compiler.boxMemberStack.pop
+			for ol in _overloads
+				try
+					ol.bindImp
+				catch ne as NodeException
+					.compiler.recordError(ne)
+			if _testMethod
+				_testMethod.bindImp
+		finally
+			.compiler.boxStack.pop
+
+	var _didPrep as bool
+
+	def _prepLibraryBox
+		"""
+		DLL types get bindInh & bindInt only on demand. (Otherwise reading system DLLs slows things down.)
+		"""
+		require .clrType
+		if _didPrep
+			return
+		_didPrep = true
+		if not _didBindInh
+			.bindInh
+		if not .didBindInt and not .compiler.isBindingInh
+			.bindInt
+
+	var _didUnNilReturnTypes as bool
+
+	get didUnNilReturnTypes as bool
+		if .isConstructed
+			return .genericDef.didUnNilReturnTypes
+		else
+			return _didUnNilReturnTypes
+
+	def unNilReturnTypes(box as Box)
+		if .compiler.isBindingInh
+			# because the .membersToUnNil properties won't even be set until the compiler starts .bindInt
+			return
+		if _didUnNilReturnTypes
+			return
+		_didUnNilReturnTypes = true
+		_unNilReturnTypes(box)
+		
+	def _unNilReturnTypes(box as Box)
+		assert not _needScanClrType
+		if box.membersToUnNil
+			for name in box.membersToUnNil.split
+				m = .declForName(name)  # using .memberForName here is unnecessary and could/would cause an infinite loop
+				if m
+					m.unNilReturnType
+		# follow inheritance to look at ancestors' .membersToUnNil
+		if box.baseClass
+			_unNilReturnTypes(box.baseClass to !)
+		for interf in box.baseInterfaces
+			_unNilReturnTypes(interf)
+
+
+	## Generics
+
+	def isAssignableTo(type as IType) as bool
+		r = base.isAssignableTo(type)
+		if not r
+			if type inherits NilableType
+				type = type.theWrappedType
+			if type inherits Box
+				if (.isGeneric and type.isGeneric and .genericDef is type.genericDef) or (.isGenericDef and type.isGeneric and this is type.genericDef)
+					# CC?: r = all true for i, gp in .genericParams.numbered get gp.isAssignableTo(type.genericParams[i])
+					i = 0
+					r = true
+					for gp in .genericParams  # CC: for i, gp in .genericParams.numbered
+						if not gp.isAssignableTo(type.genericParams[i])
+							r = false
+							break
+						i += 1
+				else if type.isGenericDef and .isGeneric and type is .genericDef
+					r = type.isAssignableTo(this)
+		return r
+
+	get isConstructed as bool
+		return _genericDef is not nil
+
+	def isConstructionOf(box as Box) as bool
+		"""
+		Returns true if this type is a construction of the given generic type def, even going more than level deep through `genericDef`.
+		"""
+		if .genericDef is nil
+			return false
+		if .genericDef is box
+			return true
+		if .genericDef.genericDef
+			return .genericDef.isConstructionOf(box) # TODO: would iteration be more efficient here?
+		return false
+
+	get isGenericDef as bool
+		"""
+		Returns true if this type is a definition of a generic type, and
+		therefore capable of making subsequent generic types via the
+		`constructedTypeFor` method. A generic type will have generic
+		parameters which are all GenericParam (as opposed to other types
+		such as `int` or a given class).
+		"""
+		# TODO: make this more efficient, maybe by computing in the initializer
+		if _genericDef
+			return false
+		else if _genericParams.count
+			for param in _genericParams
+				if not param inherits GenericParam
+					return false
+			return true
+		else
+			return false
+
+	get isGeneric as bool
+		"""
+		Returns true if this type is a generic type which includes
+		generic type defs and open-or-closed constructed types. Note
+		that arrays of generic types and pointers to generic types will
+		return false.
+		"""
+		return _genericParams.count > 0
+
+	get genericParams as List<of IType>
+		"""
+		Return the list of generic params for this generic type. This
+		property requires that .isGenericDef is true.
+		"""
+		require .isGeneric
+		return _genericParams
+
+	get genericDef as Box?
+		"""
+		Returns the generic type definition for a constructed type (or nil if this type is not constructed).
+		"""
+		return _genericDef
+
+	def constructedTypeFor(typeArgs as List<of IType>) as Box
+		require
+			.containsGenericParameters
+			typeArgs.count == .genericParams.count
+		body
+			assert .isGenericDef
+
+			# TODO: can take this out. it's just a check that the above comparison is working. 2007-12-08
+			equal = true
+			for i = 0 .. typeArgs.count
+				if typeArgs[i] <> .genericParams[i]
+					equal = false
+					break
+
+			if typeArgs == _genericParams
+				assert equal
+				return this
+			else
+				assert not equal
+
+			if not .didBindInh
+				assert not .didBindInt
+				.bindInh
+				assert not .didBindInt
+				if _clrType
+					_prepLibraryBox
+					assert not .didBindInt or not .compiler.isBindingInh
+
+			# the cache of constructed types has to come from the root generic type def or you end up with duplicate
+			# constructed types which is not only wasteful, but causes problems with inheritance tests
+			genericDef = this
+			while genericDef.genericDef
+				genericDef = genericDef.genericDef to !
+
+			if genericDef._constructedTypes is nil
+				genericDef._constructedTypes = Dictionary<of String, Box>()
+			key = Utils.join(',', for type in typeArgs get type.name)
+			if genericDef._constructedTypes.containsKey(key)
+				return genericDef._constructedTypes[key]
+			t = .memberwiseClone to Box
+			assert t is not this
+			genericDef._constructedTypes[key] = t
+			t._name = '[.rootName]<of [key]>'
+			t._genericDef = this
+			t._clrType = nil  # The constructed type is really sourced from the generic def. Don't foster confusion with a reference to the original generic def's clr type (if there is one).
+			t.cloneCollections
+			# set the contructed type args immediately or its ancestors will get the original generic args during _bindInt:
+			for i = 0 .. typeArgs.count
+				t._genericParams[i] = typeArgs[i]
+			assert t._constructedTypes is nil or t._constructedTypes.count == 0
+			if .didBindInt
+				t._completeConstruction(typeArgs)
+			else
+				t._needsConstruction(typeArgs)
+			assert t._constructedTypes is nil or t._constructedTypes.count == 0
+			return t
+
+	var _needs_typeArgs as List<of IType>?
+		"""
+		When non-nil, this box is constructed from a generic *and* requires completion of its construction of members.
+		"""
+
+	def completeMemberConstructionIfNeeded
+		if _needs_typeArgs
+			assert not .isGenericDef
+			if not .didBindInt and not .isBindingInt
+				.bindInt  # this is required when inheriting from a constructed type such as "class Foo inherits List<of int>". Since "bind inheritance" happens prior to "bind interface", the base type will have been partially constructed without ever binding int.
+			if _needs_typeArgs
+				_completeConstruction(_needs_typeArgs)
+			_needs_typeArgs = nil
+
+	get needsConstruction as bool
+		return _needs_typeArgs is not nil
+
+	def _needsConstruction(typeArgs as List<of IType>)
+		require
+			.genericParams.count == typeArgs.count
+		body
+			_needs_typeArgs = typeArgs
+
+	def _completeConstruction(typeArgs as List<of IType>)
+		"""
+		When this method is called, this instance is a constructed type, but its members (such as methods and properties) are still those of its generic type def.
+		This method creates new members that are like the generic ones, but with the constructed type arguments substituted in.
+		`.foo(item as T)` becomes `.foo(item as int)`
+		"""
+		require
+			.isConstructed
+			.genericParams.count == typeArgs.count
+			.didBindInt or .isBindingInt
+			not .isGenericDef
+			.genericDef
+			.genericDef.didBindInt or .genericDef.isBindingInt
+		body
+			_genericDef.unNilReturnTypes(_genericDef to !)
+			# create a dictionary from the generic params to their effective type
+			gpToType = Dictionary<of GenericParam, IType>()
+			for i = 0 .. typeArgs.count
+				if (p = _genericDef.genericParams[i]) inherits GenericParam
+					gpToType[p] = typeArgs[i]
+				else
+					throw FallThroughException(p)
+				
+			_baseClass = _baseClass.secondaryConstructedTypeFor(this, gpToType) to Class
+			assert _baseInterfaceProxies.count == 0 or _baseInterfaceProxies.count == _baseInterfaces.count
+			for i = 0 .. _baseInterfaces.count
+				_baseInterfaces[i] = _baseInterfaces[i].secondaryConstructedTypeFor(this, gpToType) to Interface
+
+			# construct the declarations
+			_overloads = List<of MemberOverload>()
+			newDecls = List<of IBoxMember>()
+			for decl in _declsInOrder
+				if decl inherits BoxMember
+					nd = decl.constructedFor(this, gpToType)
+					assert nd <> decl
+					newDecls.add(nd)
+				else
+					throw FallThroughException(decl)
+			_declsInOrder = List<of IBoxMember>()
+			_declsByName = Dictionary<of String, IBoxMember>()
+			_declsByNameCI = Dictionary<of String, IBoxMember>()
+			for decl in newDecls
+				if _declsByName.containsKey(decl.name)
+					overload = nil to MemberOverload?
+					other = _declsByName[decl.name]
+					if other inherits MemberOverload
+						overload = other
+					else if other inherits AbstractMethod
+						overload = MemberOverload(other)
+						.registerOverload(overload to !)
+					else
+						throw FallThroughException(other)
+					overload.addMember(decl to BoxMember)
+				else
+					_declsInOrder.add(decl)
+					_declsByName[decl.name] = decl
+					_declsByNameCI[decl.name.toLower] = decl
+			# TODO: can this next statement can be axed since there is a separate "bind inheritance" phase?
+			_finishOverloads
+
+	def secondaryConstructedTypeFor(box as Box, gpToType as Dictionary<of GenericParam, IType>) as IType is override
+		if _genericParams.count == 0
+			return this
+		typeArgs = List<of IType>()
+		params = .genericParams
+		for param in params
+			if param inherits GenericParam
+				# doesn't work:
+				# typeArgs.add(gpToType[param])
+				found as GenericParam?
+				for key as dynamic in gpToType.keys
+					if key.name == param.name
+						found = key
+				assert found, {'param': param, 'gpToType.keys': gpToType.keys}
+				typeArgs.add(gpToType[found to !])
+			else
+				typeArgs.add(param.secondaryConstructedTypeFor(box, gpToType))
+		if .isGenericDef
+			return .constructedTypeFor(typeArgs)
+		else
+			assert .genericDef.isGenericDef  # if this ever fails, we may just need to follow .genericDef back iteratively until we get to the real generic type def
+			return .genericDef.constructedTypeFor(typeArgs)
+
+	def cloneCollections
+		base.cloneCollections
+		_genericParams = List<of IType>(_genericParams)  # TODO: Can I just say _genericParams.clone? Do I need the cast?
+		_constructedTypes = nil
+		_baseInterfaceProxies = List<of ITypeProxy>(_baseInterfaceProxies)
+		_baseInterfaces = List<of Interface>(_baseInterfaces)
+		# _overloads = List<of MemberOverload>(_overloads)  # these will be recreated
+
+	def typeForGenericParam(gp as GenericParam) as IType # TODO: is this needed for NilableType?
+		"""
+		Returns the specific type arg that corresponds to the given generic
+		parameter. Used to match the gp's in method, properties, etc. against
+		the actual types in a constructed type.
+		"""
+		require
+			.isGeneric
+			.genericParams.count
+		body
+			# TODO: When does this get called? Investigate this.
+			return .genericParams[gp.index]
+
+	get containsGenericParameters as bool
+		for param in _genericParams
+			if param inherits GenericParam
+				return true
+			if param inherits Box  # CC: and <next if condition>
+				if param.containsGenericParameters
+					return true
+		return false
+
+
+	## Reading DLLs
+
+	def _scanIsNames
+		# TODO
+		_isNames.add('fake')  # to make the box like the ones that were in SystemInterfaces.cobra
+
+		# scan DefaultMemberAttribute for later use
+		for attr in _clrType.getCustomAttributes(true)
+			if attr inherits DefaultMemberAttribute
+				_defaultMemberName = attr.memberName  # this attribute names the indexer for the class
+				break
+
+	def _scanGenericArgs
+		if _clrType.isGenericType
+			for genArg in _clrType.getGenericArguments
+				_genericParams.add(GenericParam(genArg))
+
+	def _scanImplements
+		for interf in _clrType.getInterfaces
+			if _badRelatedType(interf)
+				continue
+			_baseInterfaceProxies.add(ClrTypeProxy(interf))
+
+	def _scanFields
+		for fieldInfo in _clrType.getFields(BindingFlags(Instance, Static, DeclaredOnly, Public))
+			if fieldInfo.declaringType is not _clrType
+				continue
+			if fieldInfo.isPrivate
+				continue
+			if fieldInfo.isInitOnly or fieldInfo.isLiteral
+				# TODO: kind of weird to use properties
+				isNames = ['nonvirtual']
+				if fieldInfo.isPublic
+					isNames.add('public')
+				else
+					isNames.add('private')
+				if fieldInfo.isStatic
+					isNames.add('shared')
+				prop = Property(TokenFix.empty, this, Utils.uncapped(fieldInfo.name), _memberTypeResultProxy(fieldInfo, fieldInfo.fieldType), isNames, AttributeList(), '')
+				prop.makeGetPart(TokenFix.empty)
+				.addDecl(prop)
+
+	def _scanInitializers
+		for conInfo in _clrType.getConstructors  # TODO: get protected constructors
+			if conInfo.declaringType is not _clrType
+				continue
+			skip = false
+			for paramInfo in conInfo.getParameters
+				if _badRelatedType(paramInfo.parameterType)
+					skip = true
+					break
+			if skip
+				continue
+			params = _scanParams(conInfo.getParameters)
+			isNames = _isNamesForMethodInfo(conInfo)
+			attribs = _attribsForMethodInfo(conInfo)
+			docString = ''  # TODO: get doc string for class?
+			initer = Initializer(TokenFix.empty, this, params, isNames, attribs, docString)
+			overload as MemberOverload? = nil
+			other = .declForName('init')
+			if other
+				if other inherits MemberOverload
+					overload = other
+				else if other inherits AbstractMethod
+					overload = MemberOverload(other)
+					.registerOverload(overload to !)
+				else
+					throw FallThroughException([this, initer, other])
+			if overload
+				overload.addMember(initer)
+			else
+				.addDecl(initer)
+
+	def _scanProperties
+		for propInfo in _clrType.getProperties(BindingFlags(Instance, Static, DeclaredOnly, Public, NonPublic))
+			if propInfo.declaringType is not _clrType
+				continue
+			if propInfo.name == _defaultMemberName and propInfo.getIndexParameters and propInfo.getIndexParameters.length
+				_scanIndexer(propInfo)
+				continue
+			if _badRelatedType(propInfo.propertyType)
+				continue
+			attribs = AttributeList()  # TODO:
+			docString = ''  # TODO: get doc string
+			# TODO: eventually the isNames need to be an the property part level (get or set) rather than the property level, like in C# and the CLR runtime
+			if propInfo.canRead
+				isNames = _isNamesForMethodInfo(propInfo.getGetMethod(true) to !)
+			else if propInfo.canWrite
+				isNames = _isNamesForMethodInfo(propInfo.getSetMethod(true) to !)
+			else
+				throw FallThroughException(propInfo)
+			prop = Property(TokenFix.empty, this, Utils.uncapped(propInfo.name), _memberTypeResultProxy(propInfo, propInfo.propertyType), isNames, attribs, docString)
+			if propInfo.canRead
+				prop.makeGetPart(TokenFix.empty)
+			if propInfo.canWrite
+				prop.makeSetPart(TokenFix.empty)
+			.addDecl(prop)
+
+	def _scanIndexer(propInfo as PropertyInfo)
+		for paramInfo in propInfo.getIndexParameters
+			if _badRelatedType(paramInfo.parameterType)
+				return
+		params = _scanParams(propInfo.getIndexParameters)
+		attribs = AttributeList()  # TODO:
+		docString = ''  # TODO: get doc string for class?
+		if propInfo.canRead
+			isNames = _isNamesForMethodInfo(propInfo.getGetMethod(true) to !)
+		else if propInfo.canWrite
+			isNames = _isNamesForMethodInfo(propInfo.getSetMethod(true) to !)
+		else
+			throw FallThroughException(propInfo)
+		indexer = Indexer(TokenFix.empty, this, r'[]', params, _memberTypeResultProxy(propInfo, propInfo.propertyType), isNames, attribs, docString)
+		overload as MemberOverload? = nil
+		other = .declForName(r'[]')
+		if other
+			if other inherits MemberOverload
+				overload = other
+			else if other inherits Indexer
+				overload = MemberOverload(other)
+				.registerOverload(overload to !)
+			else
+				throw FallThroughException([this, indexer, other])
+		if overload
+			overload.addMember(indexer)
+		else
+			.addDecl(indexer)
+
+	def _scanMethods
+		for methInfo in _clrType.getMethods(BindingFlags(Instance, Static, DeclaredOnly, Public, NonPublic))
+			if methInfo.isSpecialName
+				continue
+			if methInfo.isPrivate
+				continue
+			if methInfo.declaringType is not _clrType
+				continue
+			skip = false
+			if _badRelatedType(methInfo.returnType)
+				skip = true
+			else
+				for paramInfo in methInfo.getParameters
+					if _badRelatedType(paramInfo.parameterType)
+						skip = true
+						break
+			if skip
+				continue
+			# TODO: handle generic methods
+			if methInfo.isGenericMethod or methInfo.isGenericMethodDefinition
+				# print 'xxx generic methInfo, [methInfo.isGenericMethod], [methInfo.isGenericMethodDefinition], [methInfo]'
+				continue
+			if '.' in methInfo.name
+				# TODO: these are mostly (maybe all) explicit implementations of interfaces
+				# print 'xxx dotted name: [methInfo]'
+				continue
+			name = Utils.uncapped(methInfo.name)
+			if name == 'init'
+				# there is at least one of these: System.Runtime.Remoting.Messaging.MethodCall.init
+				# TODO: What to do? Change 'def init' to 'def .init' or 'def .ctor'? No quadruple underscores.
+				# or allow it in DLLs and use a different underlying name in the decl dict for initializers like the CLR name .ctor
+				continue
+			params = _scanParams(methInfo.getParameters)
+			isNames = _isNamesForMethodInfo(methInfo)
+			attribs = _attribsForMethodInfo(methInfo)
+			docString = ''  # TODO: get doc string for class?
+			implementsTypeNode as ITypeProxy?  # TODO: explicit interface implementation?
+			method = Method(TokenFix.empty, this, name, params, _memberTypeResultProxy(methInfo, methInfo.returnType), implementsTypeNode, isNames, attribs, docString)
+			overload as MemberOverload? = nil
+			other = .declForName(name)
+			if other
+				if other inherits MemberOverload
+					overload = other
+				else if other inherits AbstractMethod
+					overload = MemberOverload(other)
+					.registerOverload(overload to !)
+				else
+					throw FallThroughException([this, method, other])
+			if overload
+				overload.addMember(method)
+			else
+				.addDecl(method)
+
+	def _scanParams(paramInfos as ParameterInfo[]?) as List<of Param>
+		"""
+		Returns a list of Cobra parameters given a list of CLR Reflection ParameterInfos.
+		"""
+		params = List<of Param>()
+		if paramInfos and paramInfos.length
+			for paramInfo in paramInfos
+				# TODO: out, inout (System.Runtime.InteropServices.OutAttribute). We're getting away with not doing this because Cobra is not yet doing error checking in CallExpr on out/inout args. that falls through to C#
+				isVari = true
+				for attr in paramInfo.getCustomAttributes(false)
+					if attr inherits ParamArrayAttribute
+						isVari = true
+						break
+				type = _memberTypeProxy(paramInfo.parameterType)
+				if isVari
+					type = VariTypeProxy(type)
+				params.add(Param(paramInfo.name, type))
+		return params
+
+	def _scanEvents
+		for eventInfo in _clrType.getEvents(BindingFlags(Instance, Static, DeclaredOnly, Public, NonPublic))
+			if eventInfo.isSpecialName
+				continue
+			if eventInfo.declaringType is not _clrType
+				continue
+			if '.' in eventInfo.name
+				# TODO: these are mostly (maybe all) explicit implementations of interfaces
+				# print 'xxx dotted name: [methInfo]'
+				continue
+			name = Utils.uncapped(eventInfo.name)
+# TODO:
+#			isNames = _isNamesForMethodInfo(eventInfo)
+#			attribs = _attribsForMethodInfo(eventInfo)
+			isNames = List<of String>()
+			attribs = AttributeList()
+			docString = ''  # TODO: get doc string for class?
+			evt = BoxEvent(TokenFix.empty, this, name, isNames, attribs, docString, ClrTypeProxy(eventInfo.eventHandlerType))
+			.addDecl(evt)
+
+	def _isNamesForMethodInfo(mi as MethodBase) as List<of String>
+		"""
+		Returns the Cobra "is names" such as ['public', 'nonvirtual'] that correspond to the properties of the CLR MethodInfo.
+		"""
+		isNames = List<of String>(8)
+		if mi.isAbstract
+			isNames.add('abstract')
+		if mi.isFamily
+			isNames.add('protected')
+		# TODO: isFamilyAndAssembly, isFamilyOrAssembly
+		if mi.isPrivate
+			isNames.add('private')
+		if mi.isPublic
+			isNames.add('public')
+		if mi.isStatic
+			isNames.add('shared')
+		if not mi.isVirtual
+			isNames.add('nonvirtual')
+		return isNames
+
+	def _attribsForMethodInfo(mi as MethodBase) as AttributeList
+		return AttributeList()  # TODO:
+
+	def _badRelatedType(t as Type?) as bool
+		"""
+		Returns true if the given type, which comes from a parameter or return value, is unsupported.
+		For example, it's not public or it's nested. Members with bad types are skipped when scanning DLLs.
+		"""
+		if t is nil
+			return false
+		if t.isNested and not t.isGenericParameter
+			return true
+		# FYI: MS .NET 2.0 (but not Mono 1.2.6) will return true for .isNotPublic for types are "by ref"
+		if t.isByRef # TODO: or t.isArray
+			return _badRelatedType(t.getElementType)
+		if t.isNotPublic
+			return true
+		return false
+
+	def _memberTypeProxy(clrType as Type?) as ITypeProxy
+		"""
+		Returns a type proxy for a member type such as a parameter type or method return type.
+		In CLR, reference types are nilable by default.
+		"""
+		if clrType is nil
+			return .compiler.voidType
+		else if clrType.isValueType
+			return ClrTypeProxy(clrType)
+		else
+			return NilableTypeProxy(ClrTypeProxy(clrType))
+
+	def _memberTypeResultProxy(member as MemberInfo, clrType as Type?) as ITypeProxy
+		"""
+		Returns a type proxy for a member type such as a parameter type or method return type.
+		In CLR, reference types are nilable by default.
+		"""
+		if clrType is nil
+			return .compiler.voidType
+		else if clrType.isValueType
+			return ClrTypeProxy(clrType)
+		else
+			notNull = false
+			for attr in member.getCustomAttributes(true)
+				# The idea below in using the type name is to try for some compatibility with other languages that might also mark things "NotNull"
+				# such as Eiffel, XC#, Spec#, etc. I haven't checked to see what degree of compatibility has been achieved.
+				name = attr.getType.name
+				if name == 'NotNull' or name == 'NotNullAttribute' 
+					notNull = true
+					break
+			# CC: could the above be a one-liner?
+			# notNull = for attr in member.getCustomAttributes(true) where attr.getType.name == 'NotNull' get one true
+			# notNull = any true for attr in member.getCustomAttributes(true) where attr.getType.name == 'NotNull'
+			t = ClrTypeProxy(clrType) to ITypeProxy
+			return if(notNull, t, NilableTypeProxy(t))
+
+
+	## Code gen
+
+	get sharpKeyWord as String is abstract
+
+	get sharpName as String is override
+		return _name.replace('of', '')
+
+	get _computeSharpRef as String is override
+		if _genericParams.count
+			sb = StringBuilder()
+			# generic
+			name = .rootName
+			sb.append(name)
+			sb.append('<')
+			sep = ''
+			for param in _genericParams
+				sb.append(sep)
+				sb.append(param.sharpRef)
+				sep = ', '
+			sb.append('>')
+			sharp = sb.toString
+		else
+			sharp = .name
+		if .parentNameSpace and not .parentNameSpace.isRoot
+			sharp = .parentNameSpace.fullName + '.' + sharp
+		return sharp
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		if .isFake
+			return
+		assert not .isConstructed
+		.writeSharpAttribs(sw)
+		.writeSharpIsNames(sw)
+		sw.write('[.sharpKeyWord] [.rootName]')
+		if _genericParams.count
+			sw.write('<')
+			sep = ''
+			for param in _genericParams
+				sw.write(sep)
+				param.writeSharpDef(sw)
+				sep = ', '
+			sw.write('>')
+
+		.writeSharpInheritance(sw)
+
+		sep = ''
+		for inter in _baseInterfaces
+			sw.write(sep)
+			sw.write(inter.sharpRef)
+			sep = ', '
+
+		if _genericParams.count
+			sw.indent
+			for param in _genericParams
+				if param inherits GenericParam
+					param.writeSharpConstraint(sw)
+			sw.dedent
+
+		sw.writeAndIndent('{\n')
+		.writeSharpInvariantMethod(sw)
+		if _testMethod
+			_testMethod.writeSharpDef(sw)
+		for decl in _declsInOrder
+			.compiler.boxMemberStack.push(decl)
+			try
+				decl.writeSharpDef(sw)
+			finally
+				.compiler.boxMemberStack.pop
+		if .compiler.includeTests
+			.writeSharpTest(sw)
+		sw.dedentAndWrite('} // [.sharpKeyWord] [.name]\n')
+		sw.write('\n')
+
+	def writeSharpAttribs(sw as SharpWriter)
+		for attrib in _attribs
+			attrib.writeSharpDef(sw)
+
+	def writeSharpInheritance(sw as SharpWriter)
+		"""
+		Class uses this to write its base class declaration.
+		No box uses this to write interface implementation--that's handled in the Box class.
+		"""
+		pass
+
+	get sharpInvariantVisibility as String is abstract
+
+	def writeSharpInvariantMethod(sw as SharpWriter)
+		if .compiler.options['contracts'] <> 'methods'
+			return
+		sw.write('\n[.sharpInvariantVisibility] void invariant_[.rootName]() {\n')
+		sw.indent
+		if _baseClass and (not _baseClass.isFromAssembly or _baseClass.declForName('invariant_[_baseClass.rootName]'))
+			sw.write('invariant_[_baseClass.rootName]();\n')
+		.writeSharpInvariantChecks(sw)
+		sw.dedent
+		sw.write('}\n\n')
+
+	def writeAllSharpInvariantChecks(sw as SharpWriter)
+		"""
+		Writes all C# invariant checks including inherited. In support of -contracts:inline
+		"""
+		_writeAllSharpInvariantChecks(sw, this)
+
+	def _writeAllSharpInvariantChecks(sw as SharpWriter, box as Box)
+		if box.baseClass and not box.baseClass.isFromAssembly
+			_writeAllSharpInvariantChecks(sw, box.baseClass to !)
+		box.writeSharpInvariantChecks(sw)
+		
+	def writeSharpInvariantChecks(sw as SharpWriter)
+		"""
+		Writes the C# invariant checks just for this class.
+		"""
+		for expr in _invariants
+			sharpThis = 'typeof([.sharpName])'
+			sw.write('if (!')
+			expr.writeSharpDef(sw)
+			sw.write(') ')
+			sw.indent
+			sw.write('throw new InvariantException([expr.sharpSourceSite(.name, "invariant", sharpThis)], ')
+			expr.writeSharpBreakdown(sw)
+			sw.write('[sharpThis], null);\n')
+			sw.dedent
+
+	def writeSharpTest(sw as SharpWriter)
+		# Running tests from the static initializer seems like a good idea, but has been problematic at various times on both .NET and Mono, so no more:
+		# sw.write('\nstatic [.rootName]() { RunTestsIfNeeded(); }\n')
+		# -- er, it turned out that the problem was likely -dst on SourceSite. Consequently we could try returning to static initializers to trigger tests.
+		sw.write('\nprivate static bool __didStartTests = false;\n')
+		newWord = .newForSharpTest
+		sw.write('\npublic static[newWord] void RunTestsIfNeeded() { if (!__didStartTests) RunTests(); }\n')
+		sw.write('\npublic static[newWord] void RunTests()')
+		sw.writeAndIndent(' {\n')
+		sw.write('__didStartTests = true;\n')
+		sw.write('CobraImp.TestBegan("[.name]");\n')
+		if _testMethod
+			sw.write('[_testMethod.sharpName]();\n')
+		for decl in _declsInOrder
+			decl.writeSharpTestInvocation(sw)
+		sw.write('CobraImp.TestEnded("[.name]");\n')
+		sw.dedentAndWrite('}\n')
+
+	var _didWriteSharpTestInvocation = false
+
+	def writeSharpTestInvocation(sw as SharpWriter) is override
+		# used by the test option
+		if _didWriteSharpTestInvocation
+			return
+		if .isFake
+			return
+		assert .parentNameSpace
+		sw.write('\t\t[.qualifiedRootName].RunTestsIfNeeded();\n')
+		_didWriteSharpTestInvocation = true
+
+	get newForSharpTest as String
+		return ''
+
+
+class Class
+	inherits Box
+
+	var _baseNode as ITypeProxy?
+	var _subclasses = List<of Class>()
+
+	def init(token as IToken, name as String, paramList as List<of IType>, isNames as List<of String>, attribs as AttributeList, baseNode as ITypeProxy?, implementsNodes as List<of ITypeProxy>, docString as String?)
+		base.init(token, name, paramList, isNames, attribs, implementsNodes, docString)
+		_baseNode = baseNode
+
+	def init(clrType as Type)
+		base.init(TokenFix.empty, ClrTypeProxy.cobraNameForSharpBoxName(clrType.name), List<of IType>(), List<of String>(), AttributeList(), List<of ITypeProxy>(), nil)
+		if clrType.baseType
+			_baseNode = ClrTypeProxy(clrType.baseType)
+		_initClrType(clrType)
+
+	def _scanClrType
+		base._scanClrType
+		_scanIsNames
+		_scanImplements
+		_scanFields
+		_scanInitializers
+		_scanProperties
+		_scanMethods
+		_scanEvents
+		# TODO: _scanEnums
+		# TODO: scan all other nested types
+
+	def addSubFields
+		base.addSubFields
+		.addField('baseNode', _baseNode)
+
+	get isCallable as bool is override
+		return true
+		
+	def isDescendantOf(type as IType) as bool is override
+		if not .baseClass and _baseNode
+			.bindInh
+		if .compiler
+			type.bindInh
+		if this is type
+			return true
+		if type inherits Interface
+			if .isDescendantOfInterface(type)
+				return true
+		baseClass = .baseClass
+		assert baseClass is not this, this  # check for direct cycles
+		if baseClass
+			return baseClass.isDescendantOf(type)
+		else
+			return false
+
+	get isReference as bool is override
+		return true
+
+	get isSystemObject as bool is override
+		return _clrType and _clrType.fullName == 'System.Object'
+
+	get subclasses from var
+
+	def memberForName(name as String) as IMember?
+		# the next assertion fails for Tests\600-misc\404-implement-IEnumerable
+		# could not fix. I'm confused. Something to do with generics. So bail on generics:
+		# asserting .didBindInt is difficult because .memberForName gets invoked during bindInt
+		# if not .isGeneric
+		# 	assert .didBindInt  # TODO: is this legit? if so, push up to Container
+		m = base.memberForName(name)
+		if m is nil and _baseClass
+			m = _baseClass.memberForName(name)
+		if m is nil
+			m = .interfaceMemberForName(name)
+		# handle get/set parts like "someProp.get" or "[].set"
+		# `computeMatchingBaseMember` in Members.cobra is at least one that returns this
+		if m is nil and '.' in name
+			if name.endsWith('.get')
+				part = 'g'
+			else if name.endsWith('.set')
+				part = 's'
+			else
+				throw FallThroughException(name)
+			pd = .memberForName(name[:-4])
+			if pd inherits ProperDexer
+				branch part
+					on 'g'
+						m = pd.getPart
+					on 's'
+						m = pd.setPart
+				# TODO: cache the above back into the _decls
+			# TODO: ? else, throw FallThroughException(...)
+		return m
+
+	def _bindBase is override
+		if _baseNode
+			possible = _baseNode.realType
+			baseName = if(_baseNode inherits AbstractTypeIdentifier, (_baseNode to AbstractTypeIdentifier).name, nil)  # CC: if-inherits should work for expressions too
+			if possible inherits Class
+				_baseClass = possible
+			else if possible inherits Interface
+				assert baseName
+				.throwError('The base "[baseName]" is an interface. Try "implements" instead of "inherits".')
+			else if possible inherits Struct
+				assert baseName
+				.throwError('The base "[baseName]" is a struct. Classes cannot inherit from structs.')
+			else
+				assert baseName
+				.throwError('The base class "[baseName]" is not actually a class, it is a "[possible.englishName]".')
+		else
+			t = .compiler.libraryType('System.Object') to Class
+			if this is not t  # don't want Object to inherit Object
+				_baseClass = t
+		if _baseClass
+			_baseClass._subclasses.add(this)
+
+	def _bindInt
+		for decl in .declsInOrder
+			if decl inherits Initializer
+				foundInitializer = true
+				break
+		if not foundInitializer
+			# TODO: this should be changed to provide cover initializers for each of the public, inherited initializers
+			.addDecl(Initializer(.token, this, List<of Param>(), ['public'], AttributeList(), ''))
+		# Note that the _baseClass is not told to bindInt. That would fail for classes in other namespaces and it's unnecessary
+		base._bindInt
+		if .isDescendantOf(.compiler.libraryBox('System.Attribute')) and not .name.endsWith('Attribute')
+			.compiler.warning(this, 'When attributes are declared, they should be suffixed with "Attribute".')
+
+	def _badInterfaceError(type as IType) is override
+		msg = 'Cannot implement "[type.name]" which is a [type.englishName].'
+		if type inherits Class
+			msg += ' Use "inherits" instead.'
+		.throwError(msg)
+
+	def _finishOverloads
+		# deal with inheritance and overloads
+		assert _baseClass or .isSystemObjectClass
+		if _baseClass
+			#assert _baseClass.didBindInt
+			for decl in List<of IBoxMember>(_declsInOrder)
+				if decl inherits Method and not decl inherits Initializer  # TODO: I don't think this captures Indexers. Make a test case if needed, write: if decl.canBeOverloaded or if decl inherits ICanBeOverloaded
+					other = _baseClass.memberForName(decl.name)
+					if other
+						if decl inherits MemberOverload
+							overload = decl
+						else if decl inherits BoxMember
+							overload = MemberOverload(decl)
+							.registerOverload(overload)
+						else
+							throw FallThroughException(decl)
+						if other inherits MemberOverload
+							for member in other.members
+								assert not member inherits MemberOverload
+								overload.addInheritedMember(member)
+						else if other inherits BoxMember
+							overload.addInheritedMember(other)
+						else
+							throw FallThroughException(other)
+		base._finishOverloads
+
+	get englishName as String is override
+		return 'class'
+
+	## Code gen
+
+	get sharpInit as String is override
+		return 'null'
+
+	get sharpInvariantVisibility as String is override
+		return 'protected'
+
+	get sharpKeyWord as String is override
+		return 'class'
+
+	def writeSharpInheritance(sw as SharpWriter) is override
+		sw.write(' : ')
+		if _baseClass
+			sw.write(_baseClass.sharpRef)
+			didWrite = true
+		if didWrite
+			if _baseInterfaces.count
+				sw.write(', ')
+			else
+				sw.write(' ')
+
+	get newForSharpTest as String is override
+		return if(not _baseClass.isFake, ' new', '')
+
+
+class Interface
+	inherits Box
+
+	def init(token as IToken, name as String, paramList as List<of IType>, isNames as List<of String>, attribs as AttributeList, baseNodes as List<of ITypeProxy>, docString as String?)
+		base.init(token, name, paramList, isNames, attribs, baseNodes, docString)
+
+	def init(clrType as Type)
+		base.init(TokenFix.empty, ClrTypeProxy.cobraNameForSharpBoxName(clrType.name), List<of IType>(), List<of String>(), AttributeList(), List<of ITypeProxy>(), nil)
+		_initClrType(clrType)
+
+	def _scanClrType
+		base._scanClrType
+		_scanIsNames
+		_scanImplements
+		_scanFields
+		_scanProperties
+		_scanMethods
+		_scanEvents
+
+	get englishName as String is override
+		return 'interface'
+
+	get isReference as bool is override
+		return true
+
+	def isDescendantOf(type as IType) as bool is override
+		if this is type
+			return true
+		if type inherits Interface
+			if .isDescendantOfInterface(type)
+				return true
+		if .superType is type or .superType.isDescendantOf(type)
+			return true
+		return false
+
+	def memberForName(name as String) as IMember?
+		m = base.memberForName(name)
+		if m is nil
+			m = .interfaceMemberForName(name)
+			if m is nil and _baseClass
+				m = _baseClass.memberForName(name)
+		return m
+
+	## Code gen
+
+	get sharpInit as String is override
+		return 'null'
+
+	get sharpInvariantVisibility as String is override
+		throw ShouldNotCallException(.getType)
+
+	get sharpKeyWord as String is override
+		return 'interface'
+
+	def writeSharpInheritance(sw as SharpWriter) is override
+		if _baseInterfaces.count
+			sw.write(' : ')
+
+	def writeSharpInvariantMethod(sw as SharpWriter) is override
+		# Even when invariants are inherited by the classes and structs that implement them,
+		# the code gen for the interface invariant does not go "here", inside the C# interface definition.
+		pass
+
+	def writeSharpTest(sw as SharpWriter) is override
+		# Static methods can't be put in interfaces. However, at some point Cobra should support
+		# tests for interfaces which could then be run against the classes that implement them.
+		# Just requires more code gen smarts.
+		pass
+
+	def writeSharpTestInvocation(sw as SharpWriter) is override
+		pass
+
+
+class Struct
+	inherits Box
+
+	def init(token as IToken, name as String, paramList as List<of IType>, isNames as List<of String>, attribs as AttributeList, baseName as String?, interfaceNodes as List<of ITypeProxy>, docString as String?)
+		base.init(token, name, paramList, isNames, attribs, interfaceNodes, docString)
+
+	def init(clrType as Type)
+		base.init(TokenFix.empty, ClrTypeProxy.cobraNameForSharpBoxName(clrType.name), List<of IType>(), List<of String>(), AttributeList(), List<of ITypeProxy>(), nil)
+		_initClrType(clrType)
+
+	def _scanClrType
+		base._scanClrType
+		_scanIsNames
+		_scanImplements
+		_scanFields
+		_scanInitializers
+		_scanProperties
+		_scanMethods
+		_scanEvents
+	
+	get englishName as String is override
+		return 'struct'
+
+	get isCallable as bool is override
+		return true
+
+	get isReference as bool is override
+		return false
+
+	def memberForName(name as String) as IMember?
+		m = base.memberForName(name)
+		if m is nil and _baseClass
+			m = _baseClass.memberForName(name)
+		return m
+
+	## Code gen
+
+	get sharpInit as String is override
+		return ''  # blank to indicate there is no valid init
+
+	get sharpInvariantVisibility as String is override
+		return 'private'
+
+	get sharpKeyWord as String is override
+		return 'struct'
+
+	def writeSharpInheritance(sw as SharpWriter) is override
+		if _baseInterfaces.count
+			sw.write(' : ')
+
+
+class GenericParam
+	inherits CobraType
+	"""
+	A generic parameter *is* a type.
+	"""
+
+	var _name as String
+	var _constraints as List<of GenericConstraint>
+	var _index as int
+	var _objectClass as Class?
+	var _clrType as Type?
+
+	def init(name as String)
+		require name.length
+		base.init
+		_name = name
+		_constraints = List<of GenericConstraint>()
+
+	def init(genArgType as Type)
+		.init(genArgType.name)
+		_clrType = genArgType
+		# TODO: scan Constraints
+		
+	get name as String is override
+		return _name
+
+	get clrType from var
+
+	get constraints from var
+
+	get englishName as String is override
+		return 'generic parameter'
+
+	pro index from var
+
+	get isReference as bool is override
+		# Well, it's hard to say if a GenericParam is a reference or value type, but CompareExpr() influences us to say "true".
+		# TODO: if there are constraints on the generic param, examine them to determine answer
+		return true
+
+	def addMinFields
+		base.addMinFields
+		.addField('name', _name)
+
+	def addSubFields
+		base.addSubFields
+		.addField('constraints', _constraints)
+		.addField('index', _index)
+
+	def declForName(name as String) as IMember? is override
+		for constraint in _constraints
+			decl = constraint.declForName(name)
+			if decl
+				return decl
+		return _objectClass.declForName(name)
+
+	def memberForName(name as String) as IMember? is override
+		for constraint in _constraints
+			member = constraint.memberForName(name)
+			if member
+				return member
+		return _objectClass.memberForName(name)
+
+	def isDescendantOf(type as IType) as bool is override
+		if type is .compiler.libraryType('System.Object')
+			return true
+		if type.superType is nil  # the root type
+			return true
+		for constraint in _constraints
+			if constraint.isDescendantOf(type)
+				return true
+		return false
+
+	def secondaryConstructedTypeFor(box as Box, gpToType as Dictionary<of GenericParam, IType>) as IType is override
+		if gpToType.containsKey(this)
+			return gpToType[this]
+		else
+			for key in gpToType.keys
+				if key.name == .name
+					return gpToType[key]
+		throw FallThroughException(this)
+
+	def _bindInt
+		base._bindInt
+		_objectClass = .compiler.libraryClass('System.Object')
+		for constraint in _constraints
+			constraint.bindInt
+
+	get sharpInit as String is override
+		return 'default([_name])'
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		sw.write(.name)
+
+	def writeSharpConstraint(sw as SharpWriter)
+		if _constraints.count
+			sw.write(' where [_name] :  ')
+			sep = ''
+			for constraint in _constraints
+				sw.write(sep)
+				constraint.writeSharpDef(sw)
+				sep = ', '
+			sw.write('\n')
+
+
+class GenericConstraint
+	inherits SyntaxNode
+
+	def init(token as IToken)
+		base.init(token)
+
+	def isDescendantOf(type as IType) as bool
+		return false
+
+	def declForName(name as String) as IBoxMember?
+		"""
+		Returns nil by default.
+		"""
+		return nil
+
+	def memberForName(name as String) as IMember?
+		"""
+		Returns nil by default.
+		"""
+		return nil
+
+	def _bindInt
+		base._bindInt
+
+
+class GenericClassConstraint
+	inherits GenericConstraint
+	"""
+	Represents the generic constraint class
+	"""
+
+	def init(token as IToken)
+		base.init(token)
+
+	def writeSharpDef(sw as SharpWriter) is override
+		sw.write('class')
+
+
+class GenericStructConstraint
+	inherits GenericConstraint
+	"""
+	Represents the generic constraint class
+	"""
+
+	def init(token as IToken)
+		base.init(token)
+
+	def writeSharpDef(sw as SharpWriter) is override
+		sw.write('struct')
+
+
+class GenericCallableConstraint
+	inherits GenericConstraint
+	"""
+	Represents the generic constraint callable
+	"""
+
+	def init(token as IToken)
+		base.init(token)
+
+	def writeSharpDef(sw as SharpWriter) is override
+		sw.write('new()')
+
+
+class GenericTypeConstraint
+	inherits GenericConstraint
+	"""
+	Represents the generic constraint of a particular type.
+	"""
+
+	var _representedType as IType?
+	var _typeNode as ITypeProxy
+
+	def init(typeNode as ITypeProxy)
+		base.init((typeNode to ISyntaxNode).token)  # CC: could be potential for making arg a compound interface ISyntaxNode+ITypeProxy from the 'Speculative' list
+		_typeNode = typeNode
+
+	def isDescendantOf(type as IType) as bool is override
+		assert _representedType
+		return _representedType.isDescendantOf(type)
+
+# TODO?
+#	def declForName(name as String) as IBoxMember? is override
+#		assert _representedType
+#		return _representedType.declForName(name)
+
+	def memberForName(name as String) as IMember? is override
+		assert _representedType
+		return _representedType.memberForName(name)
+
+	def _bindInt
+		base._bindInt
+		if _representedType is nil
+			_representedType = _typeNode.realType
+			assert _representedType
+		if not _representedType inherits Class and not _representedType inherits Interface
+			.throwError('A generic type constraint must be a class or an interface. "[_representedType.name]" is not.')
+
+	def writeSharpDef(sw as SharpWriter) is override
+		sw.write(_representedType.sharpRef)

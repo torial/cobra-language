@@ -1,0 +1,1447 @@
+class Stmt
+	is abstract
+	inherits SyntaxNode
+
+	var _parent as INode?
+	
+	def init(token as IToken)
+		base.init(token)
+
+	pro parent from var
+		"""
+		The node that the statement belongs to. This is being set on an as-needed basis.
+		Typical needs are for error checking, but could also include other purposes such as code generation.
+		The common place to set a node's `parent` is in the `_bindImp` of the parent 
+		"""
+		
+	get lastToken as IToken
+		return .token
+
+	def afterParserRecognizesStatement
+		pass
+
+	def afterStatementBindImp
+		"""
+		Invoked to let expressions know when they are used as statements. This default
+		implementation does nothing. Invoked by OneBlockCodeMember and BlockStmt.
+		"""
+		pass
+
+	def noAssignmentAllowed(expr as Expr)
+		"""
+		Utility method for IfStmt and WhileStmt which do not allow assignment in
+		their expressions.
+		"""
+		if expr inherits BinaryOpExpr
+			if expr.op=='ASSIGN'
+				.throwError('Cannot make an assignment in a flow control expression. Change to == or make the assignment just above.')
+			else if expr.op=='BANG_EQUALS'
+				.throwError('Cannot use an augmented assignment in a flow control expression. "a != b" means "a = a ! b" where "!" is an operator concerning nil. If you meant "does not equal" then use "<>".')
+			else if expr.op.endsWith('_EQUALS')
+				.throwError('Cannot use an augmented assignment in a flow control expression. Change to == or make the assignment just above.')
+
+	def bindVar(ve as NameExpr) as IVar
+		"""
+		Computes the _var from the _varExpr which is either IdentifierExpr or AsExpr.
+		May call `_error` and `inferredType` as needed.
+		Typical use: _var = .bindVar(_varExpr)
+		"""
+		# TODO: would prefer to do this as a mixin with two class vars:
+		# var _varExpr as NameExpr
+		# var _var as IVar?
+		varr as IVar?
+		if ve inherits IdentifierExpr
+			# find or infer
+			definition as INamedNode?
+			canBeUndottedMember = .compiler.canNameBeUndottedMember(ve.name)
+			usingExistingLocal = false
+			if canBeUndottedMember
+				assert .compiler.boxStack.count
+				definition = .compiler.symbolForName(ve.name, canBeUndottedMember, false) to passthrough
+				if definition is nil
+					ve.errorUnknownId(ve.name)
+			else
+				definition = .compiler.findLocal(ve.name)
+				# infer a local var
+				it = .inferredType
+				if it is nil
+					.throwError('Cannot infer the type for "[ve.name]" from the "for" loop.')				
+				if definition is nil
+					definition = LocalVar(ve.token, it).bindAll to INamedNode  # CC: axe cast after "as this"
+					.compiler.curCodeMember.addLocal(definition to LocalVar)
+				else
+					# using an existing local. that's fine as long as the types are the name
+					usingExistingLocal = true
+			if definition inherits IVar
+				varr = definition
+				if usingExistingLocal
+					ve.bindImp  # can't do this at the beginning of this method as it interferes with type inference. but here, it's an existing var so no "Unknown identifier" error will occur
+					assert definition.type
+					if definition.type is .compiler.passThroughType
+						varr.type = definition.type
+					else if not it.isAssignableTo(definition.type to !)
+						.throwError('Cannot redeclare "[ve.name]" as "[it.name]" because it was declared as "[definition.type.name]" earlier.') # TODO: would be nice to give the location of the other declaration				
+			else
+				.throwError('The definition of "[ve.name]" is not a variable which is what the "for" loop requires.')
+			ve.bindImp
+		else if ve inherits AsExpr
+			ve.bindImp
+			assert ve.definition
+			varr = ve.definition to AbstractLocalVar
+		else
+			throw FallThroughException(ve)
+		return varr to !
+
+	def inferredType as IType?
+		"""
+		Used by .bindVar so that the subclasses can implement their inferred type logic.
+		"""
+		return nil
+
+	var _canSetLine as bool
+
+	def _bindImp
+		base._bindImp
+		_canSetLine = .compiler.willTrackLocals
+		# note that the code member stack can be empty because of class vars (ex: var _foo = true)
+
+	def sharpSourceSite as String
+		"""
+		Returns a C# "new SourceSite(...)" expression with the correct arguments for the current code generation.
+		"""
+		if .compiler.codeMemberStack.count
+			codeMember = .compiler.curCodeMember
+			return .sharpSourceSite(codeMember.box.name, codeMember.name, .sharpThis)
+		else
+			# example: var _x = someExpr ...
+			return .sharpSourceSite(.compiler.curBox.name, .compiler.curBoxMember.name, .sharpThis)
+		
+	def sharpSourceSite(boxName as String, memberName as String, sharpThis as String) as String
+		"""
+		Returns a C# "new SourceSite(...)" expression with the correct arguments for the current code generation.
+		The arguments to this method allow for some explicit control in special circumstances, such as `invariant`.
+		"""
+		require
+			boxName.length
+			memberName.length
+			sharpThis.length
+		body
+			boxName = Utils.sharpStringLiteralFor(boxName)
+			memberName = Utils.sharpStringLiteralFor(memberName)
+			tok = .token
+			fileName = tok.fileName
+			if not Path.isPathRooted(fileName)
+				fileName = Path.combine(Environment.currentDirectory, fileName)
+			fileName = Utils.sharpStringLiteralFor(fileName)
+			return 'new SourceSite([fileName], [tok.lineNum], [boxName], [memberName], [sharpThis])'
+
+	shared
+		var _inInitCall as bool
+		pro inInitCall from var
+	
+	get sharpThis as String
+		if _inInitCall  # C# won't allow 'this' in a base constructor call
+			return '"(uninitialized [.compiler.curBox.name] instance)"'
+		else if .compiler.codeMemberStack.count
+			return .compiler.curCodeMember.sharpThis
+		else
+			assert .compiler.boxMemberStack.count
+			# so not a code member
+			return '"(uninitialized [.compiler.curBox.name] instance)"'
+
+	def writeSharpSetLine(sw as SharpWriter)
+		if _canSetLine and .token.lineNum > 0
+			sw.write('CobraImp._curFrame._lineNum = [.token.lineNum];\n')
+
+	def writeSharpStmt(sw as SharpWriter)
+		assert .didBindImp
+		sw.node(this)
+		.writeSharpSetLine(sw)
+		.writeSharpDef(sw)
+
+
+class AssertStmt
+	inherits Stmt
+
+	var _expr as Expr
+	var _info as Expr?
+
+	def init(token as IToken, expr as Expr, info as Expr?)
+		base.init(token)
+		_expr = TruthExpr(expr)
+		_info = info
+
+	def addSubFields
+		base.addSubFields
+		.addField('expr', _expr)
+		.addField('info', _info)
+
+	def _bindImp
+		base._bindImp
+		_expr.bindImp
+		if _info
+			_info.bindImp
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		sw.write('if (CobraCore._willCheckAssert && !')
+		_expr.writeSharpDef(sw)
+		sw.write(') ')
+		sw.indent
+		sw.write('throw new AssertException([.sharpSourceSite], ')
+		_expr.writeSharpBreakdown(sw)
+		sw.write('[.sharpThis], ')
+		if _info
+			_info.writeSharpDef(sw)
+		else
+			sw.write('null')
+		sw.write(');\n')
+		sw.dedent
+
+
+class BranchStmt
+	inherits Stmt
+
+	var _expr as Expr
+	var _onParts as List<of BranchOnPart>
+	var _elsePart as BlockStmt?
+
+	def init(token as IToken, expr as Expr, onParts as List<of BranchOnPart>, elsePart as BlockStmt?)
+		base.init(token)
+		_expr = expr
+		_onParts = onParts
+		_elsePart = elsePart
+
+	def addSubFields
+		base.addSubFields
+		.addField('expr', _expr)
+		.addField('onParts', _onParts)
+		.addField('elsePart', _elsePart)
+
+	def _bindImp
+		base._bindImp
+		_expr.bindImp
+		for bop in _onParts
+			bop.bindImp
+		if _elsePart
+			_elsePart.bindImp
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		sw.write('switch(')
+		_expr.writeSharpDef(sw)
+		sw.write(') {\n')
+		sw.indent
+		for onPart in _onParts
+			sep = ''
+			for e in onPart.exprs
+				sw.write(sep)
+				sw.write('case ')
+				e.writeSharpDef(sw)
+				sw.write(': ')
+				sep = '\n'
+			onPart.block.writeSharpDef(sw)
+			if not onPart.block.stmts.count or not onPart.block.stmts[onPart.block.stmts.count-1] inherits ReturnStmt  # CC: use .last
+				sw.write('break;\n')
+		if _elsePart
+			sw.write('default: ')
+			_elsePart.writeSharpDef(sw)
+			sw.write('break;\n')
+		sw.dedent
+		sw.write('}\n')
+
+
+class BranchOnPart
+	inherits Node
+
+	var _exprs as List<of Expr>
+	var _block as BlockStmt
+
+	def init(exprs as List<of Expr>, block as BlockStmt)
+		base.init
+		_exprs = exprs
+		_block = block
+
+	def addSubFields
+		base.addSubFields
+		.addField('exprs', _exprs)
+		.addField('block', _block)
+
+	get block from var
+
+	get exprs from var
+
+	def _bindImp
+		base._bindImp
+		for expr in _exprs
+			expr.bindImp
+		_block.bindImp
+
+
+class BlockStmt
+	inherits Stmt
+	"""
+	A BlockStmt holds a series of statements which are the target of complex statement such
+	if, while, etc. BlockStmts are *not* the target of a method or property.
+	"""
+
+	var _stmts as List<of Stmt>
+	var _ifInheritsVar as IVar?
+	var _ifInheritsType as IType?
+
+	def init(token as IToken, stmts as List<of Stmt>)
+		base.init(token)
+		_stmts = stmts
+
+	get lastToken as IToken
+		return if(_stmts.count, _stmts[_stmts.count-1].lastToken, base.lastToken)
+
+	def addSubFields
+		base.addSubFields
+		.addField('stmts', _stmts)
+
+	def setIfInherits(varr as IVar, type as IType)
+		_ifInheritsVar = varr
+		_ifInheritsType = type
+
+	get stmts from var
+
+	def _bindImp
+		base._bindImp
+		for stmt in _stmts
+			stmt.parent = this
+			try
+				stmt.bindImp
+				stmt.afterStatementBindImp  # to let expressions know when they are used as statements
+			catch ne as NodeException
+				.compiler.recordError(ne)
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		.writeSharpDef(sw, true, nil)
+
+	def writeSharpDef(sw as SharpWriter, close as bool)
+		.writeSharpDef(sw, close, nil)
+
+	def writeSharpDef(sw as SharpWriter, top as String?)
+		.writeSharpDef(sw, true, top)
+
+	def writeSharpDef(sw as SharpWriter, close as bool, top as String?)
+		sw.node(this)
+		sw.write(' {\n')
+		sw.indent
+		if top
+			sw.write(top)
+		if _ifInheritsVar
+			#typeName = _ifInheritsType.sharpRef
+			#newName = '_lh_' + _ifInheritsVar.name + '_' + _ifInheritsType.sharpNameComponent
+			#sw.write('[typeName] [newName] = ([typeName])[_ifInheritsVar.sharpName];\n')
+			#_ifInheritsVar.useSharpNameStack.push(newName)
+			ifInheritsCount = _ifInheritsVar.ifInheritsStack.count  # AssignExpr could pop our _ifInheritsType. We detect that with the count.
+			_ifInheritsVar.ifInheritsStack.push(_ifInheritsType)
+		for stmt in _stmts
+			stmt.writeSharpStmt(sw)
+		if _ifInheritsVar and _ifInheritsVar.ifInheritsStack.count > ifInheritsCount
+			#_ifInheritsVar.useSharpNameStack.pop
+			_ifInheritsVar.ifInheritsStack.pop
+		if close
+			sw.dedent
+			sw.write('}\n')
+
+
+class BreakStmt
+	inherits Stmt
+
+	def init(tok as IToken)
+		base.init(tok)
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		sw.write('break;\n')
+
+
+class ContinueStmt
+	inherits Stmt
+
+	def init(tok as IToken)
+		base.init(tok)
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		sw.write('continue;\n')
+
+
+class ExpectStmt
+	inherits Stmt
+
+	var _exceptionTypeNode as ITypeProxy
+	var _exceptionType as IType?
+	var _block as BlockStmt
+	var _varNumber as int
+
+	def init(token as IToken, exceptionTypeNode as ITypeProxy, block as BlockStmt)
+		base.init(token)
+		_exceptionTypeNode = exceptionTypeNode
+		_block = block
+
+	get lastToken as IToken is override
+		return _block.lastToken
+
+	def addSubFields
+		base.addSubFields
+		.addField('exceptionTypeNode', _exceptionTypeNode)
+		.addField('exceptionType', _exceptionType)
+		.addField('block', _block)
+
+	def _bindImp
+		base._bindImp
+		if _exceptionType is nil
+			_exceptionType = (_exceptionTypeNode.bindAll to ITypeProxy).realType  # CC: axe cast
+		assert _exceptionType, this
+		excClass = .compiler.libraryClass('System.Exception')
+		if not _exceptionType.isDescendantOf(excClass)
+			.throwError('Can only use Exception and its descendants for "expect". "[_exceptionType.name]" does not inherit the Exception class.')
+		.compiler.curBox.makeNextPrivateSerialNumber  # `writeSharpDef` uses two serial nums
+		_varNumber = .compiler.curBox.makeNextPrivateSerialNumber
+		_block.bindImp
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		exceptionTypeRef = _exceptionType.sharpRef
+		gotWriteExceptionVarName = '_lh_expect_[_varNumber-1]'  # lh => "local helper"
+		sw.write('bool [gotWriteExceptionVarName] = false;\n')
+		sw.write('try ')
+		_block.writeSharpDef(sw)
+		sw.writeAndIndent('catch ([exceptionTypeRef]) {\n')
+		sw.write('// exactly what is expected\n')
+		sw.write('[gotWriteExceptionVarName] = true;\n')
+		sw.dedentAndWrite('}\n')
+		wrongExceptionVarName = '_lh_expect_[_varNumber]'
+		assert gotWriteExceptionVarName<>wrongExceptionVarName
+		sw.writeAndIndent('catch (Exception [wrongExceptionVarName]) {\n')
+		sw.write('throw new ExpectException(typeof([exceptionTypeRef]), [wrongExceptionVarName]);\n')
+		sw.dedentAndWrite('}\n')
+		sw.write('if (![gotWriteExceptionVarName]) throw new ExpectException(typeof([exceptionTypeRef]), null);\n')
+
+
+class ForStmt
+	inherits Stmt
+	"""
+	Abstract base class for ForNumericStmt and ForEnumerablebase.
+	"""
+
+	var _varExpr as NameExpr
+	var _var as IVar?
+	var _block as BlockStmt
+
+	def init(token as IToken, varr as NameExpr, block as BlockStmt)
+		base.init(token)
+		_varExpr = varr
+		_block = block
+
+	get varExpr from var
+	
+	get var from var
+	
+	get block from var
+	
+	get lastToken as IToken is override
+		return _block.lastToken
+
+	def addSubFields
+		base.addSubFields
+		.addField('varExpr', _varExpr)
+		.addField('var', _var)
+		.addField('block', _block)
+
+	def _bindImp
+		base._bindImp
+		_varExpr.bindImp
+		if _varExpr.definition
+			if _varExpr.definition inherits IVar
+				_var = _varExpr.definition to IVar
+			else
+				.throwError('Expecting a variable not a [_varExpr.definition.getType.name].')  # TODO: what's the best way to report what was found?
+		else
+			assert _varExpr.hasError
+		#if not var.isTracked  TODO disabled this to get tests\200-classes\804-test.cobra working.
+		if false
+			varr = .var
+			existingVar = .compiler.curCodeMember.findLocal(varr.name)
+			trace existingVar, varr.name, varr
+			if existingVar
+				# that's fine as long as the types are the name
+				if varr.type is .compiler.passThroughType
+					varr.type = existingVar.type
+				else if existingVar.type is not varr.type
+					.throwError('Cannot redeclare "[varr.name]" as "[varr.type]" because it was declared as "[existingVar.type]" earlier.') # TODO: would be nice to give the location of the other declaration
+			
+# TODO: check for existing  variables
+#		if 1
+#			ns = .compiler.nameSpaceStack.peek
+#			existingVar = ns.findLocal(varr.name)
+#			if existingVar
+#				# that's fine as long as the types are the name
+#				if varr.type is .compiler.passThroughType
+#					varr.type = existingVar.type
+#				else if existingVar.type is not varr.type
+#					.error('Cannot redeclare "[varr.name]" as "[varr.type]" because it was declared as "[existingVar.type]" earlier.')
+#			else
+#				.compiler.nameStack.peek.pushName(varr)   # TODO should be pushSymbol() or pushVar()
+#		varr.bindAll  # CallExpr() wants its definition to have bound int, so here we call bindAll instead of bindImp
+		_block.bindImp
+		# TODO axe this
+		#if not varr.isTracked
+		#	.compiler.nameStack.peek.pop   # TODO should be popSymbol() or popVar()
+
+
+class ForNumericStmt
+	inherits ForStmt
+
+	var _start as Expr
+	var _stop as Expr
+	var _dir as int
+	var _step as Expr?
+
+	def init(token as IToken, varr as NameExpr, start as Expr, stopp as Expr, dir as int, stepp as Expr?, block as BlockStmt)
+		require
+			dir==-1 or dir==+1
+		body
+			base.init(token, varr, block)
+			_start = start
+			_stop = stopp
+			_dir = dir
+			_step = stepp
+
+	def addSubFields
+		base.addSubFields
+		.addField('start', _start)
+		.addField('stop', _stop)
+		.addField('dir', _dir)
+		.addField('step', _step)
+		.addField('block', _block)
+
+	def _bindImp
+		_start.bindImp
+		_stop.bindImp
+		if _step
+			_step.bindImp
+		_var = .bindVar(_varExpr)
+		base._bindImp
+		_block.bindImp
+
+	def inferredType as IType? is override
+		return _start.type.greatestCommonDenominatorWith(_stop.type to !)
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		csVar = _var.sharpName
+		trackLocals = .compiler.willTrackLocals
+		if trackLocals
+			sw.write('for (CobraImp.SetLocal("[.var.name]", [csVar]=')
+		else
+			sw.write('for ([csVar]=')
+		_start.writeSharpDef(sw)
+		if trackLocals
+			sw.write(')')
+		if _var.type.isDynamic
+			sw.write('; CobraImp.DynamicCompare([csVar], ')
+			_stop.writeSharpDef(sw, false)
+			sw.write(')[if(_dir==1, "<", ">")]0')
+			opName = if(_dir==1, 'op_Addition', 'op_Subtraction')
+			sw.write('; [csVar]=CobraImp.DynamicOp("[opName]", [csVar], ')
+			if _step
+				_step.writeSharpDef(sw, false)
+			else
+				sw.write('1')
+			sw.write(')')
+		else
+			sw.write('; [csVar]')
+			sw.write(if(_dir==1, '<', '>'))
+			_stop.writeSharpDef(sw)
+			sw.write('; ')
+			if _step
+				if _dir==1
+					sw.write('[csVar]+=')
+				else
+					sw.write('[csVar]-=')
+				_step.writeSharpDef(sw)
+			else
+				if _dir==1
+					sw.write('[csVar]++')
+				else
+					sw.write('[csVar]--')
+		sw.write(')')
+		_block.writeSharpDef(sw)
+
+
+class ForEnumerableStmt
+	inherits ForStmt
+
+	var _what as Expr
+	var _varNumber as int
+
+	def init(token as IToken, varr as NameExpr, what as Expr, block as BlockStmt)
+		base.init(token, varr, block)
+		_what = what
+
+	def addSubFields
+		base.addSubFields
+		.addField('_what', _what)
+		.addField('_varNumber', _varNumber)
+
+	get what from var
+	
+	get varNumber from var
+	
+	def _bindImp
+		_what.bindImp
+		if _what.type.isDynamic
+			_what.contextType = .compiler.libraryType('System.Collections.IEnumerable')
+		_var = .bindVar(_varExpr)
+		base._bindImp
+		_varNumber = .compiler.curBox.makeNextPrivateSerialNumber
+		_block.bindImp
+
+	def inferredType as IType? is override
+		assert _what.type
+		return _what.type.innerType
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		# in a C# foreach, (1) you must declare a new variable, (2) you cannot reassign it and (3) you cannot access it after the loop
+		# these constraints don't exist in Cobra
+		helperName = '_lh_for_[_var.name]_[_varNumber]'
+		sw.write('foreach ([_var.type.sharpRef] [helperName] in ')
+
+		# TODO: the sharpRef of a type is not qualified and there is no using System.Collections;
+		# _what.writeSharpDefInContext(sw, false)
+		if _what.type.isDynamic
+			sw.write('(System.Collections.IEnumerable)')
+			_what.writeSharpDef(sw, true)
+		else
+			_what.writeSharpDef(sw, false)
+
+		sw.write(')')
+		stmt = '[.var.sharpName] = [helperName]'
+		if .compiler.willTrackLocals
+			stmt = 'CobraImp.SetLocal("[.var.name]", [stmt])'
+		stmt += ';\n'
+		_block.writeSharpDef(sw, stmt)
+
+
+class IfStmt
+	inherits Stmt
+
+	var _cond as Expr
+	var _trueStmts as BlockStmt
+	var _falseStmts as BlockStmt?
+	var _doNotPopIfInheritsStack as bool
+	var _ifInheritsVar as IVar?
+
+	def init(token as IToken, cond as Expr, trueStmts as BlockStmt, falseStmts as BlockStmt?)
+		base.init(token)
+		_cond = cond
+		_trueStmts  = trueStmts
+		_falseStmts = falseStmts
+
+	get cond from var
+
+	get ifInheritsVar from var
+
+	get trueStmts from var
+	
+	get falseStmts from var
+	
+	get lastToken as IToken is override
+		if _falseStmts
+			return _falseStmts.lastToken
+		else
+			return _trueStmts.lastToken
+
+	def addSubFields
+		base.addSubFields
+		.addField('cond', _cond)
+		.addField('trueStmts', _trueStmts)
+		.addField('falseStmts', _falseStmts)
+		.addField('ifInheritsVar', _ifInheritsVar)
+
+	def _bindImp
+		base._bindImp
+		try
+			_cond.bindImp
+		catch ne as NodeException
+			.compiler.recordError(ne)
+		success
+			_doNotPopIfInheritsStack = false
+			.noAssignmentAllowed(_cond)
+			if _cond.type is not .compiler.boolType
+				_cond = TruthExpr(_cond).bindImp to TruthExpr  # CC: axe cast when supporting 'as this'
+			cond = _cond
+			ifInherits = false
+			# TODO: handle the "x inherits Y" being part of a sequence of "and"ed exprs
+			# CC: combine some of the if statements below when "if inherits" can handle complex expressions
+			if cond inherits InheritsExpr
+				left = cond.left
+				if left inherits IdentifierExpr
+					leftVar = left.definition
+					if leftVar inherits IVar  # if-inherits smarts only work on variables
+						# if x inherits Y ...
+						if (right = cond.right) inherits IPotentialTypeExpr
+							assert right.potentialType
+							leftVar.ifInheritsStack.push(right.potentialType to !)
+						else
+							throw FallThroughException(right)
+						ifInherits = true
+						_trueStmts.setIfInherits(leftVar, leftVar.ifInheritsStack.peek to !)
+				else if left inherits AssignExpr
+					if left.left inherits IdentifierExpr
+						leftVar = (left.left to IdentifierExpr).definition
+						if leftVar inherits IVar
+							# if (x = expr) inherits Y ...
+							if (right = cond.right) inherits IPotentialTypeExpr
+								leftVar.ifInheritsStack.push(right.potentialType to !)
+							else
+								throw FallThroughException(right)
+							ifInherits = true
+							_trueStmts.setIfInherits(leftVar, leftVar.ifInheritsStack.peek to !)
+			if not ifInherits
+				# check for an if-not-nil
+				if cond inherits TruthExpr
+					if cond.expr inherits IdentifierExpr
+						leftVar = (cond.expr to IdentifierExpr).definition
+						leftType = leftVar.typeForIdentifier
+						if leftType inherits NilableType or (leftType.isReference and leftType is not .compiler.libraryType('System.Object'))
+							# if x ...
+							# Note: The check for System.Object just above is due to the fact that a type of System.Object can point to boxed values such as ints and bools which Cobra will treat properly at runtime.
+							notNil = true
+			# TODO: the checks about variables that are never nil (/always non-nil) need to happen at the *expression* level so they kick in for assert, require, etc.
+			if not ifInherits and not notNil
+				if cond inherits CompareExpr
+					if cond.op in ['ISNOT', 'NE'] and cond.left inherits IdentifierExpr and cond.right inherits NilLiteral
+						# if x is not nil ...
+						# if x <> nil ...
+						# TODO: also handle "if nil is not x"
+						# TODO? "if not x is nil"  "if nil is not x"
+						notNil = true
+						leftVar = (cond.left to IdentifierExpr).definition
+			if notNil
+				if leftVar inherits IVar
+					if leftVar.type inherits WrappedType
+						leftVar.ifInheritsStack.push((leftVar.type to WrappedType).theWrappedType)
+						ifInherits = true
+				else
+					throw FallThroughException(leftVar)
+			if ifInherits
+				if leftVar inherits IVar
+					_trueStmts.setIfInherits(leftVar, leftVar.ifInheritsStack.peek to !)
+				else
+					throw FallThroughException(leftVar)
+		if ifInherits
+			if leftVar inherits IVar
+				_ifInheritsVar = leftVar
+				stackCount = leftVar.ifInheritsStack.count
+			else
+				assert false, leftVar
+		_trueStmts.parent = this
+		_trueStmts.bindImp
+		if ifInherits
+			if not _doNotPopIfInheritsStack
+				(leftVar to IVar).ifInheritsStack.pop
+			assert (leftVar to IVar).ifInheritsStack.count == stackCount - 1
+			
+		if _falseStmts
+			_falseStmts.parent = this
+			_falseStmts.bindImp
+
+	def doNotPopIfInheritsStack
+		_doNotPopIfInheritsStack = true
+
+	def writeSharpDef(sw as SharpWriter)
+		# if you're looking for if-inherits related code gen, see BlockStmt
+		base.writeSharpDef(sw)
+		sw.write('if (')
+		_cond.writeSharpDef(sw, false)
+		sw.write(')')
+		_trueStmts.writeSharpDef(sw, false)
+		sw.dedent
+		if _falseStmts
+			sw.write('} else')
+			_falseStmts.writeSharpDef(sw, false)
+			sw.dedent
+		sw.write('}\n')
+
+
+class ListenOrIgnoreStmt
+	is abstract
+	inherits Stmt
+	
+	var _event as Expr?
+	var _target as Expr?
+
+	def init(token as IToken, eventRef as Expr, target as Expr)
+		base.init(token)
+		_event = eventRef
+		_target = target
+
+	def addSubFields
+		base.addSubFields
+		.addField('event', _event)
+		.addField('target', _target)
+
+	get event from var
+	
+	get target from var
+
+	def _bindImp
+		base._bindImp
+		_event.bindImp
+		_target.bindImp
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		_event.writeSharpDef(sw, false)
+		sw.write(' [.sharpOperator] ')
+		_target.writeSharpDef(sw, false)
+		sw.writeLine(';')
+
+	get sharpOperator as String is abstract
+
+
+class ListenStmt
+	inherits ListenOrIgnoreStmt
+
+	def init(token as IToken, eventRef as Expr, target as Expr)
+		base.init(token, eventRef, target)
+
+	get sharpOperator as String is override
+		return '+='
+
+
+class IgnoreStmt
+	inherits ListenOrIgnoreStmt
+
+	def init(token as IToken, eventRef as Expr, target as Expr)
+		base.init(token, eventRef, target)
+
+	get sharpOperator as String is override
+		return '-='
+
+
+class PassStmt
+	inherits Stmt
+	
+	def init(token as IToken)
+		base.init(token)
+		
+
+class PrintStmt
+	inherits Stmt
+
+	var _destination as Expr?
+	var _args as List<of Expr>
+	var _stop as bool
+
+	def init(token as IToken, destination as Expr?, args as List<of Expr>, stopp as bool)
+		base.init(token)
+		_destination = destination
+		_args = args
+		_stop = stopp
+
+	def _bindImp
+		base._bindImp
+		if _destination
+			_destination.bindImp
+		for arg in _args
+			arg.bindImp
+
+	def addSubFields
+		base.addSubFields
+		.addField('stop', _stop)
+		.addField('destination', _destination)
+		.addField('args', _args)
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		if _destination
+			_destination.writeSharpDef(sw, true)
+			methodName = if(_stop, 'Write', 'WriteLine')
+			sw.write('.[methodName](')
+		else
+			methodName = if(_stop, 'PrintStop', 'PrintLine')
+			sw.write('CobraImp.[methodName](')
+		sep = ''
+		for arg in _args
+			sw.write(sep)
+			if arg.isKindOf(.compiler.libraryType('System.String')) and not arg.type.isDynamic
+				sw.write('(')
+			else
+				sw.write('CobraImp.ToString(')
+			arg.writeSharpDef(sw)
+			sw.write(')')
+			sep = '+" "+'
+		sw.writeLine(');')
+
+
+class PrintRedirectStmt
+	inherits Stmt
+
+	var _destination as Expr
+	var _block as BlockStmt
+
+	def init(token as IToken, destination as Expr, block as BlockStmt)
+		base.init(token)
+		_destination = destination
+		_block = block
+
+	get lastToken as IToken is override
+		return _block.lastToken
+
+	def _bindImp
+		base._bindImp
+		_destination.bindImp
+		_block.bindImp
+
+	def addSubFields
+		base.addSubFields
+		.addField('destination', _destination)
+		.addField('block', _block)
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		sw.write('CobraImp.PushPrintTo(')
+		_destination.writeSharpDef(sw, false)
+		sw.write(');\n')
+		sw.write('try')
+		_block.writeSharpDef(sw)
+		sw.write('finally {\n')
+		sw.indent
+		sw.write('CobraImp.PopPrintTo();\n')
+		sw.dedent
+		sw.write('}\n')
+
+
+class ReturnStmt
+	inherits Stmt
+
+	var _expr as Expr?
+	var _sharpResultVarName as String?
+
+	def init(token as IToken, expr as Expr?)
+		base.init(token)
+		_expr = expr
+
+	def addSubFields
+		base.addSubFields
+		.addField('expr', _expr)
+
+	pro sharpResultVarName from var
+
+	def _bindImp
+		base._bindImp
+		expr = _expr
+		curCodeMember = .compiler.codeMemberStack.peek
+		if expr
+			_expr.bindImp
+			if not expr.canBeAssignedTo(curCodeMember.resultType)
+				.throwError('Cannot return [expr.type.name] because "[curCodeMember.name]" is declared to return a [curCodeMember.resultType.name].')
+			_expr.contextType = curCodeMember.resultType
+		else
+			if curCodeMember.resultType is not .compiler.voidType
+				.throwError('Return statement must return a [curCodeMember.resultType.name], or [curCodeMember.name] must have its return type removed.')
+		curCodeMember.hasReturnStmt = true
+		_sharpResultVarName = curCodeMember.sharpResultVarName
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		ensurePart = .compiler.curCodeMember.ensurePart
+		willEnsure = ensurePart and ensurePart.willWriteSharp
+		if willEnsure
+			sw.write('_lh_canEnsure = true;\n')
+		if _expr
+			if willEnsure and _sharpResultVarName and _sharpResultVarName.length
+				sw.write('return [_sharpResultVarName]=')
+				_expr.writeSharpDefInContext(sw)
+				sw.write(';\n')
+			else
+				sw.write('return ')
+				_expr.writeSharpDefInContext(sw)
+				sw.write(';\n')
+		else
+			sw.write('return;\n')
+
+
+class TraceStmt
+	inherits Stmt
+
+	var _codePart as AbstractMethod
+
+	def init(token as IToken, codePart as AbstractMethod)
+		base.init(token)
+		_codePart = codePart
+
+
+class TraceLocationStmt
+	inherits TraceStmt
+
+	def init(token as IToken, codePart as AbstractMethod)
+		base.init(token, codePart)
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		sw.write('CobraCore.Tracer.Trace([.sharpSourceSite]);\n')
+
+
+class TraceAllStmt
+	inherits TraceStmt
+
+	def init(token as IToken, codePart as AbstractMethod)
+		base.init(token, codePart)
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		sw.write('CobraCore.Tracer.Trace([.sharpSourceSite], "this", [_codePart.sharpThis]')
+		for param in _codePart.params
+			sw.write(', "[param.name]", [param.sharpName]')
+		for local in _codePart.locals
+			sw.write(', "[local.name]", [local.sharpName]')
+		sw.write(');\n')
+
+
+class TraceExprsStmt
+	inherits TraceStmt
+
+	var _exprs as List<of Expr>
+
+	def init(token as IToken, codePart as AbstractMethod, exprs as List<of Expr>)
+		base.init(token, codePart)
+		_exprs = exprs
+
+	def _bindImp
+		base._bindImp
+		for expr in _exprs
+			expr.bindImp
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		sw.write('CobraCore.Tracer.Trace([.sharpSourceSite]')
+		sep = ', '
+		for expr in _exprs
+			sw.write('[sep][Utils.sharpStringLiteralFor(expr.toCobraSource)][sep]')
+			expr.writeSharpDef(sw, false)
+		sw.write(');\n')
+
+
+class TryStmt
+	inherits Stmt
+
+	var _tryBlock as BlockStmt
+	var _catchBlocks as List<of CatchBlock>
+	var _successBlock as BlockStmt?
+	var _finallyBlock as BlockStmt?
+	var _varNumber as int
+
+	def init(token as IToken, tryBlock as BlockStmt, catchBlocks as List<of CatchBlock>, successBlock as BlockStmt?, finallyBlock as BlockStmt?)
+		base.init(token)
+		_tryBlock = tryBlock
+		_catchBlocks = catchBlocks
+		_successBlock = successBlock
+		_finallyBlock = finallyBlock
+
+	get lastToken as IToken is override
+		if _finallyBlock
+			return _finallyBlock.lastToken
+		if _successBlock
+			return _successBlock.lastToken
+		if _catchBlocks.count
+			return _catchBlocks[_catchBlocks.count-1].lastToken
+		return _tryBlock.lastToken
+
+	def addSubFields
+		base.addSubFields
+		.addField('tryBlock', _tryBlock)
+		.addField('catchBlocks', _catchBlocks)
+		.addField('succesBlock', _successBlock)
+		.addField('finallyBlock', _finallyBlock)
+
+	def _bindImp
+		base._bindImp
+		_varNumber = .compiler.curBox.makeNextPrivateSerialNumber
+		_tryBlock.bindImp
+		for cb in _catchBlocks
+			cb.bindImp
+		if _successBlock
+			_successBlock.bindImp
+		if _finallyBlock
+			_finallyBlock.bindImp
+		# error check
+		if _catchBlocks.count
+			for stmt in _tryBlock.stmts
+				if stmt inherits YieldStmt
+					stmt.recordError('Cannot yield a value in the body of a try block with a catch clause.')
+		# error check
+		for cb in _catchBlocks
+			for stmt in cb.block.stmts
+				if stmt inherits YieldStmt
+					stmt.recordError('Cannot yield a value in the body of a catch clause.')
+		# error check
+		if _finallyBlock
+			for stmt in _finallyBlock.stmts
+				if stmt inherits YieldStmt
+					stmt.recordError('Cannot yield in the body of a finally clause.')
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		if _successBlock
+			# C# has no "success" (or in Python, "else") block for the "try" statement
+			# so it has to be simulated
+			helperName = '_lh_success_[_varNumber]'
+			sw.write('bool [helperName] = false;\n')
+			if _finallyBlock
+				sw.write('try {\n')
+				sw.indent
+			sw.write('try')
+			_tryBlock.writeSharpDef(sw, false)
+			sw.write('[helperName] = true;\n')
+			sw.dedent
+			sw.write('}\n')
+			if _catchBlocks.count
+				.writeCatchBlocks(sw)
+			else
+				sw.write('finally { }\n')  # syntactically necessary
+			sw.write('if ([helperName])')
+			_successBlock.writeSharpDef(sw)
+			if _finallyBlock
+				sw.dedent
+				sw.write('}\n')
+				sw.write('finally')
+				_finallyBlock.writeSharpDef(sw)
+		else
+			sw.write('try')
+			_tryBlock.writeSharpDef(sw)
+			.writeCatchBlocks(sw)
+			if _finallyBlock
+				sw.write('finally')
+				_finallyBlock.writeSharpDef(sw)
+
+	def writeCatchBlocks(sw as SharpWriter)
+		for eb in _catchBlocks
+			sw.write('catch')
+			if eb.type
+				sw.write(' ([eb.type.sharpRef]')
+				if eb.varName
+					helperName = eb.sharpHelperName
+					sw.write(' [helperName]')
+				sw.write(')')
+			sb = StringBuilder()
+			if .compiler.hasDetailedStackTraceOption
+				sb.append('CobraImp.HandledException();\n')
+			if eb.varName
+				trackLocals = .compiler.willTrackLocals
+				if trackLocals
+					sb.append('CobraImp.SetLocal("[eb.varName]", ')
+				sb.append('[eb.sharpVarName] = [helperName]')
+				if trackLocals
+					sb.append(')')
+				sb.append(';\n')
+			eb.block.writeSharpDef(sw, sb.toString)
+
+
+class CatchBlock
+	inherits SyntaxNode
+
+	var _var as AbstractLocalVar?
+	var _typeNode as ITypeProxy?
+	var _type as IType?
+	var _block as BlockStmt
+	var _varName as String?
+	var _sharpHelperName as String?
+
+	def init(token as IToken, block as BlockStmt)
+		"""
+		This is for `success`, `finally` and typeless `catch` blocks.
+		"""
+		base.init(token)
+		_block = block
+
+	def init(token as IToken, varr as AbstractLocalVar, block as BlockStmt)
+		"""
+		This is for `catch` blocks that specify a type and variable.
+		"""
+		base.init(token)
+		_var = varr
+		_varName = varr.name
+		_block = block
+
+	def init(token as IToken, typeNode as ITypeProxy, block as BlockStmt)
+		"""
+		This is for `catch` blocks that specify a type, but no variable.
+		"""
+		base.init(token)
+		_typeNode = typeNode
+		_block = block
+
+	get block from var
+
+	get type from var
+
+	get varName from var
+
+	get lastToken as IToken
+		return _block.lastToken
+
+	def _bindImp
+		base._bindImp
+		if _var
+			_var.bindImp
+			# TODO: should this be using .bindVar like others?
+			# TODO: wtf is isTracked again?
+			if not _var.isTracked
+				varr = _var to LocalVar  # CC: axe typecast
+				codePart = .compiler.codeMemberStack.peek
+				existingVar = codePart.findLocal(varr.name)
+				if existingVar
+					if existingVar.type is not varr.type
+						.throwError('Cannot redeclare "[varr.name]" as "[varr.type.name]" because it was declared as "[existingVar.type.name]" earlier.')
+				else
+					codePart.addLocal(varr)
+			if _type is nil
+				_type = _var.type
+				assert _type
+		else if _typeNode
+			_typeNode.bindImp
+			_type = _typeNode.realType  # CC: combine with above: _type = _typeNode.bindImp.realType
+		_sharpHelperName = '_lh_catch_[.compiler.curBox.makeNextPrivateSerialNumber]'
+		_block.bindImp
+
+	## Code gen
+
+	get sharpHelperName from var
+
+	get sharpVarName as String
+		return _var.sharpName
+
+
+class ThrowStmt
+	inherits Stmt
+
+	var _expr as Expr?
+
+	def init(token as IToken, expr as Expr?)
+		base.init(token)
+		_expr = expr
+
+	def addSubFields
+		base.addSubFields
+		.addField('expr', '_expr')
+
+	def _bindImp
+		base._bindImp
+		if _expr
+			_expr.bindImp
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		sw.write('throw ')
+		if _expr
+			if _expr.type.isDynamic
+				sw.write('((System.Exception)')
+			_expr.writeSharpDef(sw, false)
+			if _expr.type.isDynamic
+				sw.write(')')
+		sw.write(';\n')
+
+
+class UsingStmt
+	inherits Stmt
+
+	var _varExpr as NameExpr
+	var _var as IVar?
+	var _initExpr as Expr
+	var _block as BlockStmt
+
+	def init(token as IToken, varExpr as NameExpr, initExpr as Expr, block as BlockStmt)
+		base.init(token)
+		_varExpr = varExpr
+		_initExpr = initExpr
+		_block = block
+
+	get lastToken as IToken is override
+		return _block.lastToken
+
+	def _bindImp
+		base._bindImp
+		_initExpr.bindImp
+		_var = .bindVar(_varExpr)
+		# TODO: add an error check that the var type and expr type are compatible
+		_block.bindImp
+
+	def inferredType as IType? is override
+		assert _initExpr.type
+		return _initExpr.type
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		name = _var.sharpName
+		sw.write('// using\n')
+		sw.write('[name] = ')
+		_initExpr.writeSharpDef(sw)
+		sw.write(';\ntry')
+		_block.writeSharpDef(sw)
+		sw.write('finally {\n')
+		sw.indent
+		if _var.type.isReference
+			sw.write('if ([name]!=null) { ((IDisposable)[name]).Dispose(); [name] = null; }\n')
+		else
+			sw.write('((IDisposable)[name]).Dispose();\n')
+		sw.dedentAndWrite('}\n')
+
+
+class WhileStmt
+	inherits Stmt
+
+	var _expr as Expr
+	var _block as BlockStmt
+
+	def init(token as IToken, expr as Expr, block as BlockStmt)
+		base.init(token)
+		_expr = expr
+		_block = block
+
+	get lastToken as IToken is override
+		return _block.lastToken
+
+	def addSubFields
+		base.addSubFields
+		.addField('expr', _expr)
+		.addField('block', _block)
+
+	def _bindImp
+		base._bindImp
+		try
+			_expr.bindImp
+		catch ne as NodeException
+			.compiler.recordError(ne)
+		success
+			.noAssignmentAllowed(_expr)
+			if _expr.type is not .compiler.boolType
+				_expr = TruthExpr(_expr).bindImp to TruthExpr  # CC: axe when I have "as this"
+		_block.bindImp
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		sw.write('while (')
+		_expr.writeSharpDef(sw, false)
+		sw.write(')')
+		_block.writeSharpDef(sw)
+
+
+class PostWhileStmt
+	inherits WhileStmt
+
+	def init(token as IToken, expr as Expr, block as BlockStmt)
+		base.init(token, expr, block)
+
+	def writeSharpDef(sw as SharpWriter) is override
+		# base.writeSharpDef(sw) - don't generate the other form of while loop
+		sw.write('do')
+		_block.writeSharpDef(sw, false)
+		sw.dedent
+		sw.write('} while (')
+		_expr.writeSharpDef(sw, false)
+		sw.write(');\n')
+
+
+class YieldStmt
+	is abstract
+	inherits Stmt
+
+	# CC: axe when initializers are inherited
+	def init(token as IToken)
+		base.init(token)
+
+	def _bindImp
+		base._bindImp
+		if .compiler.curCodeMember inherits Initializer
+			.throwError('Cannot use yield statements in initializers.')
+		# CC: should there be a check for property and indexer setters?
+		.compiler.curCodeMember.hasYieldStmt = true
+
+
+class YieldBreakStmt
+	inherits YieldStmt
+
+	# CC: axe when initializers are inherited
+	def init(token as IToken)
+		base.init(token)
+
+	def _bindImp
+		base._bindImp
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		sw.write('yield break;\n')
+
+
+class YieldReturnStmt
+	inherits YieldStmt
+
+	var _expr as Expr?
+	var _sharpResultVarName as String?
+
+	def init(token as IToken, expr as Expr?)
+		base.init(token)
+		_expr = expr
+
+	def addSubFields
+		base.addSubFields
+		.addField('expr', _expr)
+
+	pro sharpResultVarName from var
+
+	def _bindImp
+		base._bindImp
+		expr = _expr
+		curCodeMember = .compiler.codeMemberStack.peek
+		if expr
+			_expr.bindImp
+			resultType = curCodeMember.resultType
+			if resultType is not .compiler.libraryBox('System.Collections.IEnumerable') and resultType is not .compiler.libraryBox('System.Collections.IEnumerator')
+				okay = false
+				if resultType inherits Box
+					ienumerableOf = .compiler.libraryBox('System.Collections.Generic.IEnumerable<of>')
+					ienumeratorOf = .compiler.libraryBox('System.Collections.Generic.IEnumerator<of>')
+					okay = not (resultType is not ienumerableOf and resultType is not ienumeratorOf and not resultType.isConstructionOf(ienumerableOf) and not resultType.isConstructionOf(ienumeratorOf))
+				if not okay
+					.throwError('Cannot yield unless the return type is an iterator type (IEnumerable or IEnumerator, generic or not). Try "IEnumerable<of [expr.type.name]>".')
+			if resultType inherits Box and (resultType to Box).isGeneric
+				elementType = (resultType to Box).genericParams[0]
+			else
+				elementType = .compiler.libraryType('System.Object')
+			if not expr.canBeAssignedTo(elementType)
+				.throwError('Cannot return [expr.type.name] because "[curCodeMember.name]" is declared to return a [elementType.name].')
+			_expr.contextType = elementType
+		else
+			# TODO: can there just be "yield return"?
+			pass
+		curCodeMember.hasYieldStmt = true
+		_sharpResultVarName = curCodeMember.sharpResultVarName
+
+	def writeSharpDef(sw as SharpWriter)
+		base.writeSharpDef(sw)
+		ensurePart = .compiler.curCodeMember.ensurePart
+		willEnsure = ensurePart and ensurePart.willWriteSharp
+		if willEnsure
+			sw.write('_lh_canEnsure = true;\n')
+		if _expr
+			if willEnsure and _sharpResultVarName and _sharpResultVarName.length
+				#sw.write('yield return [_sharpResultVarName]=')  # TODO: resolve yield return with ensure
+				sw.write('yield return ')
+				_expr.writeSharpDefInContext(sw)
+				sw.write(';\n')
+			else
+				sw.write('yield return ')
+				_expr.writeSharpDefInContext(sw)
+				sw.write(';\n')
+		else
+			sw.write('yield return;\n')
