@@ -1,0 +1,28 @@
+class A
+
+	def init
+		pass
+	
+	def init(x as int)
+		pass
+		
+class B
+	inherits A
+
+	var _foo as int
+	
+	def init
+		_foo = 1
+		base.init  # .error. can only be invoked
+
+	def init
+		_foo = 1
+		base.init(1)  # .error. can only be invoked
+		
+	def init(x as int)
+		_foo = x
+		.init  # .error. can only be invoked
+
+	def init(x as int)
+		_foo = x
+		.init(1)  # .error. can only be invoked

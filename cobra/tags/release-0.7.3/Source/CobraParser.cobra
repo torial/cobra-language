@@ -1,0 +1,2897 @@
+"""
+The Cobra Parser
+
+Rules:
+	* Do not invoke Box.memberForName. Use Box.declForName instead. Inheritance relationships are not established during parsing.
+"""
+
+
+class ParserException
+	inherits SourceException
+
+	var _token as IToken?
+	var _fileName as String
+	var _lineNum as int
+
+	def init(token as IToken, message as String)
+		base.init(message)
+		_token = token
+		_fileName = _token.fileName
+		_lineNum = _token.lineNum
+
+	def init(fileName as String, msg as String)
+		base.init(msg)
+		_fileName = fileName
+		_lineNum = 1
+
+	get hasSourceSite as bool is override
+		return true
+
+	# CC: get fileName from var is override
+	get fileName as String is override
+		return _fileName
+
+	# CC: get lineNum from var is override
+	get lineNum as int is override
+		return _lineNum
+
+
+interface IWarningRecorder
+
+	def warning(we as CobraWarning)
+
+
+interface IErrorRecorder
+
+	def recordError(error as SourceException)
+
+
+class Parser
+	"""
+	Notes:
+
+		* The tokenizer's verbosity is set to 4 less than the parser's. In other words, the
+		  tokenizer will not print messages unless the parser's verbosity is 5 or greater.
+
+	"""
+
+	test
+		p = Parser()
+		p.globalNS = NameSpace(Token.empty, '(global)')
+		p.typeProvider = BasicTypeProvider()
+		module = p.parseSource('test1', 'class Test\n\tpass\n')
+		decls = (module to dynamic).topNameSpace.declsInOrder
+		decl = decls[decls.count-1]
+		if decl inherits Class
+			assert decl.name == 'Test', decl.name
+		else
+			assert false, decl
+
+		p = Parser()
+		p.globalNS = NameSpace(Token.empty, '(global)')
+		p.typeProvider = BasicTypeProvider()
+		p.parseSource('test2', 'class Test\n\tdef main is shared\n\t\treturn\n')
+
+	var _lowercaseLetters = 'abcdefghijklmnopqrstuvwxyz'
+	var _uppercaseLetters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+
+	var _fileName as String?
+	var _willShowTokens = false
+	var _verbosity = 0
+
+	var _tokens as List<of IToken>?
+	var _nextTokenIndex as int
+
+	var _isNamesStack as Stack<of String>?
+	var _boxStack as Stack<of Box>?
+
+	var _globalNS as NameSpace?
+	var _nameSpaceStack as Stack<of NameSpace>
+
+	var _codeParts as Stack<of AbstractMethod>
+	var _curCodePart as AbstractMethod?
+
+	var _spaceAgnosticIndentLevel as int
+	var _isContractOnSameLine as bool
+
+	var _isTraceOn as bool
+
+	var _leftStack as Stack<of Expr>?
+	var _opStackStack as Stack<of Stack<of String>>?
+		"""
+		Used by expression parts so the last operator can be examined.
+		A stack of stacks is needed for CallExpr's args.
+		"""
+
+	var _typeProvider as ITypeProvider?
+
+	# TODO: do this with a callback/delegate instead of this bullshit Java-style interface technique
+	var _warningRecorder as IWarningRecorder?
+	var _errorRecorder as IErrorRecorder?
+
+	pro warningRecorder from var
+	pro errorRecorder from var
+
+	def init
+		_boxStack = Stack<of Box>()
+		_nameSpaceStack = Stack<of NameSpace>()
+		_codeParts = Stack<of AbstractMethod>()
+
+	pro verbosity from var
+
+	pro typeProvider from var
+
+	pro globalNS as NameSpace
+		get
+			assert _globalNS
+			return _globalNS to !
+		set
+			require _globalNS is nil
+			_globalNS = value
+
+	get curBox as Box
+		require _boxStack.count > 0
+		# yes there is only one box at the moment, but when nested classes and structs are supported there could by many.
+		return _boxStack.peek to !
+
+	get curNameSpace as NameSpace
+		return _nameSpaceStack.peek to !
+
+	def parseFileNamed(fileName as String) as CobraModule
+		require .typeProvider
+		if .verbosity >= 1
+			print 'Parsing [fileName]'
+		_fileName = fileName
+		source = File.readAllText(_fileName to !)
+		return .parseSource(fileName, source)
+
+	def parseSource(source as String) as CobraModule
+		require .typeProvider
+		return .parseSource('(no file name)', source)
+
+	def parseSource(fileName as String, source as String) as CobraModule
+		"""
+		Parses module source code and returns resulting module.
+		"""
+		try
+			_preParseSource(fileName, source)
+			if source.length==0
+				_warning('File is empty.')
+			else if source.trim.length==0
+				_warning('File is completely blank.')
+			return _parseTokens()
+		catch pe as ParserException
+			if _errorRecorder
+				_errorRecorder.recordError(pe)
+			throw
+
+	def _preParseSource(fileName as String, source as String)
+		"""
+		Sets up for parsing, but does not invoke `parseTokens`.
+		Used by `parseSource` and various test sections.
+		"""
+		_fileName = fileName
+		tokVerbosity = _verbosity - 4  # in order words, tokenizer does not spew unless our verbosity is 5 or greater
+		if tokVerbosity<0
+			tokVerbosity = 0
+
+		_isNamesStack = Stack<of String>()  # for `shared` for example
+		_leftStack = Stack<of Expr>()
+		_opStackStack = Stack<of Stack<of String>>()
+		.newOpStack
+
+		_tokens = nil
+		tokenizer = CobraTokenizer(tokVerbosity)
+		try
+			tokens = tokenizer.startSource(_fileName, source).allCachedTokens
+			_tokens = List<of IToken>(tokens.count)
+			for i = 0 .. tokens.count
+				if tokens[i].text == '_' and tokens[i].which == 'ID'
+					if i < tokens.count-1 and tokens[i+1].which == 'EOL'
+						i += 1
+					else
+						.recordError(tokens[i], 'Unexpected line continuation character.')
+				else
+					_tokens.add(tokens[i])
+		catch te as TokenizerError
+			msg = te.message
+			if _verbosity>=5
+				msg = 'Token error: ' + msg
+			.throwError(te.token, msg)
+
+		if tokenizer.errors.count
+			for error in tokenizer.errors
+				.recordError(error.token, error.message)
+			
+		_nextTokenIndex = 0
+
+
+	##
+	## Tokens
+	##
+
+	def grab as IToken?
+		"""
+		Returns the next token or nil if there are none left.
+		"""
+		if _nextTokenIndex >= _tokens.count
+			return nil
+		token = _tokens[_nextTokenIndex]
+		_nextTokenIndex += 1
+		if _willShowTokens
+			print 'grab    --> [token]'
+		return token
+
+	def undo
+		"""
+		Undoes the last `token` call. Often called "push" in parser examples.
+		"""
+		require _nextTokenIndex>0
+		_nextTokenIndex -= 1
+		if _willShowTokens
+			print 'undo'
+
+	def peek as IToken?
+		return .peek(0)
+
+	def replace(token as IToken)
+		"""
+		Replaces the current token in the token stream with the given argument.
+		"""
+		require .peek
+		ensure .peek == token
+		_tokens[_nextTokenIndex] = token
+		
+	def peek(offset as int) as IToken?
+		"""
+		Returns a token without changing the current token, or nil if none left.
+		With no offset, returns the current token, otherwise peeks ahead.
+		"""
+		i = _nextTokenIndex + offset
+		if i < _tokens.count
+			token = _tokens[i] to ?
+		else
+			token = nil
+		if _willShowTokens
+			print 'peek([offset]) --> [token]'
+		# TODO: resolve CUE
+		if token and token.which=='CUE'
+			token.which = 'DEF'
+		return token
+
+	get last as IToken?
+		"""
+		Returns the last token returned by `get` or nil if `get` was never invoked.
+		"""
+		if _nextTokenIndex > 0
+			token = _tokens[_nextTokenIndex-1] to ?
+		else
+			token = nil
+		if _willShowTokens
+			print 'last    --> [token]'
+		return token
+
+	def lastN(n as int) as List<of NumberedToken>  # CC: use List<of Pair<of int, IToken>>
+		"""
+		Returns a list of NumberedTokens.
+		"""
+		test
+			p = Parser()
+			s = 'namespace class Foo def'
+			p._preParseSource('(no filename)', s)
+			p.grab
+			p.grab
+			p.grab
+			t = p.lastN(2)
+			assert t[0].token.which=='CLASS'
+			assert t[1].token.which=='ID'
+			assert t.count==2
+		body
+			tokens = List<of NumberedToken>()
+			if _nextTokenIndex > 0
+				while true
+					n -= 1
+					if n == -1
+						break
+					i = _nextTokenIndex - n - 1
+					if i >= 0 and i < _tokens.count
+						tokens.add(NumberedToken(i, _tokens[i]))
+			return tokens
+
+	def expect(whatTypes as vari String) as IToken
+		"""
+		Gets a token and complains if its type does not match whatType(s).
+		Returns the token.
+		"""
+		t = .grab
+		if _willShowTokens
+			print 'expect([whatTypes]) --> [t]'
+		if t is nil
+			.throwError('Expecting [Utils.join(" or ",whatTypes)], but source ended suddenly.')
+		if t.which not in whatTypes
+			if whatTypes[0]=='DEF' and t.which=='CUE'
+				t.which = 'DEF'
+			else
+				.throwError('Expecting [Utils.join(" or ",whatTypes)], but got [t] instead.')
+		return t to !
+
+	def optional(whatTypes as vari String) as IToken?
+		"""
+		Gets a token, but only if it matches whatTypes.
+		Does not complain or consume a token if there is no match.
+		"""
+		t = .peek
+		if _willShowTokens
+			print 'optional([whatTypes]) --> [t]'
+		if t is nil
+			return nil
+		else if t.which in whatTypes
+			return .grab
+		else
+			return nil
+
+	def oneOrMore(which as String)
+		"""
+		Consumes the expected token and any other additional contiguous ones.
+		Returns nothing.
+		Example:  .oneOrMore('EOL')
+		"""
+		.expect(which)
+		while .peek and .peek.which == which
+			.grab
+
+	def zeroOrMore(which as String)
+		"""
+		Consumes the token (if present) and any other additional contiguous ones.
+		Returns nothing.
+		Example:  .zeroOrMore('EOL')
+		"""
+		while .peek.which == which
+			.grab
+
+
+	## Common parsing bits (docString, indent, dedent, ...)
+
+	def docString as String?
+		if .optional('DOC_STRING_START')
+			textParts = List<of String>()
+			keepGoing = true
+			while keepGoing
+				tok = .grab
+				branch tok.which
+					on 'DOC_STRING_STOP'
+						# TODO: check that indentation level is correct
+						keepGoing = false
+					on 'DOC_STRING_BODY_TEXT'
+						textParts.add(tok.text)
+					else
+						.throwError('Expecting more doc string contents or the end of the doc string instead of [tok].')
+			text = Utils.join('', textParts)
+			return text
+		else
+			return ''
+
+	def endOfLine
+		.oneOrMore('EOL')
+
+	def idOrKeyword as IToken
+		token = .grab
+		if token is nil
+			.throwError('Expecting an identifier or keyword.')
+		else if token.isKeyword or token.which=='ID'
+			return token to !
+		else
+			.throwError('Expecting an identifier or keyword, but got [token] instead.')
+		throw FallThroughException(token)  # CC: axe when throwError() can be marked as always throwing (well if C# can figure that out! (solution: Cobra can generate a "dummy" throw statement))
+
+	def indent as IToken
+		"""
+		Consumes an option COLON (which generates a warning), 1 or more EOLs and an INDENT.
+		Returns the INDENT.
+		"""
+		if .optional('COLON')
+			_warning('Colons are not used to start indented blocks. You can remove the colon.')
+		.endOfLine
+		return .expect('INDENT')
+
+	def dedent
+		while .optional('EOL')
+			pass
+		.expect('DEDENT')
+
+	def indentIsDeclNames as List<of String>
+		"""
+		Parses indentation followed by "is" names, or "is" names followed by indentation.
+		Example 1:
+			def main is shared
+				pass
+		Example 2:
+			def main
+				is shared
+				pass
+		In either case, returns the list of "is" names or nil if there were none.
+		"""
+		if .peek.which=='IS'
+			isNames = .isDeclNames
+			.expect('INDENT')
+			return isNames
+		else
+			if .optionalIndent
+				return .isDeclNames
+			else
+				.expect('INDENT')
+				return List<of String>()
+
+	def optionalIndent as IToken?
+		"""
+		Consumes and warns about COLON not being necessary.
+		Expects .endOfLine and then returns optional 'INDENT'.
+		Used at the end of a declaration that can optionally have more specification indented underneath.
+		"""
+		if .optional('COLON')
+			_warning('Colons are not used to start indented blocks. You can remove the colon.')
+		.endOfLine
+		return .optional('INDENT')
+
+
+	##
+	## Parsing
+	##
+
+	var _module as CobraModule?
+
+	def _parseTokens as CobraModule
+		"""
+		Parses and then returns an instance of Module.
+		"""
+		.zeroOrMore('EOL')
+		docString = .docString
+		_module = CobraModule(_fileName, _verbosity, docString, _globalNS)  # TODO: does module really need verbosity?
+		_nameSpaceStack.push(_module.topNameSpace)
+		try
+			topNS = _module.topNameSpace
+			if not _fileName.endsWith('SystemInterfaces.cobra')
+				# TODO: make an "implicit" token
+				useToken = Token(_fileName, 1, 1, 1, 'USE', 'use', nil)
+				# default use directives
+				topNS.addUseDirective(UseDirective(useToken, ['System']))
+				topNS.addUseDirective(UseDirective(useToken, ['System', 'Collections', 'Generic']))
+				topNS.addUseDirective(UseDirective(useToken, ['System', 'IO']))
+				topNS.addUseDirective(UseDirective(useToken, ['System', 'Text']))
+				topNS.addUseDirective(UseDirective(useToken, ['Cobra', 'Lang']))
+			what as INameSpaceMember?
+			keepParsing = true
+			while keepParsing
+				what = nil
+				tok = .peek
+				if tok is nil
+					break
+				branch tok.which
+					on 'PERCENTPERCENT'
+						if .peek(1) and .peek(1).text == 'stop'
+							keepParsing = false
+						else
+							.compilerDirective
+					on 'USE'
+						topNS.addUseDirective(.useDirective)
+#					on 'IMPORT'
+#						what = .importDirective
+					on 'CLASS'
+						what = .classDecl
+					on 'INTERFACE'
+						what = .interfaceDecl
+					on 'STRUCT'
+						what = .structDecl
+					on 'ENUM'
+						what = .enumDecl
+					on 'EOL'
+						.grab
+					on 'NAMESPACE'
+						.nameSpaceDecl
+					else
+						.throwError('Expecting use, import, namespace, class, interface or enum, but got [tok]')
+						break
+				if what
+					_nameSpaceAddDecl(_module.topNameSpace, what)
+				if what inherits Box
+					assert what.parentNameSpace
+		finally
+			_nameSpaceStack.pop
+		return _module to !
+
+	def compilerDirective
+		.expect('PERCENTPERCENT')
+		# 'stop' is already handled in main parse loop
+		token = .grab
+		branch token.text
+			on 'throw'
+				# throw an internal error. used for testing that the compiler will catch and report these as internal errors
+				.expect('EOL')
+				# TODO: throw AssertException(SourceSite sourceSite, object[] expressions, object thiss, object info)
+				assert false, IdentifierExpr(token, 'throw')
+			else
+				.throwError('Unknown compiler directive.')
+
+	def useDirective as UseDirective
+		"""
+		Example source:
+			use System.Net
+			use Foo
+		"""
+		token = .expect('USE')
+		names = List<of String>()
+		while true
+			id = .expect('ID')
+			names.add(id.text)
+			dot = .optional('DOT')
+			if not dot
+				break
+		.endOfLine
+		return UseDirective(token, names)
+
+	var _syntaxForClassInheritanceMsg = 'The syntax for inheritance is to put "inherits BaseClass" on the following line, indented.'
+
+	def classDecl as Class
+		token = .expect('CLASS')
+		peek = .peek.which
+		if peek == 'ID'
+			token = .expect('ID')
+			name = token.value to String
+		else if peek == 'OPEN_GENERIC'
+			token = .expect('OPEN_GENERIC')
+			name = token.value to String
+		else if peek == 'OPEN_CALL'
+			.throwError(_syntaxForClassInheritanceMsg)
+		else
+			.throwError('Expecting a class name.')
+		if .peek.which=='COLON' and .peek(1)<>nil and .peek(1).which=='ID'
+			.throwError(_syntaxForClassInheritanceMsg)
+		if name[0] not in _uppercaseLetters
+			.throwError('Class names must start with an uppercase letter in order to avoid collisions with other identifiers such as arguments and local variables.')
+
+		params = .declGenericParams(token)
+		name = .nameForDeclGenericParams(token, params)
+
+		.indent
+
+		isNames = .isDeclNames
+		attribs = .hasAttribs
+
+		.genericConstraints(token, params)
+
+		baseNode as ITypeProxy?
+		if .optional('INHERITS')
+			baseNode = .typeId
+			.endOfLine
+		else
+			baseNode = nil
+
+		interfaceNames = List<of ITypeProxy>()
+		if .optional('IMPLEMENTS')
+			expectComma = false
+			while true
+				if .peek.which=='EOL'
+					.grab
+					break
+				if expectComma
+					.expect('COMMA')
+				interfaceName = .typeId  # using .typeId since interface could be qualified (Foo.Bar) or a generic like IEnumerable<of T>
+				interfaceNames.add(interfaceName)
+				expectComma = true
+
+		docString = .docString
+
+		theClass = Class(token, name, .makeList(List<of IType>(), params) to List<of IType>, isNames, attribs, baseNode, interfaceNames, docString)
+
+		# TODO when supporting nested classes, look at the _boxStack and set a back pointer here
+		_boxStack.push(theClass)
+#		.isNamesStack = Stack<of String>
+		.bodiedBoxMemberDecls(theClass)
+		_boxStack.pop
+
+		return theClass
+
+	def makeList(t as System.Collections.IList, u as System.Collections.IList) as System.Collections.IList
+		# This feels awkward as hell, but it's a .NET typing thing, not a Cobra thing.
+		# I need List<of GenericParam> in the my local code for declaring generics, but the various box inits need to accept List<of IType>
+		# TODO: remove this somehow. Maybe Cobra could have a promotion feature:
+		# List<of IType>(params promote to IEnumerable<of IType>)
+		# "promote to" works for generics where the new promo type has parameter types that are the same or ancestors to the original parameter types *and* ... ???
+		for item in u
+			t.add(item)
+		return t
+
+	def hasAttribs as AttributeList
+		attribs = AttributeList()
+		hasWord = .optional('HAS')
+		if not hasWord
+			return attribs
+		while true
+			expr = .expression
+			if not expr inherits IdentifierExpr and not expr inherits PostCallExpr and not expr inherits CallExpr
+				.throwError('Invalid attribute.')  # TODO: record the error instead of throwing one
+			attribs.add(AttributeDecl(expr))
+			if not .optional('COMMA')
+				break
+		.endOfLine
+		return attribs
+
+	var _validIsNames as List<of String>?
+
+	def isDeclNames as List<of String>
+		"""
+		Example source:
+			# The | below is not literal--it's where this method starts parsing.
+			def compute
+				|is virtual, protected
+		Example return values:
+			[]
+			['shared']
+			['private', 'shared']
+		Errors:
+			TODO
+		Used by: classDecl, interfaceDecl, enumDecl, indentIsDeclNames
+		"""
+		if _validIsNames is nil
+			_validIsNames = ['fake', 'shared', 'virtual', 'nonvirtual', 'override', 'new', 'public', 'protected', 'private', 'internal', 'abstract']
+		names = List<of String>(_isNamesStack)
+		if .optional('IS') is nil
+			return names
+		while true
+			what = .grab.text
+			if what in _validIsNames
+				names.add(what)
+			else
+				.throwError('Not expecting "[what]".')
+			if not .optional('COMMA')
+				break
+		.endOfLine
+		# TODO: error on virtual and override
+		# TODO: error on virtual and shared
+		# TODO: error if 2 or more of 'public', 'protected', 'private', 'internal'
+		return names
+
+	def declGenericParams(token as IToken) as List<of GenericParam>
+		"""
+		This parses and returns the generic params for a box
+		declaration. It does NOT work for the generic params in other
+		types such as a return type or a base class type--those can have
+		other kinds parameters including other generic types and basic
+		types. Box declarations only have generic parameter names.
+		"""
+		params = List<of GenericParam>()
+		if token.which=='OPEN_GENERIC'
+			expectComma = false
+			while true
+				if .peek.which=='GT'
+					.grab
+					break
+				if expectComma
+					.expect('COMMA')
+				ident = .expect('ID').text
+				if Utils.startsWithLowerLetter(ident)
+					.throwError('Generic parameter names must start with an uppercase letter in order to avoid collisions with other identifiers such as arguments and local variables.')
+				params.add(GenericParam(ident))
+				expectComma = true
+		return params
+
+	def nameForDeclGenericParams(token as IToken, paramList as List<of GenericParam>) as String
+		"""
+		This is called after `declGenericParams` to update the name of the declaring type.
+		CC: add an "out name" parameter to `declGenericParams` and axe this method.
+		"""
+		name = token.text.trim
+		if token.which=='OPEN_GENERIC'
+			for i = 0 .. paramList.count-1
+				name += ','
+			name += '>'
+		return name
+
+	var _syntaxForInterfaceInheritanceMsg = 'The syntax for inheritance is to put "inherits BaseInterfaceA, BaseInterfaceB" on the following line, indented.'
+
+	def interfaceDecl as Interface
+		token = .expect('INTERFACE')
+		peek = .peek.which
+		if peek == 'ID'
+			token = .expect('ID')
+			name = token.value to String
+		else if peek == 'OPEN_GENERIC'
+			token = .expect('OPEN_GENERIC')
+			name = token.value to String
+		else if peek == 'OPEN_CALL'
+			.throwError(_syntaxForInterfaceInheritanceMsg)
+		else
+			.throwError('Expecting an interface name.')
+		if name[0] not in _uppercaseLetters
+			.throwError('Interface names must start with an uppercase letter in order to avoid collisions with other identifiers such as arguments and local variables.')
+		# too draconian
+		#if not name.startsWith('I')
+		#	.throwError('Interfaces must start with a capital "I".')
+		if .peek.which=='COLON' and .peek(1)<>nil and .peek(1).which=='ID'
+			.throwError(_syntaxForInterfaceInheritanceMsg)
+
+		params = .declGenericParams(token)
+		name = .nameForDeclGenericParams(token, params)
+
+		.indent
+
+		isNames = .isDeclNames
+		attribs = .hasAttribs
+
+		.genericConstraints(token, params)
+
+		baseNames = List<of ITypeProxy>()
+		if .optional('INHERITS')
+			expectComma = false
+			while true
+				if .optional('EOL')
+					break
+				if expectComma
+					.expect('COMMA')
+				baseName = .typeId  # using .typeId since interface could be a generic like IEnumerable<of T>
+				baseNames.add(baseName)
+				expectComma = true
+
+		if .optional('IMPLEMENTS')
+			.throwError('Encountered "implements" in interface declaration. Use "inherits" instead.')
+
+		# TODO: can an interface be nested in another interface?
+		docString = .docString
+
+		theInterface = Interface(token, name, .makeList(List<of IType>(), params) to List<of IType>, isNames, attribs, baseNames, docString)
+
+		_boxStack.push(theInterface)
+#		.isNamesStack = Stack(str)
+		.bodiedBoxMemberDecls(theInterface)  # TODO: this shouldn't be bodiedBoxMemberDecls, right?
+		_boxStack.pop
+
+		return theInterface
+
+	def structDecl as Struct
+		token = .expect('STRUCT')
+		peek = .peek.which
+		if peek == 'ID'
+			token = .expect('ID')
+			name = token.value to String
+		else if peek == 'OPEN_GENERIC'
+			token = .expect('OPEN_GENERIC')
+			name = token.value to String
+		else
+			.throwError('Expecting a struct name.')
+		if name[0] not in _uppercaseLetters
+			.throwError('Struct names must start with an uppercase letter in order to avoid collisions with other identifiers such as arguments and local variables.')
+
+		params = .declGenericParams(token)
+		name = .nameForDeclGenericParams(token, params)
+
+		.indent
+
+		isNames = .isDeclNames
+		attribs = .hasAttribs
+
+		.genericConstraints(token, params)
+
+		baseName as String?
+		if .optional('INHERITS')
+			.throwError('Structs cannot inherit. If you mean to implement an interface, use "implements" instead.')
+
+		interfaceNames = List<of ITypeProxy>()
+		if .optional('IMPLEMENTS')
+			expectComma = false
+			while true
+				if .peek.which == 'EOL'
+					.grab
+					break
+				if expectComma
+					.expect('COMMA')
+				interfaceNames.add(.typeId)  # using .typeId since interface could be qualified (Foo.Bar) or a generic like IEnumerable<of T>
+				expectComma = true
+
+		docString = .docString
+
+		theStruct = Struct(token, name, .makeList(List<of IType>(), params) to List<of IType>, isNames, attribs, baseName, interfaceNames, docString)
+
+		# TODO when supporting nested classes, look at the boxStack and set a back pointer here
+		_boxStack.push(theStruct)
+#		.isNamesStack = Stack(str)
+		.bodiedBoxMemberDecls(theStruct)
+		_boxStack.pop
+
+		return theStruct
+
+	def enumDecl as EnumDecl
+		token = .expect('ENUM')
+		name = .expect('ID').value to String
+		if name[0] not in _uppercaseLetters
+			.throwError('Enum types must start with uppercase letters to avoid collisions with other identifiers such as properties and methods.')
+		.indent
+		isNames = .isDeclNames
+		# TODO? attribs = .hasAttribs
+		if .peek.which=='OF'
+			storageType = .typeId to ?
+		docString = .docString
+		enumMembers = List<of EnumMember>()
+		while .peek.which <> 'DEDENT'
+			.zeroOrMore('EOL')
+			enumNameToken = .expect('ID')
+			if .peek.which=='ASSIGN'
+				.grab
+				enumValue = .expect('INTEGER_LIT').value to int?
+			else
+				enumValue = nil
+			.endOfLine
+			enumMembers.add(EnumMember(enumNameToken, enumValue))
+			# TODO: check for repeated names
+			# TODO: check for values that repeat or go backwards
+		.dedent
+		if not enumMembers.count
+			.throwError('Missing enum members.')
+		if _boxStack.count
+			parent = .curBox to IParentSpace
+		else
+			parent = .curNameSpace to IParentSpace
+		return EnumDecl(parent, token, name, isNames, storageType, docString, enumMembers)
+
+	def genericConstraints(token as IToken, params as List<of GenericParam>)
+		while .optional('WHERE')
+			if token.which<>'OPEN_GENERIC'
+				.throwError('Unexpected where clause for non-generic class.')
+			paramName = .expect('ID').value
+			found = false
+			for param in params
+				if param.name==paramName
+					found = true
+					break
+			if not found
+				.throwError('Unknown generic parameter "[paramName]".')
+			if param.constraints.count
+				.throwError('Already specified constraints for "[paramName]".')
+			.expect('MUST')
+			.expect('BE')
+			expectComma = false
+			while true
+				if expectComma
+					.expect('COMMA')
+				param.constraints.add(.genericConstraint)
+				if .optional('EOL')
+					break
+				expectComma = true
+
+	def genericConstraint as GenericConstraint
+		"""
+		Consumes a generic constraint and returns it.
+		Constraints include classes, interfaces and the keywords:
+			class struct callable
+		"""
+		peek = .peek.which
+		branch peek
+			on 'CLASS': return GenericClassConstraint(.grab)
+			on 'STRUCT': return GenericStructConstraint(.grab)
+			on 'CALLABLE': return GenericCallableConstraint(.grab)
+			else: return GenericTypeConstraint(.typeId)
+
+	def nameSpaceDecl as NameSpace
+		.expect('NAMESPACE')
+		curNameSpace = .curNameSpace
+		assert not curNameSpace.isUnified
+		idTokens = [.expect('ID')]
+		while true
+			if .peek.which == 'DOT'
+				.grab
+				idTokens.add(.expect('ID'))
+			else
+				break
+		firstNameSpace as NameSpace?
+		for tok in idTokens
+			name = tok.value to String
+			curNameSpace = curNameSpace.getOrMakeNameSpaceNamed(tok, name)
+			if firstNameSpace is nil
+				firstNameSpace = curNameSpace
+			assert not curNameSpace.isUnified
+			_nameSpaceStack.push(curNameSpace)			
+		try
+			.indent
+			while true
+				peek = .peek
+				if peek is nil
+					.throwError('expecting a namespace member, but source code ended')
+				tok = peek to !
+				if tok.which == 'DEDENT'
+					break
+				branch tok.which
+					on 'CLASS':  _nameSpaceAddDecl(curNameSpace, .classDecl)
+					on 'INTERFACE': _nameSpaceAddDecl(curNameSpace, .interfaceDecl)
+					on 'STRUCT': _nameSpaceAddDecl(curNameSpace, .structDecl)
+					on 'USE': curNameSpace.addUseDirective(.useDirective)
+					on 'NAMESPACE': .nameSpaceDecl
+					on 'ENUM': _nameSpaceAddDecl(curNameSpace, .enumDecl)
+					else: .throwError('expecting a namespace member but got [tok]')
+			.dedent
+		finally
+			for tok in idTokens
+				_nameSpaceStack.pop
+		return firstNameSpace to !
+
+	def _nameSpaceAddDecl(ns as NameSpace, decl as INameSpaceMember)
+		if ns.declForName(decl.name)
+			.throwError((decl to dynamic).token to IToken, 'The namespace "[ns.fullName]" already contains a declaration named "[decl.name]".')  # TODO: give an "error" for the location 
+		if ns.unifiedNameSpace.declForName(decl.name)
+			.throwError((decl to dynamic).token to IToken, 'The namespace "[ns.fullName]" already contains a declaration named "[decl.name]" in another file.')  # TODO: give an "error" for the location 
+		ns.addDecl(decl)
+
+	def bodiedBoxMemberDecls(box as Box)
+# TODO: remove this when SystemInterfaces.cobra and "is fake" goes away. 2007-12-30: "is fake" might be around for a long time.
+#		require
+#			not box inherits Interface
+		body
+			breakLoop = false  # cannot use 'break' to stop a 'while' loop in a branch statement. CC?
+			while not breakLoop
+				_isTraceOn = true
+				branch .peek.which
+					on 'PASS'
+						.classPass
+						breakLoop = true
+					on 'DEDENT': breakLoop = true
+					on 'DEF': .addDecl(box, .declareMethod)
+					on 'GET': .addDecl(box, .declareGetOnlyProperty)
+					on 'SET': .addDecl(box, .declareSetOnlyProperty)
+					on 'PRO': .addDecl(box, .declareProperty)
+					on 'VAR': .addDecl(box, .boxVarDecl)
+					on 'INVARIANT': .declareInvariant
+					on 'EOL': .endOfLine
+					on 'ENUM': .addDecl(box, .enumDecl)
+					on 'SHARED': .bodiedBoxMemberDeclsShared(box)
+					on 'TEST': .testSection(box)
+					else
+						.throwError('Got [.peek] when expecting var, def, pro, get, set, enum or shared')
+			.dedent
+
+	def addDecl(box as Box, member as IBoxMember?)
+		if member
+			other = box.declForNameCI(member.name)
+			if other and other.name <> member.name
+				.throwError('Cannot have members with the same name in different case ("[member.name]" here and "[other.name]" on line [(other to SyntaxNode).token.lineNum]).')
+				# TODO: Give another error with the line number of the other definition (and then change message above)
+			box.addDecl(member)
+
+	def bodiedBoxMemberDeclsShared(box as Box)
+		.expect('SHARED')
+		.indent
+		_isNamesStack.push('shared')
+		try
+			.bodiedBoxMemberDecls(box)
+		finally
+			_isNamesStack.pop
+
+	def classPass
+		if .curBox.declsInOrder.count
+			_warning('Encountered "pass" in a class that already has declared members.')  # TODO: change to an error
+		.grab
+		.endOfLine
+
+	def boxVarDecl as BoxVar
+		.expect('VAR')
+		tok = .expect('ID')
+		identifier = tok.text
+		other = .curBox.symbolForName(identifier, true)  # TODO: should probably really be `symbolForName` even after the current `symbolForName` becomes `findSymbol` or `findMember`
+		if other
+			.throwError('The name "[identifier]" was already declared earlier.')  # TODO: show the location of the previous symbol
+		if identifier[0]<>'_'
+			sugg = '_' + identifier
+			.throwError('Class variables must start with an underscore to distinguish them from other types of identifiers. Try "[sugg]".')
+		numUnderscores = 1
+		s = identifier.substring(1)
+		while s.startsWith('_')
+			s = s.substring(1)
+			numUnderscores += 1
+		if not s.length
+			.throwError('A class variable must be made of more than underscores. Try "[identifier]x" or "[identifier]1".')
+		if s[0] not in _lowercaseLetters
+			if s[0] in _uppercaseLetters
+				sugg = String(c'_', numUnderscores) + s[0].toString.toLower + s.substring(1)
+				sugg = ' Try "[sugg]".'
+			.throwError('Class variables must start with lowercase letters (after the underscore(s)) to distinguish them from other types of identifiers.[sugg]')
+		type = if(.optional('AS'), .typeId, nil) to ITypeProxy?
+		if .optional('ASSIGN')
+			initExpr = .expression to ?
+		else
+			initExpr = nil
+			if type is nil
+				type = .typeProvider.dynamicType
+		docString = '' to ?
+		isNames = List<of String>(_isNamesStack)
+		if .peek.which=='IS'
+			isNames = .isDeclNames
+			attribs = .hasAttribs
+			assert .last.which=='EOL'
+			.undo  # need the EOL
+			if .optionalIndent
+				docString = .docString
+				.dedent
+		else
+			if .optionalIndent
+				isNames = .isDeclNames
+				attribs = .hasAttribs
+				docString = .docString
+				.dedent
+		return BoxVar(tok, .curBox, identifier, type, isNames, initExpr, docString)
+
+	def declareInvariant
+		.expect('INVARIANT')
+		if .optional('COLON')
+			if .peek.which == 'EOL'
+				_warning('Colons are not used to start indented blocks. You can remove the colon.')
+			else
+				_warning('Colons are not required with invariants. You can remove the colon.')
+		if .peek.which == 'EOL'
+			.indent
+			count = 0
+			while true
+				if .peek.which == 'EOL'
+					.grab
+					continue
+				if .peek.which == 'DEDENT'
+					if count == 0
+						.throwError('Expecting one or more expressions for "invariant".')
+					break
+				.curBox.invariants.add(.expression)
+				.expect('EOL')
+				count += 1
+			.dedent
+		else
+			.curBox.invariants.add(.expression)
+			.endOfLine
+
+	def declareMethod as AbstractMethod?
+		require _typeProvider
+		token = .expect('DEF')
+		opener = .grab
+		if opener.which not in ['ID', 'OPEN_CALL'] and not opener.isKeyword
+			.throwError('Encountered [opener.which] when expecting an identifier.')
+		name = opener.value to String
+		curBox = .curBox
+		if name==curBox.name or Utils.capped(name)==curBox.name
+			.throwError('Method names cannot be the same as their enclosing [curBox.englishName]. Use `def init` for creating an initializer/constructor or choose another name.')  # TODO list the enclosing types location
+		overload as MemberOverload? = nil
+		other = curBox.declForName(name)
+		if other
+			if other inherits MemberOverload
+				overload = other
+			else if other inherits AbstractMethod
+				overload = MemberOverload(other)
+				curBox.registerOverload(overload to !)
+			else
+				.throwError('There is already another class member with the name "[name]".')  # TODO list its location and possibly what it is
+		else
+			other = curBox.declForName(name)  # TODO: should be a CI there for case-insensitive
+			if other
+				.throwError('There is already another class member with the name "[other.name]". You must differentiate member names by more than just case.')
+			if name[0] in _uppercaseLetters
+				.throwError('Method names must start with lowercase letters. ([name])')
+
+		if opener.which=='OPEN_CALL'
+			params = .paramDecls(true)
+			if params.count == 0
+				_warning(opener, 'Unnecessary parentheses. You can remove them.')
+		else
+			params = List<of Param>()
+
+		if .optional('AS')
+			returnType = .typeId to ITypeProxy?
+		else
+			returnType = _typeProvider.voidType
+		assert returnType
+
+		method as AbstractMethod?
+
+		# Rules:
+		#  * if curBox is an Interface then no body
+		#  * if 'abstract' is in the is-names then no body
+		#  * is-names can be on the same line or the next
+		#  * no `init` in interfaces
+		#  * no return type for `init`
+		#  * no `implements` in interfaces or for `init`
+
+		hasIsNames = false
+		if .peek.which == 'IS'
+			isNames = .isDeclNames
+			hasIsNames = true
+		else
+			.endOfLine
+		if not .optional('INDENT')
+			# with no indent there can be no additional specs like attributes, contracts or body
+			nothingMore = true
+			if not hasIsNames
+				isNames = List<of String>(_isNamesStack)
+			attribs = AttributeList()
+			implementsType = nil to ITypeProxy?
+			docString = '' to ?
+		else
+			# parse additional method declaration
+			nothingMore = false
+			if not hasIsNames
+				isNames = .isDeclNames
+			attribs = .hasAttribs
+			implementsType = if(.optional('IMPLEMENTS'), .typeId, nil)
+			if implementsType
+				.endOfLine
+			docString = .docString
+		if name == 'init'
+			if curBox inherits Interface
+				.throwError('Cannot declare an initializer for an interface.')
+			if returnType is not .typeProvider.voidType
+				.throwError('Cannot declare a return type for an initializer.')
+			if implementsType
+				.throwError('Cannot specify `implements` for an initializer.')
+			method = Initializer(token, .curBox, params, isNames, attribs, docString)
+		else
+			method = Method(token, .curBox, name, params, returnType, implementsType, isNames, attribs, docString)
+		if nothingMore
+			if not 'abstract' in isNames and not curBox inherits Interface
+				.throwError('Missing method body for "[name]".')
+		else
+			.statementsFor(method)
+
+		if method.statements.count
+			if 'abstract' in isNames
+				.throwError('Cannot have statements for an abstract method.')
+			if curBox inherits Interface
+				.throwError('Cannot have statements for a method in an interface.')
+		else
+			if not 'abstract' in isNames and not curBox inherits Interface
+				.throwError('Missing statements. Use "pass" or other statements.')
+
+		assert method
+		if overload
+			overload.addMember(method to !)
+			return nil
+		else
+			return method
+
+	def declareProperty as ProperDexer?
+		"""
+		Example source
+			pro age as int
+				get
+					return _age
+				set
+					assert value>0
+					_age = value
+
+		If .curBox is an Interface, then no body.
+		If 'abstract' is in the "is names" then no body.
+		The "is names" can be on the same line or the next.
+		No explicit return type implies "as dynamic" (same as arguments).
+		No "implements" in interfaces.
+		"""
+		curBox = .curBox
+		prop as ProperDexer?
+		token = .expect('PRO')
+		overload as MemberOverload?
+		if .optional('LBRACKET')
+			params = .paramDecls(true, 'RBRACKET')
+			name = r'[]'
+			other = curBox.declForName(name)
+			if other
+				if other inherits MemberOverload
+					overload = other
+				else if other inherits ProperDexer
+					overload = MemberOverload(other)
+					curBox.registerOverload(overload to !)
+		else
+			name = .idOrKeyword.text
+			.checkProperty(name)
+			if .optional('FROM')
+				return .declarePropertyFrom(token, name, 'getset')
+			params = List<of Param>()
+		if .optional('AS')
+			returnType = .typeId to ITypeProxy
+		else
+			returnType = _typeProvider.dynamicType
+		# TODO: implements?
+		hasIsNames = false
+		isAbstract = false
+		if .peek.which == 'IS'
+			isNames = .isDeclNames
+			isAbstract = 'abstract' in isNames
+			hasIsNames = true
+			indent = .optional('INDENT')
+		else
+			indent = .optionalIndent
+		if indent
+			if not hasIsNames
+				isNames = .isDeclNames
+			isAbstract = 'abstract' in isNames
+			hasIsNames = true
+			attribs = .hasAttribs
+			docString = .docString
+		else
+			# no additional specs
+			if not isAbstract and not curBox inherits Interface
+				.throwError('Missing body for property.')
+			if not hasIsNames
+				isNames = List<of String>(_isNamesStack)
+			attribs = AttributeList()
+			docString = ''
+		if params.count
+			prop = Indexer(token, curBox, name, params, returnType, isNames, attribs, docString)
+		else
+			prop = Property(token, curBox, name, returnType, isNames, attribs, docString)
+		if indent
+			if .peek.which=='TEST'
+				if curBox inherits Interface
+					_warning(.peek, 'Interface `test` sections are parsed, but ignored. In the future, classes will acquire the tests of the interfaces they implement.')
+				# TODO: what about abstract?
+				.testSection(prop to !)
+			getWord = .optional('GET')
+			if getWord
+				if isAbstract or curBox inherits Interface
+					prop.makeGetPart(getWord)
+				else
+					.indent
+					.statementsFor(prop.makeGetPart(getWord))
+			setWord = .optional('SET')
+			if setWord
+				if isAbstract or curBox inherits Interface
+					prop.makeSetPart(setWord)
+				else
+					.indent
+					.statementsFor(prop.makeSetPart(setWord))
+			if not getWord and not setWord
+				if isAbstract or curBox inherits Interface
+					prop.makeGetPart(TokenFix.empty)
+					prop.makeSetPart(TokenFix.empty)
+				else
+					.throwError('Expecting "get" or "set" for the property.')
+			.dedent
+		else
+			prop.makeGetPart(TokenFix.empty)
+			prop.makeSetPart(TokenFix.empty)
+		if isAbstract and not curBox inherits Class
+			.throwError('Only properties in classes can be marked abstract.')
+		if overload
+			assert prop
+			overload.addMember(prop to !)
+			return nil
+		else
+			return prop
+
+	def declarePropertyFrom(token as IToken, name as String, coverWhat as String) as Property
+		require coverWhat in ['get', 'set', 'getset']
+		if .optional('VAR')
+			varName = '_' + name
+		else
+			varName = .expect('ID').text
+		possibleVarDef = .curBox.declForName(varName)
+		if possibleVarDef is nil
+			.throwError('There is no variable named "[varName]" to match the property "[name]".')
+		if not possibleVarDef inherits BoxVar
+			.throwError('A property can only cover for variables. [varName] is a [possibleVarDef]')
+		varDef = possibleVarDef to BoxVar
+		if .curBox inherits Interface
+			.throwError('Cannot use the "from" form of a property inside an interface declaration.')
+		if .optionalIndent
+			isNames = .isDeclNames
+			attribs = .hasAttribs
+			docString = .docString
+			.dedent
+		else
+			isNames = List<of String>(_isNamesStack)
+			attribs = AttributeList()
+			docString = ''
+		return Property(token, .curBox, name, isNames, attribs, varDef, coverWhat, docString)
+
+	def declareGetOnlyProperty as ProperDexer?
+		return _declareGetOrSetOnlyProperty(0)
+
+	def declareSetOnlyProperty as ProperDexer?
+		return _declareGetOrSetOnlyProperty(1)
+
+	def _declareGetOrSetOnlyProperty(getOrSet as int) as ProperDexer?
+		"""
+		Example source
+			get meaningOfLife as int
+				return 42
+		"""
+		require getOrSet in [0, 1]
+		curBox = .curBox
+		prop as ProperDexer?
+		token = .expect(if(getOrSet, 'SET', 'GET'))
+		overload as MemberOverload? = nil
+		if .optional('LBRACKET')
+			params = .paramDecls(true, 'RBRACKET')
+			name = r'[]'
+			other = curBox.declForName(name)
+			if other
+				if other inherits MemberOverload
+					overload = other
+				else if other inherits ProperDexer
+					overload = MemberOverload(other)
+					curBox.registerOverload(overload to !)
+		else
+			name = .idOrKeyword.text
+			.checkProperty(name)
+			if .optional('FROM')
+				return .declarePropertyFrom(token, name, if(getOrSet, 'set', 'get'))
+			params = List<of Param>()
+		if .optional('AS')
+			returnType = .typeId to ITypeProxy
+		else
+			returnType = _typeProvider.dynamicType
+		# TODO: implements?
+		hasIsNames = false
+		isAbstract = false
+		if .peek.which == 'IS'
+			isNames = .isDeclNames
+			isAbstract = 'abstract' in isNames
+			hasIsNames = true
+			indent = .optional('INDENT')
+		else
+			indent = .optionalIndent
+		if indent
+			if not hasIsNames
+				isNames = .isDeclNames
+			isAbstract = 'abstract' in isNames
+			hasIsNames = true
+			attribs = .hasAttribs
+			docString = .docString
+		else
+			# no additional specs
+			if not isAbstract and not curBox inherits Interface
+				.throwError('Missing body for property.')
+			if not hasIsNames
+				isNames = List<of String>(_isNamesStack)
+			attribs = AttributeList()
+			docString = ''
+		if params.count
+			prop = Indexer(token, curBox, name, params, returnType, isNames, attribs, docString)
+		else
+			prop = Property(token, curBox, name, returnType, isNames, attribs, docString)
+		if indent
+			if .peek.which=='TEST'
+				if curBox inherits Interface
+					_warning(.peek, 'Interface `test` sections are parsed, but ignored. In the future, classes will acquire the tests of the interfaces they implement.')
+				# TODO: what about abstract?
+				.testSection(prop to !)
+			part = if(getOrSet, prop.makeSetPart(token), prop.makeGetPart(token))
+			if isAbstract or curBox inherits Interface
+				.dedent
+			else
+				.statementsFor(part, prop)
+		else
+			if getOrSet
+				prop.makeSetPart(TokenFix.empty)
+			else
+				prop.makeGetPart(TokenFix.empty)
+		if isAbstract and not curBox inherits Class
+			.throwError('Only properties in classes can be marked abstract.')
+		if overload
+			assert prop
+			overload.addMember(prop to !)
+			return nil
+		else
+			return prop
+
+
+	##
+	## Parameter declarations
+	##
+
+	def paramDecls(skipParen as bool) as List<of Param>
+		return .paramDecls(skipParen, 'RPAREN')
+
+	def paramDecls(skipParen as bool, rightParen as String) as List<of Param>
+		if not skipParen
+			.expect('LPAREN')
+		params = List<of Param>()
+		expectComma = false
+		while true
+			if .peek.which==rightParen
+				.grab
+				break
+			if expectComma
+				.expect('COMMA')
+			param = .paramDecl
+			params.add(param)
+			if params.count==1 and param.name=='self' and param.isMissingType
+				_warning('The first parameter is "self" which may be a Python carry-over on your part. Cobra does not require that (and calls it "this" anyway).')
+			expectComma = true
+		return params
+
+	def paramDecl as Param
+		"""
+		Example source:
+			x as int
+			x as int?
+			x as vari object
+			x   # default type is dynamic    # TODO: should be unspecified
+		Arguments:
+			theClass is typically BoxVarDecl, LocalVar or Param
+			whatName could be set to 'Parameter' for example.
+		Returns:
+			A theClass(name, type)
+		Errors:
+			None
+		"""
+		if .peek.which == 'OPEN_GENERIC'
+			# the programmer likely declared a parameter in the C syntax: List<of int> numbers
+			.throwError('The correct parameter syntax is "paramName as ParamType".')
+		if .looksLikeType(0) and .looksLikeVarNameIsNext(1)
+			# the programmer likely declared a parameter in the C syntax: String s
+			.throwError('The correct parameter syntax is "paramName as ParamType". Try "[.peek(1).text] as [.peek(0).text]".')
+		token = .expect('ID')
+		identifier = token.value to String
+		.checkStartsLowercase(identifier, 'Parameter')
+		kind = Param.KindEnum.Value
+		type as ITypeProxy?
+		if .peek.which == 'AS'
+			.grab
+			branch .peek.which
+				on 'VARI'
+					type = VariTypeIdentifier(.grab, .typeId)
+				on 'OUT'
+					kind = Param.KindEnum.Out
+					.grab
+					type = .typeId
+				on 'INOUT'
+					kind = Param.KindEnum.InOut
+					.grab
+					type = .typeId
+				else
+					type = .typeId
+			isMissingType = false
+		else
+			type = TypeProxy(_typeProvider.dynamicType)  # the default type for a parameter is dynamic
+			isMissingType = true
+		# note: isTypeless is currently used to generate a warning in .paramDecls above, but in the future it may also be needed for when parameter types are inferred for anon methods
+		p = Param(token, type) # CC: put property sets in initializer (absorb next line)
+		p.isMissingType = isMissingType
+		p.kind = kind
+		return p
+
+
+	##
+	## Top Level Statement Entry
+	##
+
+	def statementsFor(codePart as AbstractMethod)
+		.statementsFor(codePart, nil)
+
+	def statementsFor(codePart as AbstractMethod, codePartContainingTest as BoxMember?)
+		"""
+		Example source
+			<any statement 1>
+			<any statement 2>
+			<any statement N>
+		Example source
+			require
+				<cond 1>
+				<cond N>
+			ensure
+				<cond 1>
+				<cond N>
+			test
+				<any statement 1>
+				<any statement 2>
+				<any statement N>
+			[body
+				<any statement 1>
+				<any statement 2>
+				<any statement N>]
+		Returns
+			Nothing.
+		Errors
+			Already encountered "code" block.
+			Already encountered "test" block.
+		Notes
+			The caller must check whether or not statements were found and issue an error when appropriate.
+			For example, interface members and abstract members cannot have any statements.
+			Other members must have at least one.
+		"""
+		_pushCodePart(codePart)
+		if codePartContainingTest is nil
+			codePartContainingTest = codePart to BoxMember  # TODO: figure out better typing for this assignement and the method sig of this method
+		try
+			if .peek.which in ['BODY', 'TEST', 'REQUIRE', 'ENSURE', 'OR', 'AND']
+				# sectional
+				# not flexible. sequence is signature, contract, test, implementation
+				_isContractOnSameLine = false
+				if .peek.which in ['REQUIRE', 'OR']
+					.requireSection(codePart)
+				if .peek.which in ['ENSURE', 'AND']
+					.ensureSection(codePart)
+				if .peek.which=='TEST'
+					.testSection(codePartContainingTest to !)
+				if .peek.which=='BODY'
+					.grab
+					.indent
+					_statementsFor(codePart)
+				else
+					if _isContractOnSameLine
+						_statementsFor(codePart)
+					else
+						pass
+						# There is no body for abstract or interface members. Error checking is done elsewhere.
+						# .throwError('Expecting `body` section.')
+				if not _isContractOnSameLine
+					.dedent
+			else
+				# non-sectional
+				_statementsFor(codePart)
+		finally
+			_popCodePart
+
+	def _statementsFor(codePart as AbstractMethod)
+		"""
+		Utility method for .statementsFor.
+		"""
+		gotStmt = false
+		while .peek.which <> 'DEDENT'
+			stmt = .stmt
+			if stmt
+				codePart.addStmt(stmt)
+				gotStmt = true
+		.dedent
+
+	def stmt as Stmt?
+		token = .peek
+		s as Stmt? # the statement (node)
+		expectEOL = true
+		branch token.which
+			on 'ASSERT'
+				s = .assertStmt
+			on 'BRANCH'
+				s = .branchStmt
+				expectEOL = false
+			on 'BREAK'
+				s = .breakStmt
+			on 'CONTINUE'
+				s = .continueStmt
+			on 'EXPECT'
+				s = .expectStmt
+				expectEOL = false
+			on 'FOR'
+				s = .forStmt
+				expectEOL = false
+#			on 'DEF'
+#				s = .declareMethod
+			on 'IF'
+				s = .ifStmt
+				expectEOL = false
+			on 'GET'
+				.throwError('Cannot use "get" for a statement. If you mistakenly started a property above with "def", "get" or "set", then use "pro" instead.')
+			on 'LISTEN'
+				s = .listenStmt
+			on 'IGNORE'
+				s = .ignoreStmt
+			on 'PASS'
+				s = .passStmt
+			on 'POST'
+				s = .postWhileStmt
+				expectEOL = false
+			on 'PRINT'
+				s = .printStmt
+				expectEOL = false
+			on 'RAISE'
+				s = .raiseStmt
+			on 'RETURN'
+				s = .returnStmt
+			on 'THROW'
+				s = .throwStmt
+			on 'TRACE'
+				s = .traceStmt
+				expectEOL = false
+			on 'TRY'
+				s = .tryStmt
+				expectEOL = false
+			on 'USING'
+				s = .usingStmt
+				expectEOL = false
+			on 'WHILE'
+				s = .whileStmt
+				expectEOL = false
+			on 'YIELD'
+				s = .yieldStmt
+			on 'EOL'
+				.grab  # ignore stray EOL (can especially come up at the end of a file)
+				expectEOL = false
+			else
+				# Can't do this (or at least not this simply) because it's legit to say:
+				# SomeClass<of Blah>()
+				#if token.which=='OPEN_GENERIC'
+				#	.throwError('The correct local variable syntax is "name as Type" or "name = initValue".')
+				if token.which == 'ID' and token.text == 'ct_trace'  # TODO: need something other than ct_trace
+					s = CompileTimeTraceStmt(.grab, .expression)
+				else
+					if .looksLikeType(0) and .looksLikeVarNameIsNext(1)
+						.throwError('The correct local variable syntax is "name as Type" or "name = initValue". Try "[.peek(1).text] as [.peek(0).text]."')
+					s = .expression
+					s.afterParserRecognizesStatement
+		if expectEOL
+			if .verbosity>=5
+				print '<> last statement start token=[token]'
+				print '<> s = [s]'
+			.expect('EOL')
+		_finishSpaceAgnostic
+		return s
+
+
+	##
+	## Individual Statements
+	##
+
+	def assertStmt as Stmt
+		token = .expect('ASSERT')
+		expr = .expression
+		info = if(.optional('COMMA'), .expression, nil)
+		return AssertStmt(token, expr, info)
+
+	def branchStmt as Stmt
+		token = .expect('BRANCH')
+		e = .expression
+		.indent
+		onParts = List<of BranchOnPart>()
+		elsePart as BlockStmt?
+		shouldContinue = true  # CC: axe this when 'break' can be used in a branch inside a loop
+		while shouldContinue
+			branch .peek.which
+				on 'ON'
+					.grab
+					if elsePart
+						.throwError('Cannot have "on" parts after an "else" part.')
+					exprs = .commaSepExprs(['COLON', 'EOL'])
+					.undo
+					block = .branchPartStatements
+					onParts.add(BranchOnPart(exprs, block))
+				on 'ELSE'
+					.grab
+					if elsePart
+						.throwError('Cannot have more than one "else" in a branch.')
+					if not onParts.count
+						.throwError('Cannot have an "else" in a branch without at least one "on".')
+					elsePart = .branchPartStatements
+				on 'DEDENT'
+					shouldContinue = false
+				on 'EOL'
+					.grab
+				else
+					.throwError('Expecting "on", "else" or end of branch statement. Encountered [.peek.which]')
+		.dedent
+		return BranchStmt(token, e, onParts, elsePart)
+
+	def branchPartStatements as BlockStmt
+		if .peek.which=='COLON'
+			.grab
+			stmt = .stmt
+			if stmt is nil
+				.throwError('Need a statement.')
+			block = BlockStmt(stmt.token, [stmt])
+		else
+			block = .block
+		return block
+
+	def breakStmt as Stmt
+		return BreakStmt(.expect('BREAK'))
+
+	def continueStmt as Stmt
+		return ContinueStmt(.expect('CONTINUE'))
+
+	def expectStmt as Stmt
+		# expect FooException
+		#     block
+		token = .expect('EXPECT')
+		type = .typeId
+		block = .block
+		return ExpectStmt(token, type, block)
+
+	def forStmt as Stmt
+		"""
+		numeric    for int x = 0 up to n step 2
+		enumerable for Customer cust in customers
+		"""
+		token = .expect('FOR')
+		varr = .nameExpr
+		peek = .peek.which
+		if peek=='ASSIGN'
+			return .forNumericStmt(token, varr)
+		else if peek=='IN'
+			return .forEnumerableStmt(token, varr)
+		else
+			.throwError('Expecting "=" or "in".')
+			throw FallThroughException(peek)  # make C# code flow analysis happy
+
+	def forNumericStmt(token as IToken, varr as NameExpr) as ForNumericStmt
+		.expect('ASSIGN')
+		start = .expression
+		.expect('DOTDOT')
+		stopp = .expression
+		dirToken = .optional('PLUSPLUS')
+		if dirToken
+			dir = 1
+		else
+			dirToken = .optional('MINUSMINUS')
+			if dirToken
+				dir = -1
+		stepp as Expr?
+		if dirToken is nil
+			dir = 1
+			stepp = nil
+		else
+			stepp = .expression
+		stmts = .block
+		return ForNumericStmt(token, varr, start, stopp, dir, stepp, stmts)
+
+	def forEnumerableStmt(token as IToken, varr as NameExpr) as ForEnumerableStmt
+		.expect('IN')
+		what = .expression
+		stmts = .block
+		return ForEnumerableStmt(token, varr, what, stmts)
+
+	def ifStmt as Stmt
+		token = .expect('IF')
+		cond = .expression
+		trueStmts = .block
+		falseStmts as BlockStmt?
+		if .peek.which=='ELSE'
+			.grab
+			peek = .peek.which
+			if peek=='EOL'
+				falseStmts = .block
+			else if peek=='IF'
+				falseStmts = BlockStmt(.peek, [.ifStmt])
+			else
+				.throwError('Syntax error. Expecting end-of-line or "if" after an "else".')
+		return IfStmt(token, cond, trueStmts, falseStmts)
+
+	def ignoreStmt as IgnoreStmt
+		token = .expect('IGNORE')
+		eventRef = .expression
+		# TODO: error checking
+		.expect('COMMA')
+		target = .expression
+		# TODO: error checking
+		return IgnoreStmt(token, eventRef, target)
+
+	def listenStmt as ListenStmt
+		token = .expect('LISTEN')
+		eventRef = .expression
+		# TODO: error checking
+		.expect('COMMA')
+		target = .expression
+		# TODO: error checking
+		return ListenStmt(token, eventRef, target)
+
+	def passStmt as Stmt
+		return PassStmt(.grab)
+
+	def postWhileStmt as Stmt
+		token = .expect('POST')
+		.expect('WHILE')
+		return PostWhileStmt(token, .expression, .block)
+
+	def traceStmt as TraceStmt?
+		"""
+		Example source:
+			trace
+			trace x
+			trace this, x, foo.bar
+			trace all
+			trace on
+			trace off
+		"""
+		token = .expect('TRACE')
+		peek = .peek.which
+		branch peek
+			on 'ON'
+				.expect('ON', 'EOL')
+				_isTraceOn = true
+				return nil
+			on 'OFF'
+				.expect('OFF', 'EOL')
+				_isTraceOn = false
+				return nil
+			on 'ALL'
+				.expect('ALL', 'EOL')
+				return if(_isTraceOn, TraceAllStmt(token, _curCodePart), nil)
+			on 'EOL'
+				.expect('EOL')
+				return if(_isTraceOn, TraceLocationStmt(token, _curCodePart), nil)
+			else
+				if _isTraceOn
+					return TraceExprsStmt(token, _curCodePart, .commaSepExprs('EOL'))
+				else
+					.commaSepExprs('EOL')
+					return nil
+		throw FallThroughException()  # 'branch..else should have returned'
+
+	def printStmt as Stmt
+		"""
+		Example source:
+			print arg
+			print a, b, c
+			print to sw, a, b
+			print to sw, a, b stop
+			print a, b, c stop
+			print to sw
+				body
+		"""
+		destination as Expr?
+		block as BlockStmt?
+		token = .expect('PRINT')
+		args = List<of Expr>()
+		stopp = false
+		if .optional('TO')
+			destination = .expression
+			peek = .peek.which
+			if peek=='COMMA'
+				.grab
+			else if peek=='EOL'
+				block = .block
+			else
+				.throwError('Expecting a comma and print arguments, or a code block.')
+		if not block
+			args = .commaSepExprs(['EOL', 'STOP'])
+			terminator = .last
+			if terminator.which=='STOP'
+				stopp = true
+				.expect('EOL')
+		if block
+			return PrintRedirectStmt(token, destination, block)
+		else
+			return PrintStmt(token, destination, args, stopp)
+
+	def raiseStmt as Stmt
+		.expect('RAISE')
+		.throwError('The "raise" keyword may be used in the future to raise events. If you are trying to throw an exception, use the "throw" keyword.')
+		return nil to passthrough # CC: throw FallThroughException()
+
+	def returnStmt as Stmt
+		token = .expect('RETURN')
+		expr = if(.peek.which == 'EOL', nil, .expression)
+		return ReturnStmt(token, expr)
+
+	def requireSection(codeMember as AbstractMethod) as ContractPart
+		return _requireOrEnsure(codeMember, 'OR', 'REQUIRE', RequirePart)
+
+	def ensureSection(codeMember as AbstractMethod) as ContractPart
+		return _requireOrEnsure(codeMember, 'AND', 'ENSURE', EnsurePart)
+
+	def _requireOrEnsure(codeMember as AbstractMethod, connectWhich as String, mainWhich as String, theClass as Type) as ContractPart
+		connectToken = .optional(connectWhich)
+		mainToken = .expect(mainWhich)
+		if .peek.which in ['EOL', 'COLON']
+			.indent
+			exprs = List<of Expr>()
+			while true
+				if .peek.which=='EOL'
+					.grab
+					continue
+				if exprs.count and .peek.which == 'DEDENT'
+					break
+				exprs.add(.expression)
+				.expect('EOL')
+			.dedent
+		else
+			# one expression, on the same line
+			exprs = [.expression]
+			.endOfLine
+			_isContractOnSameLine = true
+		return theClass(connectToken, mainToken, codeMember, exprs) to ContractPart
+
+	def throwStmt as Stmt
+		token = .expect('THROW')
+		expr = if(.peek.which == 'EOL', nil, .expression)
+		return ThrowStmt(token, expr)
+
+	def tryStmt as Stmt
+		# try... except... success... finally...
+		token = .expect('TRY')
+		tryBlock = .block
+		catchBlocks = List<of CatchBlock>()
+		didParseCatchAnyBlock = false  # meaning the catch that specifies no specific type of exception
+		useCatchMsg = 'Use "catch" instead of "except". (Also, use "throw" for throwing exceptions and "raise" for raising events.)'
+		if .peek.which=='EXCEPT'
+			.throwError(useCatchMsg)
+		while .peek.which=='CATCH'
+			catchToken = .grab
+			if .peek.which in ['COLON', 'EOL']
+				if didParseCatchAnyBlock
+					.throwError('Already encountered the "catch every exception" block.')
+				anyCatchBlock = .block
+				catchBlocks.add(CatchBlock(catchToken, anyCatchBlock))
+				didParseCatchAnyBlock = true
+			else
+				if didParseCatchAnyBlock
+					.throwError('Cannot have a specific exception block after the "catch every exception" block.')
+				if .peek(1).which=='AS'
+					catchVar = .localVarDecl
+					catchBlock = .block
+					catchBlocks.add(CatchBlock(catchBlock.token, catchVar, catchBlock))
+				else
+					catchType = .typeId
+					catchBlock = .block
+					catchBlocks.add(CatchBlock(catchBlock.token, catchType, catchBlock))
+		if .peek.which=='EXCEPT'
+			.throwError(useCatchMsg)
+		if .peek.which=='ELSE'
+			.throwError('There is no "else" for a "try". There is a "success" however.')
+		if .peek.which=='SUCCESS'
+			.grab
+			successBlock = .block to ?
+		else
+			successBlock = nil
+		if .peek.which=='FINALLY'
+			.grab
+			finallyBlock = .block to ?
+		else
+			finallyBlock = nil
+		if not catchBlocks.count and not successBlock and not finallyBlock
+			.throwError('A try needs at least one "except", "success" or "finally" block.')
+		return TryStmt(token, tryBlock, catchBlocks, successBlock, finallyBlock)
+
+	def testSection(codeMember as BoxMember) as TestMethod
+		"""
+		Parses the `test` section and sets codeMember.testMethod.
+		Returns the test method.
+		"""
+		# TODO: consider pushing the test method as the current code member
+		token = .expect('TEST')
+		.indent
+		testMethod = TestMethod(token, codeMember)
+		.statementsFor(testMethod)
+		codeMember.testMethod = testMethod
+		return testMethod
+
+	def testSection(box as Box) as TestMethod
+		# TODO: consider pushing the test method as the current code member
+		token = .expect('TEST')
+		.indent
+		testMethod = TestMethod(token, box)
+		.statementsFor(testMethod)
+		box.testMethod = testMethod
+		return testMethod
+
+	def usingStmt as Stmt
+		# syntax: using x = e  block
+		token = .expect('USING')
+		varr = .nameExpr
+		.expect('ASSIGN')
+		initExpr = .expression
+		block = .block
+		return UsingStmt(token, varr, initExpr, block)
+
+	def whileStmt as Stmt
+		return WhileStmt(.expect('WHILE'), .expression, .block)
+
+	def yieldStmt as Stmt
+		token = .expect('YIELD')
+		peek = .peek.which
+		if peek == 'BREAK'
+			.expect('BREAK')
+			return YieldBreakStmt(token)
+		else
+			if peek == 'RETURN'
+				.throwError('Use "yield" instead of "yield return".') 
+			expr = if(peek == 'EOL', nil, .expression)
+			return YieldReturnStmt(token, expr)
+
+
+	##
+	## Misc parts
+	##
+
+	def block as BlockStmt
+		"""
+		Used by if, while, print-to, etc.
+		Consumes the (optional colon,) indent, statements and dedent.
+		Returns a BlockStmt.
+		"""
+		token = .indent
+		stmts = List<of Stmt>()
+		while true
+			stmt = .stmt
+			if stmt
+				stmts.add(stmt)
+			if .peek.which=='DEDENT'
+				break
+		if not stmts.count
+			.throwError('Missing statements in block. Add a real statement or a "pass".')
+		.dedent
+		return BlockStmt(token, stmts)
+
+	def localVarDecl as AbstractLocalVar
+		return .localVarDecl(.typeProvider.unspecifiedType)
+
+	def localVarDecl(defaultType as IType?) as AbstractLocalVar
+		"""
+		Variable declarations for `using`, `for` and `catch`.
+		Not class vars (see `boxVarDecl`) or parameters (see `paramDecl`).
+		Example source:
+			x   # default type is dynamic   # TODO: should be unspecified
+			i as int
+			cust as Customer
+		Arguments:
+			theClass is typically BoxVarDecl, LocalVar or Param
+			whatName could be set to 'Parameter' for example.
+		Returns:
+			A theClass(name, type)
+		Errors:
+			None
+		"""
+		token = .expect('ID')
+		name = token.value to String
+		.checkStartsLowercase(name, 'Variable')
+		type as ITypeProxy?
+		if .peek.which=='AS'
+			.grab
+			type = .typeId
+		else
+			# maybe the var already exists?
+			definition = _curCodePart.findLocal(name)
+			if definition
+				return definition
+			type = nil
+
+		type = type ? defaultType
+		assert type
+
+		definition = _curCodePart.findLocal(name)
+
+		# TODO: put this kind of check in bindImp maybe?
+		if definition
+			if definition.typeNode
+				if definition.typeNode==type
+					return definition
+				else
+					# this should probably be moved to the bindImp phase since types can have different names like "int" and "System.Int32"
+					.throwError('Cannot redeclare "[name]" from "[definition.typeNode]" to "[type]". Previous definition is on line [definition.token.lineNum].')
+			else if definition.type==type
+				return definition
+			else
+				# this should probably be moved to the bindImp phase since types can have different names like "int" and "System.Int32"
+				.throwError('Cannot redeclare "[name]" from "[definition.type]" to "[type]". Previous definition is on line [definition.token.lineNum].')
+
+		# new def
+		varr = LocalVar(token, type)
+		_curCodePart.addLocal(varr)
+
+		return varr
+
+	##
+	## Expressions
+	##
+
+	shared
+		var _binaryOpPrec = {
+			# CANNOT USE 0 AS A VALUE IN THIS DICTIONARY
+			'DOT':				80,
+			'LBRACKET':			80,
+			'LPAREN':			80,
+			'ARRAY_OPEN':		80,
+
+			'STARSTAR':			70,  # right associative
+
+			'QUESTION':			68,
+			'BANG':				68,
+
+			'TO':				65,
+			'TOQ':				65,
+
+			'STAR':				60,
+			'SLASH':			60,
+			'SLASHSLASH':		60,
+			'PERCENT':			60,
+
+			'PLUS':				50,
+			'MINUS':			50,
+
+			'EQ':				40,
+			'NE':				40,
+			'LT':				40,
+			'GT':				40,
+			'LE':				40,
+			'GE':				40,
+			'IS':				40,
+			'ISNOT':			40,
+			'INHERITS':			40,
+			'IMPLEMENTS':		40,
+
+			'IN':				35,
+			'NOTIN':			35,
+
+			'AND':				30,
+			'OR':				30,
+			'IMPLIES':			20,
+
+			'ASSIGN':			20,
+			'PLUS_EQUALS':		20,
+			'MINUS_EQUALS':		20,
+			'STAR_EQUALS':		20,
+			'SLASH_EQUALS':		20,
+			'PERCENT_EQUALS':	20,
+			'QUESTION_EQUALS':	20,
+			'BANG_EQUALS':		20,
+		}
+
+		var _unaryOpPrec = {
+			'MINUS': _binaryOpPrec['MINUS']+1,
+			'PLUS': _binaryOpPrec['PLUS']+1,
+			'NOT': _binaryOpPrec['AND']+1,
+			'REF': _binaryOpPrec['STARSTAR']+1,
+			'OLD': _binaryOpPrec['STARSTAR']+1,
+		}
+
+	def expression as Expr
+		test
+			# CC: assert 0 not in _binaryOpPrec.values
+			for v in _binaryOpPrec.values
+				assert v<>0
+		body
+			expr = .expression(0, nil)
+			if expr.isParened
+				_warning(expr.token, 'Unnecessary parentheses around expression. You can remove them.')
+			return expr
+
+	def expression(precedence as int) as Expr
+		return .expression(precedence, nil)
+
+	def expression(precedence as int, left as Expr?) as Expr
+		if left is nil
+			left = .expression2
+		while true
+			peek = .peek.which
+			# handle multi-word operators
+			op as String? = nil
+			if peek=='IS' and .peek(+1).which=='NOT'
+				# 'is not' is a 2 keyword operator
+				op = 'ISNOT'
+			else if peek=='NOT' and .peek(+1).which=='IN'
+				op = 'NOTIN'
+			# handle precedence (and detect non-binary operators)
+			binaryOpPrec = Utils.getSI(_binaryOpPrec, op ? peek, -1)
+			if binaryOpPrec==-1 or binaryOpPrec<precedence
+				break
+			# continue...
+			if peek=='LBRACKET'
+				# requires special handling - IndexExpr or SliceExpr
+				return .expression(precedence, .indexOrSliceExpr(left to !))
+			else if peek=='LPAREN'
+				# requires special handling - PostCallExpr
+				# this happens for something like: foo[i]('x')
+				if not PostCallExpr.isTargetAcceptable(left to !)
+					.throwError('Unexpected call.')  # example: t = x to List<of String>()
+				token = .grab
+				exprs = .commaSepExprs('RPAREN')
+				return .expression(precedence, PostCallExpr(token, left, exprs))
+			else
+				# most operators are one-word affairs
+				if op is nil
+					opToken = .grab
+					op = opToken.which
+				else
+					# op was set earlier for a two word operator. ISNOT NOTIN
+					opToken = .grab
+					.grab
+				if op=='TO' or op=='TOQ'
+					getTypeExprForRightHandSide = true  # required to handle "x to String?", for example
+			assert _binaryOpPrec.containsKey(op to !)
+			_leftStack.push(left to !)
+			.opStack.push(op to !)
+			try
+				# get the right hand side of a binary operator expression
+				prec = if(OperatorSpecs.rightAssoc.containsKey(op to !), binaryOpPrec, binaryOpPrec+1)
+				if op == 'TO' and .peek.which in ['QUESTION', 'BANG']
+					# ex: x to !
+					# ex: x to ?
+					getTypeExprForRightHandSide = false
+					rightTok = .grab to !
+					branch rightTok.which
+						on 'QUESTION': left = ToNilableExpr(opToken to !, rightTok, left to !)
+						on 'BANG': left = ToNonNilableExpr(opToken to !, rightTok, left to !)
+						else: throw FallThroughException(rightTok.which)
+				else
+					if getTypeExprForRightHandSide
+						# support to expression. Ex: x to int  Ex: x to? Shape
+						right = .typeExpr to Expr
+						getTypeExprForRightHandSide = false
+					else if op == 'DOT' and .peek and .peek.isKeyword
+						# support foo.bar where bar is a keyword. Ex: foo.this
+						right = MemberExpr(.grab) to Expr
+					else
+						right = .expression(prec)
+					left = BinaryOpExpr.make(opToken to !, op to !, left to !, right)
+			finally
+				.opStack.pop
+				_leftStack.pop
+		assert left
+		return left to !
+
+	def expression2 as Expr
+		peekToken = .peek
+		peek = peekToken.which
+		if _unaryOpPrec.containsKey(peek)
+			token = .grab
+			prec = _unaryOpPrec[peek]
+			branch token.which
+				on 'OLD'
+					return OldExpr(token, .expression(prec))
+				on 'REF'
+					refTo = .expression(prec)
+					return RefExpr(token, refTo)
+				else
+					return UnaryOpExpr(token, peek, .expression(prec))
+		# TODO: make a branch statement
+		else if peek=='LPAREN'
+			.grab
+			node = .expression(0, nil)
+			.expect('RPAREN')
+			node.isParened = true
+			return node
+		else if peek=='DOT'
+			# leading dot
+			token = .grab
+			peekToken = .peek
+			peek = peekToken.which
+			if peek=='ID' or peekToken.isKeyword
+				memberToken = .idOrKeyword
+				expr = MemberExpr(memberToken) to Expr
+			else if peek=='OPEN_CALL'
+				expr = .callExpr
+			else
+				.throwError('Syntax error after "."')
+			return BinaryOpExpr.make(token to !, 'DOT', ThisLit(token, .curBox), expr)
+		else if peek=='NIL'
+			return NilLiteral(.grab)
+		else if peek=='TRUE'
+			return BoolLit(.grab)
+		else if peek=='FALSE'
+			return BoolLit(.grab)
+		else if peek=='THIS'
+			return ThisLit(.grab, .curBox)
+		else if peek=='BASE'
+			return BaseLit(.grab, .curBox)
+		else if peek=='VAR'
+			assert _curCodePart
+			if _curCodePart inherits ProperDexerXetter
+				return VarLit(.grab, _curCodePart)
+			else
+				.throwError('Cannot refer to `var` in expressions outside of a property `get` or `set`.')
+				throw FallThroughException() # stop a warning
+		else if peek=='CHAR_LIT_SINGLE'
+			return CharLit(.grab)
+		else if peek=='CHAR_LIT_DOUBLE'
+			return CharLit(.grab)
+		else if peek=='STRING_START_SINGLE'
+			return .stringWithSubstitutionLit('STRING_START_SINGLE', 'STRING_PART_SINGLE', 'STRING_STOP_SINGLE')
+		else if peek=='STRING_START_DOUBLE'
+			return .stringWithSubstitutionLit('STRING_START_DOUBLE', 'STRING_PART_DOUBLE', 'STRING_STOP_DOUBLE')
+		else if peek=='STRING_SINGLE'
+			return StringLit(.grab)
+		else if peek=='STRING_DOUBLE'
+			return StringLit(.grab)
+		else if peek=='INTEGER_LIT'
+			return IntegerLit(.grab)
+		else if peek=='DECIMAL_LIT'
+			return DecimalLit(.grab)
+		else if peek=='FLOAT_LIT'
+			return FloatLit(.grab)
+		else if peek=='LBRACKET'
+			return .literalList
+		else if peek=='ARRAY_OPEN'
+			return .literalArray
+		else if peek=='LCURLY'
+			return .literalDict
+		else if peek=='OPEN_IF'
+			return .ifExpr
+		else if peek=='FOR'
+			return .forExpr
+		else if peek=='OPEN_CALL'
+			return .callExpr
+		else if peek=='OPEN_GENERIC'
+			return TypeExpr(.typeId)
+		else if peek=='ID'
+			return .identifierExpr
+		else if peek in ['SHARP_OPEN', 'SHARP_SINGLE', 'SHARP_DOUBLE']
+			return .sharpExpr
+		else if .opStack.count and .opStack.peek=='DOT' and .peek.isKeyword
+			return .identifierExpr
+		else
+			try
+				return .typeExpr
+			catch pe as ParserException
+				if pe.message.contains('Unrecognized type')
+					msg = 'Expecting an expression.'
+					if peekToken.isKeyword
+						msg += ' "[peekToken.text]" is a reserved keyword that is not expected here.'
+					.throwError(msg)
+					throw FallThroughException()
+				else
+					throw
+
+	def callExpr as CallExpr
+		"""
+		Syntax:
+			foo(args)
+		"""
+		token = .expect('OPEN_CALL')
+		callName = token.value to String
+		assert not callName.endsWith('(')
+		exprs = .commaSepExprs(['RPAREN'], false, true)
+		return CallExpr(token, callName, exprs)
+
+	def argument as Expr
+		"""
+		In support of .callExpr and others, for when it's legal to write `out x` and such.
+		"""
+		if .peek
+			branch .peek.which
+				on 'OUT': label = ArgumentLabel.Out
+				on 'INOUT': label = ArgumentLabel.InOut
+				else: label = ArgumentLabel.None
+				# TODO? on 'VARI': ...
+			if label <> ArgumentLabel.None
+				.grab
+		expr = .expression
+		expr.argumentLabel = label
+		return expr
+
+	def commaSepExprs(terminator as String) as List<of Expr>
+		return .commaSepExprs([terminator], false, false)
+
+	def commaSepExprs(terminators as IList<of String>) as List<of Expr>
+		return .commaSepExprs(terminators, false, false)
+
+	def commaSepExprs(terminators as IList<of String>, isSpaceAgnostic as bool) as List<of Expr>
+		return .commaSepExprs(terminators, isSpaceAgnostic, false)
+
+	def commaSepExprs(terminators as IList<of String>, isSpaceAgnostic as bool, expectingArguments as bool) as List<of Expr>
+		"""
+		Example source
+			... expr TERMINATOR
+			... expr, expr TERMINATOR
+			... expr, expr, expr, TERMINATOR
+		Returns
+			A list of expressions.
+		Notes
+			Popular terminators are 'EOL' and 'RPAREN'.
+			The terminator token is consumed, but can be examined with .last.
+		"""
+		expectSep = false
+		sep = 'COMMA'
+		exprs = List<of Expr>()
+		while true
+			if isSpaceAgnostic
+				_spaceAgnostic
+			if .peek.which in terminators
+				terminator = .grab
+				break
+			if expectSep
+				.expect(sep)
+			if .peek.which in terminators
+				terminator = .grab
+				break
+			if isSpaceAgnostic
+				_spaceAgnostic
+			if .peek.which in terminators
+				terminator = .grab
+				break
+			.newOpStack
+			try
+				if expectingArguments
+					exprs.add(.argument)
+				else
+					exprs.add(.expression)
+			finally
+				.delOpStack
+			expectSep = true
+		return exprs
+
+	def forExpr as ForExpr
+		"""
+		t = for x in stuff where x<0 get x*x
+		grammar: for VAR in EXPR [where EXPR] get EXPR
+		"""
+		token = .expect('FOR')
+		nameExpr = .nameExpr
+		# TODO: support numeric for expressions?
+		#peek = .peek.which
+		#if peek=='ASSIGN'
+		#	return .forNumericStmt(token, varr)
+		#else if peek=='IN'
+		#	return .forEnumerableStmt(token, varr)
+		#else
+		#	.throwError('Expecting "=" or "in".')
+		#	throw FallThroughException(peek)  # make C# code flow analysis happy
+		.expect('IN')
+		what = .expression
+		if .optional('WHERE')
+			whereExpr as Expr? = .expression
+			if .optional('GET')
+				getExpr = .expression
+			else
+				getExpr = IdentifierExpr(nameExpr.token, nameExpr.name)
+		else
+			.expect('GET')
+			getExpr = .expression
+		return ForExpr(token, nameExpr, what, whereExpr, getExpr)
+
+	def identifierExpr as Expr
+		"""
+		Can return an IdentifierExpr or an AsExpr if the user says "i as int", for example.
+		"""
+		nameToken = .idOrKeyword
+		name = nameToken.text
+		if .opStack.count and .opStack.peek=='DOT'
+			return MemberExpr(nameToken)
+		if .peek.which=='AS'
+			if not Utils.startsWithLowerLetter(name)
+				.throwError('Local variable declarations must start with a lowercase letter. This avoids collisions with other identifiers such as classes and enums.')
+			return AsExpr(.grab, nameToken, .typeId)
+		else
+			return IdentifierExpr(nameToken, name)
+
+	def ifExpr as IfExpr
+		token = .expect('OPEN_IF')
+		expr = .expression
+		.expect('COMMA')
+		texpr = .expression
+		.expect('COMMA')
+		fexpr = .expression
+		.expect('RPAREN')
+		return IfExpr(token, expr, texpr, fexpr)
+
+	def indexOrSliceExpr(left as Expr) as Expr
+		# note: this code is similar to, but not identical to commaSepExprs
+		# this code has to deal with the case that in slices, expressions can be omitted
+		token = .grab
+		assert token.which=='LBRACKET'
+		expectSep = false
+		sep as String?
+		exprs = List<of Expr?>()
+		separators = ['COMMA', 'COLON']
+		isSpaceAgnostic = false # TODO: try making true for isSpaceAgnostic
+		while true
+			if isSpaceAgnostic
+				_spaceAgnostic
+			if .peek.which=='RBRACKET'
+				.grab
+				break
+			if expectSep
+				if sep
+					.expect(sep)
+				else
+					for which in separators
+						if .peek.which==which
+							.grab
+							sep = which
+							break
+					if sep is nil
+						.throwError('Expecting one of: [Utils.join(", ", separators)], but encountered [.peek.which]')
+				if sep=='COLON'
+					lastThingWasColon = true
+			if .peek.which=='RBRACKET'
+				.grab
+				break
+			if .peek.which=='COLON'
+				if sep=='COMMA'
+					.throwError('Not expecting a colon.')
+				.grab
+				exprs.add(nil)
+				sep = 'COLON'  # because sep could be nil
+				lastThingWasColon = true
+				continue
+			if isSpaceAgnostic
+				_spaceAgnostic
+			if .peek.which=='RBRACKET'
+				.grab
+				break
+			.newOpStack
+			try
+				exprs.add(.expression)
+				lastThingWasColon = false
+			finally
+				.delOpStack
+			expectSep = true
+		if lastThingWasColon
+			exprs.add(nil)
+		if sep=='COLON'
+			assert exprs.count>=2
+			if exprs.count>3
+				.throwError('There are [exprs.count] expressions for the slice. There can only be up to three (start, stop and step).')
+			start = exprs[0]
+			stopp = exprs[1]
+			stepp = if(exprs.count==3, exprs[2], nil)
+			return SliceExpr(token, left, start, stopp, stepp)
+		else
+			for expr in exprs
+				assert expr, exprs
+			return IndexExpr(token, left, exprs)
+
+	def literalList as ListLit
+		token = .expect('LBRACKET')
+		exprs = .commaSepExprs(['RBRACKET'], true)
+		return ListLit(token, exprs)
+
+	def literalArray as ArrayLit
+		token = .expect('ARRAY_OPEN')
+		exprs = .commaSepExprs(['RBRACKET'], true)
+		return ArrayLit(token, exprs)
+
+	def literalDict as DictLit
+		token = .expect('LCURLY')
+		expectComma = false
+		entries = List<of List<of Expr>>()
+		while true
+			_spaceAgnostic
+			if .peek.which=='RCURLY'
+				.grab
+				break
+			if expectComma
+				.expect('COMMA')
+			if .peek.which=='RCURLY'
+				.grab
+				break
+			_spaceAgnostic
+			if .peek.which=='RCURLY'
+				.grab
+				break
+			key = .expression
+			.expect('COLON')
+			value = .expression
+			entries.add([key, value])
+			expectComma = true
+		return DictLit(token, entries)
+
+	def nameExpr as NameExpr
+		nameToken = .expect('ID')
+		name = nameToken.text
+		if .peek.which=='AS'
+			if not Utils.startsWithLowerLetter(name)
+				.throwError('Local variable declarations must start with a lowercase letter. This avoids collisions with other identifiers such as classes and enums.')
+			return AsExpr(.grab, nameToken, .typeId)
+		else
+			return IdentifierExpr(nameToken, name)
+
+	def sharpExpr as SharpExpr
+		token = .grab
+		branch token.which
+			on 'SHARP_SINGLE'
+				assert token.text.startsWith("sharp'")
+				return SharpExpr(token, token.text["sharp'".length:-1])
+			on 'SHARP_DOUBLE'
+				assert token.text.startsWith('sharp"')
+				return SharpExpr(token, token.text['sharp"'.length:-1])
+			on 'SHARP_OPEN'
+				expr = .expression
+				.expect('RPAREN')
+				return SharpExpr(token, expr)
+			else
+				throw FallThroughException(token)
+
+	def stringWithSubstitutionLit(whichStart as String, whichPart as String, whichStop as String) as StringSubstLit
+		# comment this mo-fo
+		items = List<of Expr>()
+		item = .expect(whichStart)
+		items.add(StringLit(item))
+		while true
+			expr = .expression
+			fmt = .optional('STRING_PART_FORMAT')
+			if fmt
+				assert fmt.text.startsWith('')
+				items.add(FormattedExpr(expr, fmt.text.substring(1)))
+			else
+				items.add(expr)
+			peek = .peek.which
+			if peek==whichPart
+				items.add(StringLit(.grab))
+			else if peek==whichStop
+				items.add(StringLit(.grab))
+				break
+			else
+				if _verbosity>=4
+					print '<> stringWithSubstitutionLit([whichStart], [whichPart], [whichStop]), peek=[peek]'
+				.throwError('Expecting more string contents or the string end after the expression.')
+		return StringSubstLit(items)
+
+	def typeExpr as TypeExpr
+		return TypeExpr(.typeId)
+
+	##
+	## Types
+	##
+
+	def typeId as AbstractTypeIdentifier
+		return .qualifiedTypeId
+
+	def qualifiedTypeId as AbstractTypeIdentifier
+		"""
+		May actually return a non-qualified type.
+		"""
+		types = List<of AbstractTypeIdentifier>()
+		while true
+			t = .nonqualifiedTypeId
+			types.add(t)
+			if .peek.which=='DOT'
+				if .peek(1).which=='OPEN_CALL'
+					# See Tests\150-basics-two\510-number-parse.cobra
+					break
+				else
+					.grab
+			else
+				break
+		assert types.count
+		if types.count==1
+			return types[0]
+		else
+			# if the last type is an array we need to fix things up--the array applies to the whole qualified type
+			lastTypeId = types[types.count-1] # CC: types.last
+			if lastTypeId inherits ArrayTypeIdentifier
+				types[types.count-1] = lastTypeId.theWrappedTypeIdentifier
+				innerType = QualifiedTypeIdentifier(types)
+				return ArrayTypeIdentifier(lastTypeId.token, innerType)
+			else
+				return QualifiedTypeIdentifier(types)
+
+	var _validIntSizes = @[8, 16, 32, 64]
+
+	def nonqualifiedTypeId as AbstractTypeIdentifier
+		token = .grab
+		assert token
+
+		t as AbstractTypeIdentifier?
+
+		branch token.text
+			on 'int': t = TypeIdentifier(token, .typeProvider.intType)
+			on 'bool': t = TypeIdentifier(token, .typeProvider.boolType)
+			on 'char': t = TypeIdentifier(token, .typeProvider.charType)
+			on 'decimal': t = TypeIdentifier(token, .typeProvider.decimalType)
+			on 'float': t = TypeIdentifier(token, .typeProvider.floatType)
+			on 'passthrough': t = TypeIdentifier(token, .typeProvider.passThroughType)
+			on 'dynamic': t = TypeIdentifier(token, .typeProvider.dynamicType)
+			else 
+				branch token.which
+					on 'INT_SIZE'
+						size = token.value to int
+						if token.value not in _validIntSizes
+							.throwError('Unsupported integer size: [size]. Try 8, 16, 32 or 64.')
+						t = TypeIdentifier(token, .typeProvider.intType(true, size))
+					on 'UINT_SIZE'
+						size = token.value to int
+						if token.value not in _validIntSizes
+							.throwError('Unsupported integer size: [size]. Try 8, 16, 32 or 64.')
+						t = TypeIdentifier(token, .typeProvider.intType(false, size))
+					on 'ID'
+						t = TypeIdentifier(token)
+						if .peek and .peek.which == 'LT'
+							.throwError('Unexpected "<" after type name. If you are naming a generic, use "of " right after "<" as in "[token.text]<of ...".')
+					on 'OPEN_GENERIC': t = .genericTypeId(token to !)
+					else
+						.throwError('Unrecognized type: [token]')
+						return nil to passthrough  # CC: remove
+
+		assert t
+
+		# TODO: the array and nilable check should probably be at the bottom of qualifiedType
+
+		# check for array
+		bracket = .optional('LBRACKET')
+		if bracket
+			if .peek.which=='INTEGER_LIT'
+				.throwError('Explicit array sizes are not currently supported.')
+			.expect('RBRACKET')
+			t = ArrayTypeIdentifier(bracket, t)
+
+		# check for 'optional' aka 'can be nil'
+		question = .optional('QUESTION')
+		if question
+			t = NilableTypeIdentifier(question, t)
+
+		return t to !
+
+	def genericTypeId(openGenericToken as IToken) as AbstractTypeIdentifier
+		require openGenericToken.text.trim.endsWith('<of')
+		fullName = openGenericToken.text.trim + ' '
+		rootName = fullName[:-4]
+		expectComma = false
+		types = List<of ITypeProxy>()
+		while true
+			if .peek.which=='GT'
+				.grab
+				break
+			if .peek.which=='DOUBLE_GT'
+				# example source code: Dictionary<of String, List<of String>>
+				.replace(.peek.copy('GT'))  # tricky, but effective. note that modifying the token directly can cause problems when running testify on multiple files (such as a whole directory)--which is the norm
+				break
+			if expectComma
+				.expect('COMMA')
+				fullName += ', '
+			t = .typeId
+			types.add(t)
+			fullName += t.name
+			expectComma = true
+		fullName += '>'
+		return GenericTypeIdentifier(openGenericToken, rootName, types, fullName)
+
+
+	##
+	## Op stack
+	##
+
+	def newOpStack
+		require _opStackStack
+		_opStackStack.push(Stack<of String>())
+
+	def delOpStack
+		require _opStackStack
+		_opStackStack.pop
+
+	get opStack as Stack<of String>
+		"""
+		Returns the current opStack.
+		"""
+		return _opStackStack.peek to !
+
+
+	##
+	## Protected self utility
+	##
+
+	def checkProperty(name as String)
+		box = .curBox
+		if name==box.name
+			.throwError('Property names cannot be the same as their enclosing type.')  # TODO: list the enclosing types location
+		other = box.declForName(name)
+		if other
+			.throwError('There is already another class member with the name "[name]".')  # TODO: list its location and possibly what it is
+		other = box.declForNameCI(name)
+		if other
+			.throwError('There is already another class member with the name "[other.name]". You must differentiate member names by more than just case.')
+		if Utils.startsNonLower(name)
+			.throwError('Property names must start with lowercase letters. ([name])')
+
+	def checkStartsLowercase(identifier as String, whatName as String)
+		"""
+		Makes an error if identifier does not match 'foo'.
+		whatName should be capitalized.
+		"""
+		if identifier[0]=='_'
+			sugg = identifier.substring(1, identifier.length-1)
+			while sugg.length
+				sugg = sugg.substring(1, sugg.length-1)
+			sugg = sugg[0].toString.toLower + sugg.substring(1, sugg.length-1)
+			.throwError('[whatName] declarations cannot start with an underscore. Those are reserved for class variables. Try "[sugg]".')
+		if Utils.startsNonLower(identifier)  # CC: should be char.isLower(identifier[0]), but cannot see members of char at this time
+			sugg = identifier[0].toString.toLower + identifier.substring(1, identifier.length-1)
+			.throwError('[whatName] declarations must start with a lowercase letter to distinguish them from other types of identifiers. Try "[sugg]".')
+
+	def looksLikeType(peekAhead as int) as bool
+		"""
+		Returns true if the token looks like a type because
+			* it's an uppercase identifier, or
+			* it's a primitive type (bool, char, etc.)
+
+		The users of this method have to handle OPEN_GENERIC in a separate way which is why this
+		method does not check for that.
+
+		Also, this method cannot check for dotted names since it only works with one token.
+
+		This method supports the feature where C# style syntax for params and locals is detected
+		(`int x = 5` instead of `x as int = 5` or `x = 5`) in order to give a more useful error
+		message to the programmer.
+		"""
+		token = .peek(peekAhead)
+		if token.which == 'ID'
+			return Utils.startsNonLower(token.value to String)
+		if token.isKeyword and token.text in ['bool', 'char', 'decimal', 'int', 'float']
+			return true
+		return false
+
+	def looksLikeVarNameIsNext(peekAhead as int) as bool
+		token = .peek(peekAhead)
+		return token is not nil and token.which=='ID' and Utils.startsWithLowerLetter(token.text)
+
+	def recordError(msg as String) as ParserException
+		return .recordError(.last, msg)
+
+	def recordError(token as IToken?, msg as String) as ParserException
+		err = _makeError(token, msg)
+		_errorRecorder.recordError(err)
+		return err
+		
+	def throwError(msg as String)
+		.throwError(.last, msg)
+
+	def throwError(token as IToken?, msg as String)
+		throw _makeError(token, msg)  # will get recorded in .parseSource if the exception actually "makes it out" (some parser logic catches errors)
+
+	def _makeError(token as IToken?, msg as String) as ParserException
+		if token
+			msg = '[token.fileName]([token.lineNum],[token.colNum]): error: [msg]'
+		else
+			msg = '[_fileName](1, 1): error: [msg]'
+		if _verbosity>=2
+			print 'PARSER ERROR: [msg]'
+			print 'Last tokens:'
+			print '    ...'
+			for pair in .lastN(9)
+				s = '    [pair.i]. [pair.token]'
+				s = s.padRight(25) + 'line [pair.token.lineNum]'
+				print s
+			# assert false
+		token ?= .last
+		if token is nil
+			return ParserException(_fileName, msg)
+		else
+			return ParserException(token, msg)
+
+	def _warning(msg as String)
+		_warning(.last, msg)
+
+	def _warning(token as IToken, msg as String)
+		_warningRecorder.warning(CobraWarning(_fileName, token, msg))
+
+	def _pushCodePart(codePart as AbstractMethod)
+		_codeParts.push(codePart)
+		_curCodePart = codePart
+
+	def _popCodePart
+		require _codeParts.count
+		_codeParts.pop
+		_curCodePart = if(_codeParts.count, _codeParts.peek, nil)
+
+	def _spaceAgnostic
+		"""
+		Eats up EOLs, INDENTs and DEDENTs.
+		Call this to go into "space agnostic" mode.
+		Call finishSpaceAgnostic afterwards to eat up subsequent INDENTs and DEDENTs.
+		"""
+		while true
+			peek = .peek.which
+			branch peek
+				on 'EOL'
+					.grab
+					continue
+				on 'INDENT'
+					.grab
+					_spaceAgnosticIndentLevel += 1
+					continue
+				on 'DEDENT'
+					.grab
+					_spaceAgnosticIndentLevel -= 1
+					continue
+			break
+
+	def _finishSpaceAgnostic
+		"""
+		Eats up the DEDENTs and INDENTs that balance out the ones encountered in spaceAgnostic.
+		"""
+		if _verbosity>=5
+			print '<> finishSpaceAgnostic level=[_spaceAgnosticIndentLevel]'
+		if _spaceAgnosticIndentLevel
+			while _spaceAgnosticIndentLevel>0
+				.dedent
+				_spaceAgnosticIndentLevel -= 1
+			while _spaceAgnosticIndentLevel<0
+				.expect('INDENT')
+				_spaceAgnosticIndentLevel += 1
+		assert _spaceAgnosticIndentLevel==0  # cobra: make this an ensure
+
+
+class NumberedToken
+	"""
+	In support of Parser.lastN.
+	# TODO: Replace this with Pair<T1, T2>
+	"""
+
+	var _i as int
+	var _token as IToken
+
+	def init(i as int, token as IToken)
+		_i = i
+		_token = token
+
+	get i from var
+	get token from var
+
+	def toString as String is override
+		return '([_i], [_token])'

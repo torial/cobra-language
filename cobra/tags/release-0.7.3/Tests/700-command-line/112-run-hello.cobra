@@ -1,0 +1,43 @@
+class RunNoOp
+
+	shared
+
+		var _verbose = true
+
+		def main
+			.run('-ert:no')
+			.run('-ert:yes')
+			.run('-ert:no')
+			.run('-ert:no  -include-tests:no')
+			.run('-ert:no  -include-tests:no  -dst:yes')
+			.run('-ert:no  -include-tests:yes -dst:yes')
+			.run('-ert:yes -include-tests:no  -dst:yes')
+			.run('-ert:yes -include-tests:yes -dst:yes')
+
+			.run('-ert:yes -contracts:none')
+			.run('-ert:no -contracts:none')
+			
+		def run(args as String)
+			cobraPath = CobraCore.findCobraExe to !
+
+			if _verbose
+				print
+				print 'cobra', args
+				print '[cobraPath] [args]'
+				print '-------'
+				.flush
+			
+			p as System.Diagnostics.Process?
+			output = CobraCore.runCobraExe(cobraPath, '[args] 110-hello.cobra', out p)
+
+			if _verbose
+				if output.length
+					print output stop
+				print '-------'
+				.flush
+
+			assert p.exitCode == 0
+			assert output.trim == 'Hello'
+
+		def flush
+			CobraCore.printDestination.flush
