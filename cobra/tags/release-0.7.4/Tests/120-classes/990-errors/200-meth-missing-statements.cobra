@@ -1,0 +1,9 @@
+class Foo
+
+	def nameForDeclGenericParams
+# .error. missing
+	def interfaceDecl(foo as int) as Interface
+		foo = 5
+
+	def bar
+		pass

@@ -1,0 +1,27 @@
+#!/bin/bash
+target='Snapshot'
+mkdir -p $target
+cp cobra $target/
+cp cobra.exe $target/
+if [ -e cobra.pdb ]
+	then
+		cp cobra.pdb $target/
+	else
+		rm -f $target/cobra.pdb
+fi
+if [ -e cobra.mdb ]
+	then
+		cp cobra.mdb $target/
+	else
+		rm -f $target/cobra.mdb
+fi
+cp CobraLang.cs $target/
+cp CobraLang.cobra $target/
+cp Cobra.Lang.dll $target/
+cp SystemInterfaces.cobra $target/
+cp styles-output-html.css $target/
+cp styles-exception-report.css $target/
+echo date is `date`
+cmd="ls -l $target"
+echo $cmd
+$cmd
