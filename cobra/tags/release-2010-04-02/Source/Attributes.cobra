@@ -1,0 +1,156 @@
+class AttributeList inherits List<of AttributeDecl>
+	
+	pass
+
+
+class AttributeDecl inherits NamedNode is partial
+
+	var _expr as Expr
+
+	cue init(expr as Expr)
+		require expr inherits IdentifierExpr or expr inherits PostCallExpr or expr inherits DotExpr
+		.init(expr, false)
+		
+	cue init(expr as Expr, isReturnTarget as bool)
+		require expr inherits IdentifierExpr or expr inherits PostCallExpr or expr inherits DotExpr
+		base.init(expr.token)
+		if expr inherits IdentifierExpr
+			# making a PostCallExpr is one less class to worry about later
+			expr = PostCallExpr(expr.token, IdentifierExpr(expr.token, expr.name), List<of Expr>())
+		_expr = expr
+		_isReturnTarget = isReturnTarget
+
+	get expr from var
+
+	get isReturnTarget from var as bool
+		# TODO: may need to generalize this in the future to various targets
+
+	get name as String is override
+		if _expr inherits PostCallExpr
+			return _expr.name
+		else if _expr inherits DotExpr
+			return _expr.dotRight.name
+		else
+			return '(noname)'
+
+	def _bindInt
+		base._bindInt
+		_expr.bindInt
+
+	def _bindImp
+		base._bindImp
+
+		# support using 'Foo' when the real attribute class name is 'FooAttribute'
+
+		if _expr inherits DotExpr
+			_expr.left.bindImp  # Could cause a transformation. Handled in .replaceChild
+			name = _expr.dotRight.name
+			if not name.endsWith('Attribute')
+				defi = _expr.left.definition.memberForName(name+'Attribute')
+			if defi is nil
+				defi = _expr.left.definition.memberForName(name)
+			if defi is nil
+				_expr.throwCannotFindMemberError(_expr.left, '[name]Attribute or [name]')
+			if defi inherits IType
+				_expr = PostCallExpr(_expr.right.token, TypeExpr(_expr.right.token, defi), _expr.dotRight.args)
+			else
+				.throwError('Expecting an attribute class instead of a [defi.englishName].')
+		else if _expr inherits PostCallExpr
+			name = _expr.name
+			if not name.endsWith('Attribute') and name.canBeUndottedMemberName
+				if .compiler.symbolForName(name+'Attribute', false)
+					_expr = PostCallExpr(_expr.token, IdentifierExpr(_expr.token, name+'Attribute'), _expr.args)
+		assert _expr inherits PostCallExpr
+		(_expr to PostCallExpr).isForAttribute = true
+		_expr.bindImp
+
+	get typeForIdentifier as IType is override
+		throw ShouldNotCallException(.getType)
+
+	get typeForReceiver as IType is override
+		throw ShouldNotCallException(.getType)
+
+	def replaceChild(find as INode, replace as INode) as bool is override
+		if _expr is find
+			_expr = replace to PostCallExpr
+			return true
+		else if _expr inherits DotExpr
+			# handle transformation from _expr.left.bindImp in _bindImp
+			if find is _expr.left
+				e = _expr
+				_expr = DotExpr(e.token, e.op, replace to Expr, e.dotRight to Expr)
+				return true
+		return false
+
+
+class AssemblyDecl
+	is partial
+	inherits NamedNode
+	implements INameSpaceMember
+	"""
+	The only purpose of an assembly declaration is to hold assembly level attributes.
+	"""
+	
+	var _parentNameSpace as NameSpace?
+	var _attribs as AttributeList
+
+	cue init(token as IToken, attribs as AttributeList)
+		base.init(token)
+		_attribs = attribs
+
+	get attributes from _attribs
+
+	get englishName as String
+		return 'assembly'
+
+	get isFromBinaryLibrary as bool
+		return true
+	
+	get isNames as String*
+		return List<of String>()
+
+	get typeForIdentifier as IType? is override
+		assert false
+		return nil
+	
+	get typeForReceiver as IType? is override
+		assert false
+		return nil
+
+	pro parentNameSpace from var
+	
+	def extensionMemberFor(box as Box, name as String) as IMember?
+		return nil
+
+	def _bindInt
+		base._bindInt
+		for attrib in _attribs
+			try
+				attrib.bindInt
+			catch ne as NodeException
+				.compiler.recordError(ne)
+
+	def _bindImp
+		base._bindImp
+		for attrib in _attribs
+			try
+				attrib.bindImp
+			catch ne as NodeException
+				.compiler.recordError(ne)
+	
+	# TODO: shouldn't need these, but INameSpaceMember forces it on us (mostly/entirely through inheriting IMember)
+	
+	def unNilReturnType
+		pass
+	
+	get isCallable as bool
+		return false
+	
+	get isShared as bool
+		return false
+
+	get requiresThis as bool
+		return false
+		
+	get resultType as IType?
+		return nil

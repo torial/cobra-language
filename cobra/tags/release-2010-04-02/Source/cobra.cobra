@@ -1,0 +1,64 @@
+class CobraMain
+
+	shared
+
+		pro willTimeIt from var as bool
+		pro runTime from var as TimeSpan?
+		pro linesCompiled from var as int
+		pro nodesCompiled from var as int
+		pro tokensCompiled from var as int
+		
+		def main
+			# CobraCore.willCheckAll = false
+
+			sw = System.Diagnostics.Stopwatch()
+			sw.start
+			try
+				CommandLine().run
+			finally
+				sw.stop
+				if _willTimeIt
+					elapsed = sw.elapsed
+					didCompile = .linesCompiled + .nodesCompiled + .tokensCompiled > 0
+					didRun = .runTime is not nil
+					if didCompile and didRun
+						.printTimeIt('total', elapsed)
+						.printTimeIt('execute', .runTime to !)
+						.printCompileTimes(elapsed.subtract(.runTime to !))
+					else if didCompile
+						.printCompileTimes(elapsed)
+					else if didRun
+						.printTimeIt('execute', .runTime to !)
+					else
+						.printTimeIt('total', elapsed)
+
+		def printTimeIt(description as String, duration as TimeSpan)
+			print 'timeit [description.padRight(7)] = [duration]' stop
+			if duration.totalSeconds < 2
+				print ' | [duration.totalMilliseconds] ms' stop
+			print
+				
+		def printCompileTimes(elapsed as TimeSpan)
+			.printTimeIt('compile', elapsed)
+			secs = elapsed.totalMilliseconds / 1_000
+			if .linesCompiled
+				lps = .linesCompiled / secs
+				print '[.linesCompiled] lines compiled at [lps:F1] lines/sec'
+			if .nodesCompiled
+				nps = .nodesCompiled / secs
+				print '[.nodesCompiled] nodes compiled at [nps:F1] nodes/sec'
+			if .tokensCompiled
+				tps = .tokensCompiled / secs
+				print '[.tokensCompiled] tokens compiled at [tps:F1] tokens/sec'
+
+		def printEx(ex as Exception)
+			print
+			if true
+				print ex
+			else
+				print '[ex.getType.name]:'
+				print ex.message
+				if ex.innerException
+					print 'inner exception:'
+					.printEx(ex.innerException to !)
+			print

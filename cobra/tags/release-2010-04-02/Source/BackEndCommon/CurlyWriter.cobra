@@ -1,0 +1,68 @@
+enum CurlyLineNumberTreatment
+	None
+	PoundLine
+	Comment
+
+
+class CurlyWriter inherits IndentedWriter
+
+	var _cobraLineNum as int
+	var _curlyLineNum as int
+	var _curlyToCobraLineNum as Dictionary<of int, int>
+	var _curlyLineNumberTreatment as CurlyLineNumberTreatment
+	var _needToOutputCobraLineNum as bool
+
+	cue init(tw as TextWriter, treatment as CurlyLineNumberTreatment)
+		base.init(tw)
+		_cobraLineNum = 1
+		_curlyLineNum = 1
+		_curlyToCobraLineNum = {1 : 1}
+		_curlyLineNumberTreatment = treatment
+
+	pro curlyLineNumberTreatment from var
+
+	get curlyToCobraLineNum from var
+
+	def node(node as SyntaxNode)
+		"""
+		As C# code is generated, each of the nodes should invoke this method so that the
+		CurlyWriter can manage line numbers.
+		"""
+		lineNum = node.token.lineNum
+		if lineNum > 0
+			# assert lineNum >= _cobraLineNum, '[lineNum], [_cobraLineNum]'
+			# ^ Can't assert that because of post while statements, helper methods, etc.
+			_cobraLineNum = lineNum
+			_needToOutputCobraLineNum = true
+
+	def start(fileName as String)
+		if _curlyLineNumberTreatment == CurlyLineNumberTreatment.PoundLine
+			_innerWriter.writeLine('#line 1 "[fileName]"')
+
+	def write(value as char) is override
+		branch _curlyLineNumberTreatment
+			on CurlyLineNumberTreatment.None
+				base.write(value)
+			on CurlyLineNumberTreatment.PoundLine
+				if _isNewLine(_lastChar)
+					# maintain the correct line number even when one Cobra statement is creating multiple lines in the generated C#
+					_innerWriter.writeLine('#line [_cobraLineNum]')
+				base.write(value)
+			on CurlyLineNumberTreatment.Comment
+				if _needToOutputCobraLineNum and _isNewLine(value)
+					_innerWriter.write('  // [_cobraLineNum]')
+					_needToOutputCobraLineNum = false
+				base.write(value)
+		if _isNewLine(_lastChar)
+			_curlyToCobraLineNum[_curlyLineNum] = _cobraLineNum + if(_curlyLineNumberTreatment == CurlyLineNumberTreatment.PoundLine, 1, 0)
+			_curlyLineNum += 1
+
+	def _isNewLine(value as char) as bool
+		return value == _innerWriter.newLine or value == .newLine2
+
+	def _isNewLine(value as String) as bool
+		return value == _innerWriter.newLine or value == .newLine2
+
+	# CC: shouldn't need the following
+	def write(value as String?) is override
+		base.write(value)

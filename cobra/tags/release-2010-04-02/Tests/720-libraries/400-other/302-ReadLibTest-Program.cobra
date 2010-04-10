@@ -1,0 +1,23 @@
+use ReadLibTestLib
+
+
+class Program
+
+	def main is shared
+		a = LibEnum.A
+		b = LibEnum.B
+		assert a <> b
+		assert b to uint64 > a to uint64
+
+		lc = LibClass()
+		i = lc.returnNullableInt
+		assert i is nil or i == 1
+
+		upc = UseProtectedInitializer()
+		assert upc.i == 1
+
+
+class UseProtectedInitializer inherits DeclareProtectedInitializer
+
+	cue init
+		base.init

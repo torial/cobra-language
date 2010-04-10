@@ -1,0 +1,53 @@
+namespace Test
+
+	class Test
+
+		def main
+			is shared
+
+			i as int = 3
+			j as int = 7
+
+			# substitution works with single quotes
+			assert ' [i] '==' 3 '
+			assert '[i] '=='3 '
+			assert ' [i]'==' 3'
+			assert '[i]'=='3'
+
+			assert '[i] [j]'=='3 7'
+			assert '[i][j]'=='37'
+
+			name as String = 'world'
+			assert 'Hello, [name].'=='Hello, world.'
+
+			# nested brackets
+			s as String = 'abc'
+			i = 1
+			assert 'the letter at [i] is [s[i]].'=='the letter at 1 is b.'
+
+			# substitution works with double quotes
+			i = 3
+			assert " [i] "==' 3 '
+			assert "[i] "=='3 '
+			assert " [i]"==' 3'
+			assert "[i]"=='3'
+			assert "[i] [j]"=='3 7'
+			assert "[i][j]"=='37'
+			assert "Hello, [name]."=='Hello, world.'
+
+			# escape [ with backslash: 'do not \[sub]'
+			foo = 1
+			bar = 2
+			assert 'foo \[bar]' == r'foo [bar]'
+			assert 'foo \[bar] [foo]' == r'foo [bar] 1'
+			assert 'foo [bar] \[foo]' == r'foo 2 [foo]'
+
+			# formatting
+			mol as int = 42
+			assert '[mol:N]'=='42.00'
+			assert "[mol:N]"=='42.00'
+
+			# the ns prefix means "no sub" or "no substitution"
+			assert ns'aoeu'=='aoeu'
+			assert ns'aoeu'.length==4
+			assert ns'[i]'.length==3

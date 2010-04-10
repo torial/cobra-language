@@ -1,0 +1,261 @@
+"""
+For ClassVar, see Members.cobra.
+"""
+
+interface IVar inherits INamedNode is partial
+
+	pro type as IType?
+
+	pro isAssignedTo as bool
+		"""
+		Defaults to false and is set to true when an assignment to the variable is encountered.
+		This can then be inspected to generate warnings.
+		"""
+
+	pro ifInheritsStack as Stack<of IType>
+
+	def attemptAssignmentOf(type as IType) as bool
+		"""
+		Attempts assignment of an expression with the given type which is incompatible with
+		.type, by working back through the if-inherits stack. If successful, the if-inherits
+		stack will be shorter and `true` is returned.
+		"""
+		require type <> .type
+
+
+class AbstractLocalVar
+	is abstract, partial
+	inherits NamedNode
+	implements IVar
+	"""
+	The base class for Param and LocalVar.
+	"""
+
+	var _type as IType?
+	var _typeNode as ITypeProxy?
+	var _isTracked as bool
+	var _ifInheritsStack = Stack<of IType>()
+	var _isAssignedTo as bool
+	var _backEndName as String
+	var _useBackEndNameStack = Stack<of String>()  # for if-inherits
+
+	cue init(token as IToken, type as IType)
+		base.init(token, token.text)
+		_type = type
+		assert not _type inherits NameSpace  # TODO: can remove with NameSpace is no longer an IType
+		_init
+
+	cue init(token as IToken, typeNode as ITypeProxy)
+		base.init(token, token.text)
+		_typeNode = typeNode
+		_init
+
+	cue init(name as String, typeNode as ITypeProxy)
+		base.init(name)
+		_typeNode = typeNode
+		_init
+
+	def _init
+		_isTracked = false
+		if .isImplicit
+			_backEndName = .name
+		else
+			_backEndName = BackEndUtils.backEndNameForLocalVarName(.name)
+		_useBackEndNameStack.push(_backEndName)
+
+	get englishName as String is abstract
+
+	pro ifInheritsStack from var
+
+	pro isAssignedTo from var
+
+	pro isTracked from var
+
+	get useBackEndNameStack from var
+
+	def addMinFields
+		base.addMinFields
+		.addField('isTracked', _isTracked)
+
+	def addRefFields
+		base.addRefFields
+		.addField('typeNode', _typeNode)
+		.addField('type', _type)
+
+	def attemptAssignmentOf(type as IType) as bool
+		if _ifInheritsStack.count == 0
+			return false
+		stack = Stack<of IType>(Stack<of IType>(_ifInheritsStack))
+		assert stack.peek == _ifInheritsStack.peek
+		count = 0
+		post while stack.count and not type.isAssignableTo(stack.peek)
+			stack.pop
+			count += 1
+		if count or type.isAssignableTo(_type to !)
+			_ifInheritsStack = stack
+			# tell each IfStmt not to pop the if-inherits stack since the assignment did so
+			for node in .compiler.nodeStack
+				if node inherits IfStmt
+					if node.ifInheritsVar is this
+						node.doNotPopIfInheritsStack
+						count -= 1
+						if count == 0, break
+			return true
+		else
+			return false
+
+	def toString as String is override
+		type = if(_type, .type.name, "(no type)")
+		return '[.getType.name]([.serialNum], [.token], [.name], [type])'
+
+	def _bindInt
+		base._bindInt
+		_resolveType
+		assert _type
+
+	def _bindImp
+		base._bindImp
+		_resolveType
+
+	def _resolveType
+		require _type or _typeNode
+		if _type
+			return
+		if _typeNode inherits IType
+			_type = _typeNode
+			return
+		_type = _typeNode.realType
+		assert _type  # since _realType returns IType (not IType?) this should always pass
+
+	pro type as IType
+		get
+			require _type
+			return if(_ifInheritsStack.count, _ifInheritsStack.peek, _type to !)
+		set
+			require .compiler
+			if value <> _type
+				assert _type is nil or _type is .compiler.unspecifiedType or _type is .compiler.passThroughType
+				assert not _ifInheritsStack.count
+				_type = value
+
+	get typeNode from var
+
+	get typeForIdentifier as IType is override
+		return .type
+
+	get typeForReceiver as IType is override
+		assert _type
+		return if(_ifInheritsStack.count, _ifInheritsStack.peek, _type to !)
+
+
+class Param inherits AbstractLocalVar is partial
+
+	enum KindEnum
+		Value
+		InOut
+		Out
+		
+	cue init(token as IToken, type as IType)
+		base.init(token, type)
+
+	cue init(token as IToken, typeNode as ITypeProxy)
+		base.init(token, typeNode)
+	
+	cue init(name as String, typeNode as ITypeProxy)
+		base.init(name, typeNode)
+
+	def _init is override
+		base._init
+		_attributes = AttributeList()
+
+	pro attributes from var as AttributeList
+
+	get englishName as String is override
+		return 'parameter'
+
+	pro isMissingType from var as bool
+		"""
+		Returns true if parameter was declared with no type.
+		Currently, such a parameter is given the `dynamic?` type.
+		In the future, the type may be inferred for an anon method in the context it is used (a specific delegate or event).
+		"""
+
+	pro isAnonymousParam from var as bool
+
+	pro kind from var as KindEnum
+
+	get isInOut as bool
+		return .kind == KindEnum.InOut
+
+	get isOut as bool
+		return .kind == KindEnum.Out
+
+	def constructedFor(box as Box, gpToType as Dictionary<of GenericParam, IType>) as Param
+		ensure
+			result is not this
+		body
+			assert .ifInheritsStack.count == 0
+			p = .memberwiseClone to Param
+			p._ifInheritsStack = Stack<of IType>()
+			p._type = p._type.secondaryConstructedTypeFor(box, gpToType)
+			return p
+
+	def _bindInt
+		base._bindInt
+		for attrib in .attributes
+			try
+				attrib.bindInt
+			catch ne as NodeException
+				.compiler.recordError(ne)
+
+	def _bindImp
+		base._bindImp
+		for attrib in .attributes
+			try
+				attrib.bindImp
+			catch ne as NodeException
+				.compiler.recordError(ne)
+
+
+class LocalVar inherits AbstractLocalVar is partial
+
+	cue init(token as IToken, type as IType)
+		base.init(token, type)
+
+	cue init(token as IToken, typeNode as ITypeProxy)
+		base.init(token, typeNode)
+
+	def addMinFields
+		base.addMinFields
+		.addField('isTracked', _isTracked)
+
+	get englishName as String is override
+		return 'local variable'
+
+	get isForContract as bool
+		return .isForRequire or .isForEnsure
+
+	pro isForRequire from var = false
+
+	pro isForEnsure from var = false
+
+
+class ResultVar
+	is partial
+	inherits LocalVar
+	"""
+	The implicit variable `result` used in `ensure` blocks.
+	"""
+
+	cue init(token as IToken, codePart as AbstractMethod)
+		base.init(_makeToken(token, codePart), codePart.resultType)
+		.isImplicit = true
+		_backEndName = codePart.backEndResultVarName
+
+	def _makeToken(token as IToken, codePart as AbstractMethod) as IToken is shared
+		token = token.copy
+		token.text = 'result'
+		return token
+
+	get englishName as String is override
+		return 'implicit result variable'

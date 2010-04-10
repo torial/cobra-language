@@ -1,0 +1,21 @@
+class Point
+
+	var x as int  # no underscore
+	var y as int
+	var s as String  # a non-nil reference type
+
+	cue init
+		base.init
+		.s = ''
+
+	get sum as int
+		return .x + .y
+
+class Program
+
+	def main is shared
+		p = Point()
+		p.x = 2
+		p.y = 3
+		assert p.x + p.y == 5
+		assert p.sum == 5

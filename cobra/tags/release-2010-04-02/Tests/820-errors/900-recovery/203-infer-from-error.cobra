@@ -1,0 +1,9 @@
+# .error. Cannot find "bad" & Cannot find "a" & Cannot find "b"
+
+class Test
+
+	def main is shared
+		x = bad
+		print x
+		y = a + b
+		print y

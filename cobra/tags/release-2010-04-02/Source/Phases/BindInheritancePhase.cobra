@@ -1,0 +1,34 @@
+class BindInheritancePhase inherits Phase
+	"""
+	Bind the AST nodes for the base types, such as base class and base interfaces,
+	to their actual types.
+	"""
+	
+	cue init(c as Compiler)
+		base.init(c)
+
+	get description as String is override
+		return 'Binding inheritance'
+
+	def innerRun is override
+		c = .compiler
+		for basicType in c.basicTypes
+			basicType.bindInh
+		c.objectType.bindInh
+		c.stringType.bindInh
+		c.dynamicType.bindInh
+		c.passThroughType.bindInh
+		for mod in c.modules.clone
+			c.curModule = mod
+			try
+				mod.bindInh
+			catch ce as SourceException
+				c.recordError(ce)
+		assert c.stringType.isDescendantOf(c.objectType)
+		assert c.stringType.isDescendantOf(c.stringType)
+
+
+class Compiler is partial
+
+	def isBindingInh as bool
+		return .curPhase inherits BindInheritancePhase

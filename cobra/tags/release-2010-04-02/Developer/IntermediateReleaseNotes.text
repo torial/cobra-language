@@ -1,0 +1,453 @@
+Post 0.8
+
+
+================================================================================
+Language
+================================================================================
+
+* Added lambdas. ticket:105
+
+* Added mixins, a limited form of multiple inheritance.
+
+* Added `lock` statement.
+
+* Cobra no longer allows ambiguous references to symbols found in more than one used namespace.
+
+* Improved error checking on `listen` and `ignore` statements.
+
+* Support constant and read-only declarations on class and struct variables. ticket:122 ticket:100
+
+* Using a system struct such as `SByte` now generates a warning to use the primitive type such as `int8`.
+
+* ticket:107
+
+* Compiler directives have changed to `@foo`. ticket:109
+
+* Allow property declarations to set an initial value (on property backing variable). ticket:102
+
+* An object variable (or constant) can no longer be declared with the same name as an inherited member.
+
+* Added @ref directive for specifying library references in source code.
+
+* Initializers must now start with a call to another initializer in the same class or a base initializer. In other words, calls to the base initializer are not invisibly inserted by the compiler.
+
+* `def main` can now be specified without `is shared` provided that the containing type has a parameterless initializer (so that it can be instantiated). And it can still be `shared` if that's required or desired. Furthermore, `main` can no longer take arguments or return a value. Use `CobraCore.commandLineArgs` and `CobraCore.exit(code)` instead. Finally, you can use the new -main: command line option to disambiguate when there is more than one `main` method.
+
+* The + operator can now be used to concatenate lists.
+
+* Minimal support for ** operator (power expressions): ticket 114
+
+* Compiler switch -compile-if-needed / -cin to compile *only* if output file does not exist or any source file is newer. ticket:14
+
+* Added attributes for parameters and return values.
+.code
+	def foo(p as Type has Attribute(args))  # attribute applies to parameter
+		has return Attribute(args)  # attribute applies to return value due to `return` keyword
+
+* Support covariance from arrays to arrays and streams.  ticket:162
+
+* Improved error checking on the `in` operator. For example, `5 in ['a', 'b']` produces an error because a List<of String> cannot contain an `int`.
+
+* Sets with duplicate members such as `{1, 0, 1}` now generate a warning.
+
+* Provide support for inner/nested classes and structs.
+
+* Added support for chain comparisons such as `0 <= i < 9`.
+
+* Cobra's use of `decimal` has advantages around accuracy, but can also cause confusion when using libraries that are centered around `float`. The compiler now detects this situation and suggests, via warning:
+
+	An above error about numeric types indicates that you may want to set the default numeric type with "@number [expectedType]" in a source file or "cobra -number:[expectedType]" at the command line.
+
+
+================================================================================
+Library
+================================================================================
+
+* Added extension methods to IList<of T>. @@ expand on this
+
+* Added extension methods to IDictionary<of TKey, TValue>. @@ expand on this
+
+* Moved useful Utils methods to extension methods.  ticket:111
+
+* Added .clone to lists, dictionaries and sets.
+
+* Added new Cobra.Lang.Test namespace with TestRunner, TestSuite, Test and related classes.
+
+
+================================================================================
+Command Line
+================================================================================
+
+* Added -test-runner to specify the method to invoke to run the unit tests. The method must be "shared". Typically the method will make use of classes in Cobra.Lang.Test to set up and initiate the test run.
+
+* Added -testify-results:filename to control the destination file where testify results are written.
+
+* Added -testify-threads:N to allow multi-threaded/process execution of the Cobra test suite. On a modern, multi-core CPU this can speed up the testify run by a lot.
+
+* Augment -timeit to display count of lines, nodes and tokens compiled and "per second" for all three.
+
+* Added -verbosity-ref option to output information about resolving references to libraries.
+
+
+================================================================================
+Samples etc.
+================================================================================
+
+* Added How-To "Use Lists"
+
+
+================================================================================
+Misc
+================================================================================
+
+* Improved error recovery so more errors can be reported per compilation.
+
+================================================================================
+================================================================================
+
+
+* Added How To Use Arrays
+
+* Added anonymous methods, also known as closures.
+
+* Support one line docstrings
+.code
+    """ This is a one line docStr"""
+
+* Added streams like int* and String*
+
+* Added storage type specification for enums:
+.code
+	enum Foo
+		of uint64
+		Bar
+		Baz
+
+* Added new install-from-workspace command in the Source directory. This makes installing out of a Subversion workspace very easy and reliable. Documentation is in the doc string at the top of InstallFromWorkspace.cobra.
+
+* Added a shortcut syntax for declaring a property and its backing variable in one line:
+.code
+	get x from var as int
+	# is a short cut for these two lines:
+	var _x as int
+	get x from var
+
+	# the general form of the shortcut above is:
+	get <name> from var as <type>
+	
+	# the fully general form is:
+	(get|pro|set) <name> from (var|<varName>) as <type>
+
+* Added an -out: command line option for controlling the name of the executable (or dll) produced the compiler. Previously, you had to do this via the -sharp-args: option or making sure that the first Cobra source file name you passed matched what you wanted. Examples:
+.cmd
+	cobra -out:texttool IOSupport.cobra TextTool.cobra
+	cobra -out:texttool.exe IOSupport.cobra TextTool.cobra
+
+* Added a -namespace: command line option to set the namespace for all Cobra source files as if each one started with "namespace <name>". Can be a qualified name.
+
+Adding the extension (.exe or .dll) is neither required nor problematic.
+
+* Added command line option -correct-source (or -cs) to change the case of types to the correct cases in situations that are not ambiguous.
+
+* Modified commandline options so -r becomes synonym for -run rather  
+ than for -reference. -reference synonym becomes -ref. 
+ Support -run-args (synonym --) option for specifying args to pass to compiled executable  
+
+* Added support for new compiler directives 'error' and 'warning' that each take an optional message. These can be used to generate user-defined warnings and errors.
+.code
+    %% error 'Cannot build this file till mondo-patch installed'
+    
+* Added support for "multi-arg assignment" which allows you to assign to a number of variables from a compatible list of expressions in one statement
+.code
+	a,b,c = 'val1', 999, c'\t'
+	d,e,f = 99+1, 100*1, 101-1
+        a,b = b,a   # one line swap
+or from contents of a list or array (any integer indexable item) in one statement
+.code
+	a,b,c = ['val1', 'val2', 'val3']
+	d,e,f = @[99, 100, 101]
+Also support such assignment in for statements for (generic) dictionaries and lists
+.code
+    for key, value in aDictionary
+    	trace key, value
+    for a, b in [[1, 2], [3, 4]]
+        print a + b
+
+* Added support for a new compiler directive 'args' that takes command line options and applies them to the compilation environment from that point on.
+.code
+    %% args -target:lib -embed-run-time:no
+    %% args -compile -reference:System.Windows.Forms -target:winexe
+     
+* Added support for "extended initializers" which allow you to set properties of the object in the same call being used to create the object:
+.code
+	r = Rectangle(p1=Point(x=0, y=1), p2=Point(x=2, y=3))
+	c = Customer('Acme, Inc.', region=Regions.South)
+
+* Added extensions on generic types like List<of T> and IDictionary<of K, V>.  ticket:1
+
+* Added partial classes, a la C# and VB. This enables class (and struct and interface) declarations to be split across files. This can be useful for organizing generated code or even manually written code based on purpose. ticket:10
+.code
+	# file Foo.cobra
+	class Foo
+		is partial
+		
+		var _name as String
+		
+		pro name from var
+	
+	# file Foo.gen.cobra
+	class Foo
+		is partial
+		
+		def generatedMethod
+			pass
+
+
+* Added new comment markers /# ... #/ which can be used for block comments and inline comments. Block comments can be used to comment out multiple lines of source. They can be nested. Inline comments also start with /# and end with #/, but within the same line. They can be used to comment out a portion of a line. Regular end of line comments are still available and still the norm.
+.code
+	class Example
+	
+		def main is shared
+			# an end-of-line comment
+			t = [1, 2, 3]  # a list of numbers
+
+			# an inline comment
+			print t, /#t[0],#/ t.count
+
+			# a block comment
+	/#
+		def foo
+			print 'bar'
+	#/
+
+* Added support for warning suppression on arbitrary lines by placing a trailing comment containing `.no-warnings.` after the `#`
+ .code
+ 	this.call()  # .no-warnings.
+
+* Added support for a Cobra compiler directive to specify the type for `number`
+    type of number and integer literals same as command line -number option
+    %% number  'decimal' | 'float' | 'float32' | 'float64'
+
+* Added support for implicit line continuation for items in parentheses.
+ i.e method call argument lists, method declaration parameters and 
+     parenthesised expressions.
+
+* Improved error message for `a != b` when erroneously used as "does not equal". ticket:98
+
+* Add compile option -include-traces default value yes to allow compile time suppression of any trace code.
+ 
+* Added a new built-in doc tool accessible via "cobra -doc ...". The documentation is generated to local HTML files using your declarations, doc strings, contracts, etc.
+
+* Added support for declaring and raising events. When raising events, passing "this" is implied (e.g., not required) since that is the normal behavior for events. Also, if the events argument has a default constructor, it too can be omitted.
+
+* Add support for specifying unsigned integers as Hex literals
+    e.g. 0x7f  0x7f_8   0x7Fu16  0x7F_u32
+
+* The default type for vars, properties and method arguments is now `dynamic?`. Also the result type for `d.foo` where `d` is dynamic is now `dynamic?` instead of `dynamic`. These changes reflect the flexibility that was originally intended with default types and dynamic typing.
+
+* Regarding "truthfulness" such as found in `assert`, `if` and `if(...)`, primitive nilable types such as `bool?` and `int?` now have their value examined. Previously, simply being non-nil was enough to be true, but that was not intuitive nor consistent with `dynamic?`. ticket:5
+
+* Added new `all` and `any` unary operators that take something enumerable (such as a list, set or generator) and return a boolean (true or false) indicating if all or any of the elements are true. These operators increase expressiveness in conditions. For example, a contract might use these operators:
+.code
+	def foo(items as IList<of Item>)
+		require all for item in items get item.name.trim.length > 0
+
+* Added generic methods.
+
+* Added new Visitor class to the Cobra standard library. Subclasses can easily implement the visitor pattern and the classes being visited require no additional modification. See the doc string of `Visitor` in CobraLang.cobra for details.
+
+* Added support for attributes on class/object variables (also know as "fields").
+
+* Cobra now prints '[1, 2, 3]' for a list of integers rather than 'System.Collections.Generic.List`1[System.Int32]'. It still uses the standard List<of> class.
+
+Added new Cobra library classes StringMaker (abstract), PrintStringMaker and TechStringMaker and associated properties CobraCore.printStringMaker and CobraCore.techStringMaker. Through those properties, you can customize the output of `print` statements and string substitution (.printStringMaker), and assert failures and `trace` statements (.techStringMaker).
+
+For convenience, the extension methods .toPrintString and .toTechString have been added to System.Object.
+
+* Added improved error checking and/or error messages for `throw`, `raise` and `use`. Also, better error messages for C# syntax += and -= applied to events and delegates.
+
+* Added various library methods from .NET to the primitive types such as decimal, int, char, bool, etc. These are documented on @link(http://cobra-language.com/trac/cobra/wiki/PrimitiveTypeMembers, the wiki). These include mathematical methods so you can say `x.round`, `x.round(decimals)`, `a.min(b)`, `x.sin`, `x.truncate`, etc.
+
+* You can now say `get foo from var is override`. In other words, you can add "is names" after a "from var" property declaration.
+
+* Enhanced the `use` directive to automatically reference the library (or "assembly" or "dll") of the same name if the given namespace cannot be found. This means you can leave off the command line reference '-r:Foo.Bar' if the namespace being used also happens to be 'Foo.Bar'. Furthermore, you can use `use Foo.Bar from LibraryName` if the library name is different from the namespace.
+
+* The backend C# compiler is now invoked via .NET's CSharpCodeProvider (also tested on Mono). This eliminates problems with locating the installed C# compiler and speeds up the regression tests. You can still use the -sharp-compiler option to dictate the backend C# compiler if you desire.
+
+* The Cobra run-time will no longer throw IndexOutOfRangeException for slicing. At worst, you will get an empty list. This is more convenient and matches Python's semantics. Thanks to "hopscc" in New Zealand.
+
+* There are three places where non-nil is verified at run-time: class variables at the end of an initializer, arguments at the beginning of a method and "to !" casts. Added new -include-nil-checks:yes|no option which includes or excludes these checks. Default is 'yes'. Using -turbo will set to 'no'.
+
+* Renamed CobraCore.willCheckNonNilClassVars to CobraCore.willCheckNil
+
+* Integer literals can now be suffixed to indicate their type such as `1_u64` and `7_i8`. The underscore is optional and valid sizes include 8, 16, 32 and 64. There is no reason to ever suffix zero (0). Credit: hopscc
+
+* In string literals, square brackets can be escaped with a backslash to prevent expression substitution. ticket:15
+
+* A single underscore marks a class member as `protected` (or a struct member as `private`). Previously, this behavior only took place for variables, but now takes place for all types of members including properties and methods. Also, two underscores now implies `private`.
+
+* (minor) Fix BinaryOp.writeSharpBreakdownItems to indent and outdent around its subexpressions.
+
+* Added keyword `each`, reserved for future use. Added keywords for various modifiers that were already in use: `abstract`, `extern`, `fake`, `internal`, `new`, `nonvirtual`, `override`, `partial`, `public`, `private`, `protected`, `virtual`. Deprecated `fake` in favor of new `extern`.
+
+* Fixed: Raise on a delegate should generate error message. ticket:78.
+
+* Fixed: The Cobra command line compiler throws an exception for files with an all capital extension (FOO.COBRA).
+
+* Fixed: Using "continue" in new style numeric for loops does not increment the loop variable. ticket:9
+
+* Fixed: Cannot access classes that start with a lower case letter such as iDB2Connection. ticket:16
+
+* Fixed: Looping through an object that inherits IEnumerator<of T>, but with T that has constraints, does not recognize those constraints in the body of the `for` loop. For example, if T is constrained to be an ICar, the .drive method cannot be invoked.
+
+* Fixed: Cannot assign or compare qualified types such as `System.Object` even though the same can be done with unqualified types such as `Object`.
+
+* Fixed: Cannot implement a method whose signature is matched by an extension method of a base class.
+
+* Fixed: Method return types from generics in DLLs are always considered nilable even if the generic parameter was not (such as `bool`). ticket:22
+
+* Fixed: Assignments (and other side effects) can appear in assert conditions even though they might be excluded during compilation or run-time. ticket:4 (hopscc)
+
+* Fixed: Cannot use the `branch` statement if the expression has a dynamic type.
+
+* Fixed: Using `ref` on a variable that experienced an error causes an internal exception.
+
+* Fixed: Some bitwise operations with integer literals of 16 or 8 bits produce invalid compilation errors.
+
+* Fixed: Putting a comment after a doc string, but before a `test` section causes an invalid compilation error.
+
+* Fixed: The exception report (cobra -er ...) has trouble displaying unicode text.
+
+* Fixed: The expression "a inherits b" gives an internal exception when "b" is invalid for "inherits".
+
+* Fixed: The "throw" statement lacks error checking and provides a poor message for throwing uninstantiated classes.
+
+* Fixed: Enums, unlike other types, don't allow attributes to be applied to them.
+
+* Fixed: The compiler does not read generic arguments of generic methods found in libraries.
+
+* Fixed: CobraCore.exePath uses `Assembly.getExecutingAssembly` when it should be using `Assembly.getEntryAssembly` instead. This reveals itself when using -embed-run-time:no.
+
+* Fixed: Reading enums with non-int32 storage types (such as uint32 and uint64) causes an exception in the compiler.
+
+* Fixed: A `for` statement iterating over a Hashtable doesn't infer the enumerator type correctly (DictionaryEntry). ticket:54
+
+* Fixed: Assigning values less than zero to variables of type int8 and int16 gives a false compilation error. ticket:45
+
+* Fixed: Invoking _someMethod without parens in an `if` statement or other expression causes a false compilation error.
+
+* Fixed: Cannot add a doc string for a `sig` declaration.
+
+* Fixed: Nilable delegates cannot be called (`foo(arg1, arg2)`).
+
+* Fixed: The error message for fixed size array syntax (`int[10]`) is misleading and uninformative. ticket:27
+
+* Fixed: No warning for derived methods that are not marked "override" or "new" when the parameters differ by being nilable (String?) or not (String). ticket:59
+
+* Fixed: Cannot properly invoke delegates whose delegate types come from binary libraries.
+
+* Fixed: Cannot use `for` expressions on non-generic enumerables. ticket:85
+
+* Fixed: Cannot `listen` to an event when the `ref`ed method is an overload.
+
+* Fixed: for-expr enumerate int and slice-like range: ticket:71
+
+* Fixed: Small floating point literals such as `0.00001` cause false compilation errors.
+
+* Fixed: Cobra allows overriding methods to narrow parameter types by making them non-nil when the base method parameter is nilable. ticket:60
+
+* Fixed: Cobra does not read "non-nilable" from DLL parameter types.
+
+* Fixed: Cobra does not give a sensible error message when the `X` in `print to X, ...` is not a valid destination. ticket:63
+
+* Fixed: Embed run-time option doesn't prevent namespace collisions. ticket:3
+
+* Fixed: Using invalid types such as `double` suggests the .NET System `struct` such as `Double` instead of the portable, Cobra primitive type such as `float`.
+
+* Fixed: A `return` statement in the `try` block of a `try...success` statement would circumvent the `success` block despite the fact that there was no failure (exception thrown).
+
+* Fixed: Cannot qualify an attribute. ticket:121
+
+* Fixed: Cannot read nested classes in binary libraries in some circumstances. ticket:127
+
+* Fixed: Cobra finds the definitions of identifiers in the parent namespaces of `used` namespaces, even when those parents themselves are not `used`. This leads to complications in practice when many namespaces are being used. ticket:128
+
+* Fixed: Literals outside type range give internal error message. ticket:131
+
+* Optimization: Make new numeric for loop (`for i in c`) as fast as the old numeric for loop. ticket:133
+
+* Fixed: Comparing a dynamic value to 0 such as `a > 0` throws an exception even for valid values of `a` such as a `float64`.
+
+* Fixed: The compiler does not properly follow dependencies of libraries.
+
+* Fixed: The compile does not correctly read nilable types from libraries, resulting in false compilation errors. ticket:136
+
+* Fixed: Passing a method reference as a named property to an initalizer causes a false compilation error.
+
+* Fixed: Better error message for multiple modifiers sans commas. ticket:87
+
+* Fixed: An unterminated doc string gives an internal error instead of a friendly error message.
+
+* Fixed: Using a type from a binary library with internal methods referring to internal types caused an uncaught exception in the compiler.
+
+* Fixed: Cobra gives an internal exception rather than a normal error message when trying to use a struct for truthfulness.
+
+* Fixed: The division operator (`i/j`) is not respecting the -number: setting.
+
+* Fixed: Quoted command line parameters past -- are broken up. ticket:147
+
+* Fixed: Missing or invalid file paths passed to -files: option causes uncaught exception. ticket:89
+
+* Fixed: Cannot name a variable `int8foo` and such. ticket:139
+
+* Fixed: The character literal `c"'"` produces a falso compilation error.  ticket:168
+
+* Fixed: "Lexer error when nesting single quotes in Strings" ticket:166
+
+* Fixed: Multitarget assignment does not infer types of cast expressions. ticket:170
+
+* Fixed: Cobra source code for negative numeric literals shows up without the minus sign in assertion messages.
+
+* Fixed: Cannot pass dynamic values to initializers. ticket:74
+
+* Fixed: Cobra gives an inscrutable error message for numeric for-loops that have incompatible numeric types. ticket:165
+
+* Fixed: Improper codegen for static constructors. ticket:169
+
+* Fixed: Non removal of intermediate file if -embed-run-time/ert specified and compilation fails. ticket:181
+
+* Fixed: `to?` should give warning if operation is redundant. ticket:76
+
+* Fixed: Numeric for expression broken for `get` expressions with types other than `int`  ticket:158
+
+* Fixed: Operators `?` and `?=` give error if left hand expression is not nilable.  ticket:117
+
+* Fixed: If you put a space after a method name in a method declaration, an internal error occurs instead of a normal error message. ticket:183
+
+* Fixed: `a += b` does not work if `a` is dynamically typed and referring to a string.
+
+* Fixed: Partial class merge problem re: inheritance. ticket:67
+
+* Fixed: Heterogeneous collection literals are inferred as <of Object> instead of <of dynamic>. ticket:176
+
+* Fixed: The compiler does not read protected constructors from libraries which makes it impossible to override them.
+
+* Fixed: Better handling of access to items in lowercased namespaces from libraries. ticket:184
+
+* Fixed: In the condition of a `post while`, a local variable cannot be referred to if it is first set in the body.
+
+* Fixed: Cannot use a generic method declared in a generic class.
+
+* Fixed: An uncaught exception can occur for some library calls.
+
+* Fixed: Cannot instantiate generic params under some circumstances.
+
+* Fixed: Cobra compile failure on delegates calling .(begin|end)Invoke. ticket:196
+
+* Fixed: False compilation error in anonymous method with no return type and a simple `return` statement. ticket:197
+
+* Fixed: Unable compile C#-only sources. ticket:194
+
+* Fixed: References to local variables in `ensure` are not flagged as errors.  ticket:198
+
+* Fixed: Cannot directly refer to an open generic type such as `t = List<of>`.  ticket:192

@@ -1,0 +1,415 @@
+"""
+The main test case for the doc generator is the Cobra compiler itself:
+
+cd Source
+cobra -doc -files:files-to-compile.text
+"""
+
+
+use System.Reflection
+
+
+class GenerateHtmlDocVisitor inherits Visitor
+	"""
+	Quick characteristics:
+	
+	* Writes HTML summary information for namespaces, modules and types.
+	* Results go in an 'gen-docs' subdirectory of the current directory.
+	* Each namespace gets a file named "nsFoo.html".
+	* Each module gets a file named "Foo.html"
+	* Each type is written in the same file as the module that declared it.
+
+	Example invocations:
+	
+	cobra -doc Utils.cobra
+	cobra -doc -files:files-to-compile.text
+
+	Potential options:
+		* Show private
+		* Summary vs. complete source
+
+	Features:
+		* Outputs Foo.html for each module
+		* Handles classes, structs, interfaces, extensions and their members
+		* Generates an index.html file
+
+	Other notes:
+	
+	* This functionality differs from the syntax highlighter at
+	  http://cobra-language.com/trac/cobra/wiki/PygmentsHighlighter
+	  and also via "cobra -highlight"
+	  * Highlighters are oriented towards presenting code snippets and files online, while this
+	    tool is oriented towards library documentation.
+	  * Pygments is used by 3rd party programs like Trac; this tool is not.
+	  * This doc generator does not expose implementation (no statements or expressions).
+	  * This doc tool will eventually be concerned with cross references and linking.
+
+
+	TODO:
+
+	* In output,
+		[ ] wrap box members in a div so they have padding, etc.  note: div's inside <pre> seem to be problematic
+		[ ] write member contracts
+		[ ] write member tests. note this would require handling all expressions and statements!
+		[ ] on members, write is names. 'protected' only on non-underscored members. no 'shared'. include everything else
+		[ ] in index
+			[ ] alpha list of types (including nested types)
+			[ ] inheritance outline of types
+		[ ] cross reference member names with types that declare them
+		[ ] provide some fancy JavaScript options like hiding doc strings, tests, etc.
+		[ ] highlight `as` keyword
+		[ ] need anchor names for types and members so they can be linked to
+		[ ] link types
+		[ ] link "override" to the base method
+	[ ] Copy the stylesheet into the html directory. Locate the style sheet in the current directory or next to the cobra.exe file.
+	[ ] What if you want a doc gen for something specific like:
+		System.String
+		System.Collections.Generic
+	[ ] How should options be provided to the -doc command?
+	
+	Also, see TODO comments in the code.
+	"""
+
+	var _tw as TextWriter?
+	var _indent = 0
+	var _isBOL = false
+	var _writeCount = 0
+		"""
+		Can be used to tell if a method that was called wrote anything.
+		"""
+
+	var _moduleList = List<of List<of String>>()
+
+	cue init
+		base.init
+		Directory.createDirectory(.targetDirectory)
+
+	get methodName as String is override
+		return 'gen'
+
+	get targetDirectory as String
+		return 'gen-docs'
+
+	## File output
+
+	def startFile(name as String) as String
+		"""
+		Returns the filename of the newly created file (not including its path).
+		"""
+		fileName = name + '.html'
+		path = Path.combine(.targetDirectory, fileName)
+		print 'Writing [path]'
+		_tw = File.createText(path)
+		.writeLine('<html>')
+		.writeLine('<head>')
+		.writeLine('<meta http-equiv="Content-Type" content="text/html; charset=utf-8">')
+		.writeLine('<title>[name]</title>')
+		.writeLine('<link rel="stylesheet" href="../styles-cobra-doc.css" type="text/css">')
+		.writeLine('</head>')
+		.writeLine('<body>')
+		return fileName
+
+	def finishFile
+		.writeLine('</body> </html>')
+		_tw.close
+		_tw = nil
+
+	def write(s as String)
+		if _isBOL and _indent
+			for i in _indent, _tw.write('    ')
+		_tw.write(s)
+		_isBOL = false
+		_writeCount += 1
+
+	def writeLine
+		.writeLine('')
+
+	def writeLine(s as String)
+		if _isBOL and _indent
+			for i in _indent, _tw.write('    ')
+		_tw.writeLine(s)
+		_isBOL = true
+		_writeCount += 1
+
+	def writeDocString(s as String?)
+		if s
+			if s.trim == ''
+				return
+			_tw.write('<span class="ds">')
+			for i in _indent, _tw.write('    ')
+			_tw.writeLine('"""')
+			_isBOL = true
+			s = s.replace('\r', '')
+			while s.endsWith('\n')
+				s = s[:-1]
+			# s = s.replace('\t','xxx.')  # for debugging
+			s = .encode(s)
+			# print
+			for line in s.split(c'\n')
+				# print '([line])'
+				.writeLine(line.trim)  # TODO: HACK: The .strip is wrong. It's to fix the parser problem of leaving indentation in doc string contents.
+			.writeLine('"""</span>')
+			.writeLine
+
+	def encode(s as String) as String
+		"""
+		Encode a string for inclusion in HTML output.
+		"""
+		return CobraCore.htmlEncode(s)
+
+	def indent
+		_indent += 1
+
+	def outdent
+		_indent -= 1
+
+	def ref(type as IType?) as String
+		"""
+		Return a reference to a type in HTML.
+		"""
+		s = if(type, .encode(type.name), '(nil type)')
+		if ',' in s and ', ' not in s
+			# Dictionary<of Type,MethodInfo> --> Dictionary<of Type, MethodInfo>
+			s = s.replace(',', ', ')
+		return s
+
+	## Generate
+
+	def gen(c as Compiler)
+		# .dispatch(c.globalNS)
+		.dispatch(c.modules)
+		.writeIndex
+
+	def writeIndex
+		.startFile('index')
+		.writeLine('<div class="sansSerif">')
+		try
+			modules = _moduleList
+			if modules.count
+				.writeLine('<div class="heading">Files</div>')
+				modules.sort(ref .compareModuleNames)
+				for pair in _moduleList
+					.writeLine('<a href="[pair[1]]">[.encode(pair[0])]</a> <br />')
+		finally
+			.writeLine('</div> <!-- div.sansSerif -->')
+			.finishFile
+	
+	def compareModuleNames(a as List<of String>, b as List<of String>) as int
+		return a[0].toLower.compareTo(b[0].toLower)
+
+	def gen(obj as Object?)
+		if obj is nil, return
+		msg = '*** Unbound visitation for type [obj.getType]: [obj]'
+		print msg
+		.writeLine(.encode(msg))
+
+	def gen(mod as Module)
+		# This is to capture "native" modules like SharpModule
+		pass
+
+	def gen(mod as AssemblyModule)
+		pass
+
+	def gen(mod as CobraModule)
+		fileName = .startFile(Path.getFileNameWithoutExtension(mod.fileName) to !)
+		.writeLine('<div class="mono">')
+		.writeLine('<pre>')
+		_moduleList.add([mod.fileName, fileName])
+		try
+			.writeDocString(mod.docString to !)
+			for decl in mod.topNameSpace.declsInOrder
+				.dispatch(decl)
+		finally
+			.writeLine('<br> </pre>')
+			.writeLine('</div> <!-- div.mono -->')
+			.finishFile
+
+	# not used right now
+#	def gen(ns as NameSpace)
+#		print '<> <> NameSpace'
+#		print ns
+#		for decl in ns.declsInOrder
+#			print
+#			print decl
+
+	# TODO: can merge code in the following three after they fully mature
+
+	def gen(cl as Class)
+		.writeLine('<div class="typeDecl"><span class="kwtd">class</span> <span class="bdn">[cl.name]</span>')
+		.writeIsNames(cl)
+		# TODO: inherits, implements, generic constraints
+		.writeDocString(cl.docString)
+		.writeBoxMembers(cl)
+
+	def gen(inter as Interface)
+		.writeLine('<div class="typeDecl"><span class="kwtd">interface</span> <span class="bdn">[inter.name]</span>')
+		.writeIsNames(inter)
+		# TODO: inherits, generic constraints
+		.writeDocString(inter.docString)
+		.writeBoxMembers(inter)
+
+	def gen(struc as Struct)
+		.writeLine('<div class="typeDecl"><span class="kwtd">struct</span> <span class="bdn">[struc.name]</span>')
+		.writeIsNames(struc)
+		# TODO: implements, generic constraints
+		.writeDocString(struc.docString)
+		.writeBoxMembers(struc)
+
+	def gen(ext as Extension)
+		.writeLine('<div class="typeDecl"><span class="kwtd">extend</span> <span class="bdn">[ext.extendedBox.name]</span>')
+		.writeIsNames(ext)
+		.writeDocString(ext.docString)
+		.writeBoxMembers(ext)
+
+	def writeIsNames(box as Box)
+		.writeIsNames(box.isNames)
+	
+	def writeIsNames(isNames as String*)
+		if isNames.toList.count
+			.write('is ')
+			sep = ''
+			for name in isNames
+				.write('[sep][name]')
+				sep = ', '
+			.writeLine
+
+	def writeBoxMembers(box as Box)
+		.writeLine
+		.indent
+		didWriteMembers = false
+
+		typeDecls = .sorted(for decl in box.declsInOrder where decl inherits IType)
+		if typeDecls.count
+			didWriteMembers = true
+			.writeBoxMembers(typeDecls)
+
+		sharedDecls = .sorted(for decl in box.declsInOrder where decl.isShared and not (decl to Object) inherits IType)
+		if sharedDecls.count
+			if didWriteMembers, .writeLine
+			else, didWriteMembers = true
+			.writeLine('<span class="kwsh">shared</span>')  # TODO: write this only if shared decls get written. See class Parser output for an example.
+			.writeLine
+			.indent
+			.writeBoxMembers(sharedDecls)
+			.outdent
+			.writeLine
+
+		nonsharedDecls = .sorted(for decl in box.declsInOrder where not decl.isShared)
+		if nonsharedDecls.count
+			if didWriteMembers, .writeLine
+			else, didWriteMembers = true
+			.writeBoxMembers(nonsharedDecls)
+
+		if not didWriteMembers
+			.writeLine('<span class="wkpa">pass</span>')
+
+		.outdent
+		.write('</div>')
+
+	def writeBoxMembers(decls as IList<of IBoxMember>)
+		for i in decls.count
+			decl = decls[i]
+			writeCount = _writeCount
+			.dispatch(decl)
+			if _writeCount > writeCount  # if wrote anything ...
+				# Write the doc string
+				if decl.docString and decl.docString.length
+					.indent
+					.writeDocString(decl.docString to !)
+					.outdent				
+				else
+					_tw.writeLine('<span class="ds"> </span>')
+				# Put a blank line when switching to a different type of member declaration (say from properties to methods)
+				if i < decls.count-1 and decls[i+1].getType is not decl.getType
+					.writeLine
+
+	def gen(bv as BoxVar)
+		if bv.isPublic
+			.writeLine('<span class="kwmd">var</span> <span class="varName">[bv.name]</span> as [.ref(bv.type)]')
+			# TODO: is names, attributes, etc.
+
+	def gen(method as AbstractMethod)
+		.write('<span class="kwmd">def</span> <span class="methodName">[method.name]</span>')
+		if method.params.count
+			.write('(')
+			sep = ''
+			for param in method.params
+				.write(sep)
+				.dispatch(param)
+				sep = ', '
+			.write(')')
+		.writeLine
+
+	def gen(param as Param)
+		.write('[param.name] as [.ref(param.type)]')
+		# TODO: param modifiers
+		# TODO: styles
+
+	def gen(prop as Property)
+		if prop.getPart and not prop.setPart
+			.write('<span class="kwmd">get</span>')
+		else if prop.setPart and not prop.getPart
+			.write('<span class="kwmd">set</span>')
+		else
+			.write('<span class="kwmd">pro</span>')
+		.writeLine(' [prop.name] as [.ref(prop.resultType)]')
+
+	def gen(ed as EnumDecl)
+		.writeLine('<div class="typeDecl"><span class="kwtd">enum</span> <span class="bdn">[ed.name]</span>')
+		.writeIsNames(ed.isNames)
+		.indent
+		for decl in ed.declsInOrder
+			.writeLine(decl.name)
+		.outdent
+		.write('</div>')
+
+
+	## Sorting members
+
+	def sorted(decls as IList<of IBoxMember>) as List<of IBoxMember>
+		"""
+		Return the box members in a logically sorted order.
+		First order is by type of member (enums, vars, constructors, props, indexers, methods).
+		Second order is alphabetical.
+		Third order is parameter count.
+		"""
+		t = List<of IBoxMember>(decls)
+		t.sort(ref .compareMembers)
+		return t
+
+	def compareMembers(a as IBoxMember, b as IBoxMember) as int is shared
+		if a.getType is b.getType
+			diff = a.name.compareTo(b.name)  # note that Cobra disallows member names that differ only by case
+			if diff == 0
+				if a inherits AbstractMethod
+					diff = a.params.count.compareTo((b to AbstractMethod).params.count)
+				else if a inherits Indexer
+					# b must also be an indexer since their names were the same
+					diff = a.params.count.compareTo((b to Indexer).params.count)
+			else if a.name.startsWith('_') and not b.name.startsWith('_')
+				diff = .compareNamesWithFirstUnderscored(a.name, b.name)
+			else if not a.name.startsWith('_') and b.name.startsWith('_')
+				diff = -1 * .compareNamesWithFirstUnderscored(b.name, a.name)
+		else
+			diff = .rank(a).compareTo(.rank(b))
+		return diff
+
+	def compareNamesWithFirstUnderscored(a as String, b as String) as int is shared
+		require
+			a.startsWith('_')
+			not b.startsWith('_')
+		body
+			a = a[1:]
+			if a == b, return 1  # underscored/protected member comes last
+			else, return a.compareTo(b)
+			
+	def rank(obj as IBoxMember) as int is shared
+		if obj inherits EnumDecl, return 0
+		if obj inherits MethodSig, return 10
+		if obj inherits Box, return 20
+		if obj inherits BoxVar, return 30
+		if obj inherits Initializer, return 40
+		if obj inherits Property, return 50
+		if obj inherits Indexer, return 60
+		if obj inherits Method, return 70
+		throw FallThroughException(obj)

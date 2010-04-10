@@ -1,0 +1,37 @@
+# This file is needed when -embed-run-time is true so that the compiler can know about the C# classes in the Cobra run-time.
+# Otherwise, this information is just read from Cobra.Lang.dll
+
+namespace Cobra
+
+	namespace Lang
+
+		use System.Collections.Generic
+
+		class CobraImp is extern
+			shared
+				get printDestination as System.IO.TextWriter
+					pass
+				get hasDetailedStackTrace as bool
+					pass
+				get detailedStackTrace as Stack<of CobraFrame>
+					pass
+				pro showTestProgress as bool
+					get
+						pass
+					set
+						pass
+				def reset(printDestination as System.IO.TextWriter)
+					pass
+				def runAndCaptureAllOutput(process as Object) as String
+					pass
+				def typeName(t as Type) as String
+					pass
+				def toTechString(x as Object?) as String
+					pass
+				var _maxStackFrames as int is public
+				var _numLastMaxStackFrames as int is public
+				var _printStringMaker as StringMaker is public
+				var _techStringMaker as StringMaker is public
+
+		interface ICallable is extern
+			pass
