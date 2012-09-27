@@ -1,0 +1,21 @@
+# .skip. Need to fix problem with Foo.iSeries.dll + svn.
+# (6): error: Cannot find namespace "little".
+
+# .args. -reference:Foo.iSeries
+
+# ticket:16
+
+use Foo.iSeries
+use little  # The `little` namespace is defined in Foo.iSeries.dll
+
+class Program
+
+	def main
+		cn = iConnection('yo')  # test access to a class name with a lowercase name
+		assert cn.s == 'yo'
+
+		a = little.A()
+		assert a.one == 1
+
+		a = A()
+		assert a.one == 1

@@ -1,0 +1,34 @@
+class Vehicle
+
+	var _v as bool
+
+	cue init
+		base.init
+		_v = true
+
+	get v from var
+
+
+class Car inherits Vehicle
+
+	var _c as bool
+
+	cue init
+		base.init  # test base.init call with no args
+		_c = true
+
+	get c from var
+
+
+class Truck inherits Vehicle
+	
+	cue init
+		base.init()  # .warning. Unnecessary parentheses
+
+
+class Test
+
+	def main is shared
+		c = Car()
+		assert c.v
+		assert c.c

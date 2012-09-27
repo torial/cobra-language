@@ -1,0 +1,69 @@
+class BindRunTimeLibraryPhase inherits Phase
+	"""
+	Adds a reference to the Cobra run-time library, or embeds it, as appropriate.
+	"""
+
+	cue init(c as Compiler)
+		base.init(c)
+
+	get description as String is override
+		return 'Binding Cobra run-time library'
+
+	def innerRun is override
+		if .options.boolValue('embed-run-time')
+			_embedRunTime
+		else
+			_refRunTime
+
+	def _embedRunTime
+		if .verbosity >= 2, print 'Embedding Cobra run-time'
+
+		# The Cobra.Core.Info class is compiled into the program and contains, at least, the path to the cobra.exe.
+		# This is used for, at least, the implementation of CobraCore.findCobra.
+		sw = StringWriter()
+		print to sw
+			print 'namespace Cobra.Core'
+			print '    class CompileTimeInfo'
+			print '        get cobraPath as String is shared'
+			print '            return r"[CobraCore.exePath]"'
+			print '        get date as String is shared'
+			print '            return "[DateTime.now.toString("yyyy-MM-dd")]"'
+			print '        get subversionRevision as String is shared'
+			print '            return "[_subversionRevision]"'
+		.options.addExtraSource(sw.toString)
+
+		# Add the Cobra.Core run-time file paths to the compiler's pathsToCompile
+		c = .compiler
+		pathsToCompile = c.pathsToCompile
+		filesPath = Path.combine(Path.combine(.cobraExeDir, 'Cobra.Core'), 'files.text')
+		runTimePaths = c.commandLineArgParser.readFilesFile(filesPath)
+		runTimePaths.reverse
+		runTimeLibNativeSourceFileName = c.backEnd.runTimeLibNativeSourceFileName   # 'Native.cs', 'Native.m', etc.
+		assert runTimeLibNativeSourceFileName.count(c'.') == 1
+		for runTimePath in runTimePaths
+			if Path.getFileName(runTimePath) == runTimeLibNativeSourceFileName
+				suffix = .options.embedRunTimeSuffix
+				nativeCode = File.readAllText(runTimePath)
+				nativeCode = nativeCode.replace('namespace Cobra.Core', 'namespace Cobra.Core'+suffix)
+				newPath = Path.getFullPath(runTimeLibNativeSourceFileName.before('.') + suffix + '.' + runTimeLibNativeSourceFileName.after('.'))
+				File.writeAllText(newPath, nativeCode)
+				c.addIntermediateFile(newPath)
+				pathsToCompile.insert(0, newPath)
+			else
+				pathsToCompile.insert(0, runTimePath)
+
+	def _subversionRevision as String
+		rev = SubversionUtils.readSubversionRevision('.', /#checkParentDirs=#/true)
+		if rev, return rev.toString
+		else, return ''
+		
+	def _refRunTime	
+		if .verbosity >= 2, print 'Referencing Cobra run-time'
+		.compiler.addRunTimeRef(.options)  # then reference run-time dll
+
+	get cobraExeDir as String
+		"""
+		Returns the directory where cobra.exe is residing.
+		Related resources such as CobraLang.cs reside there.
+		"""
+		return Path.getDirectoryName(System.Reflection.Assembly.getEntryAssembly.location) to !  # actually could be nil: if you stuck Cobra in the root dir, the .getDirectoryName docs say it will return nil

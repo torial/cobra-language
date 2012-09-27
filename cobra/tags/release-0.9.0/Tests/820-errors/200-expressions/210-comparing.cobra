@@ -1,0 +1,44 @@
+class Test
+
+	def foo
+		pass
+
+	def main is shared
+		t = Test()
+
+		# the following comparisons are impossible because of the types. `t` will never be a string
+		if t is 'foo'      # .error. can never be identical
+			pass
+		if t is not 'foo'  # .error. can never be identical
+			pass
+		if t == 'foo'      # .error. cannot be equated
+			pass
+		if t <> 'foo'      # .error. cannot be equated
+			pass
+		if t > 'foo'       # .error. cannot be compared
+			pass
+		if t <= 'foo'      # .error. cannot be compared
+			pass
+		if t.foo == 5      # .error. cannot be equated
+			pass
+
+		# nilable and nil are okay
+		i as int? = 5
+		if i is nil, pass
+		if nil is i, pass
+
+		# certain cases generate no errors:
+		c = c'a'
+		s = 'a'
+		assert c == s
+		assert s == c
+
+		d as dynamic = 'foo'
+		assert t is not d
+
+		p as passthrough = 'foo'
+		assert t is not p
+
+		listOfInt = List<of int>()
+		listOfDynamic = List<of dynamic>()
+		assert listOfInt == listOfDynamic

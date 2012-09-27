@@ -1,0 +1,1246 @@
+use System.Reflection
+
+
+class SubnodesAttribute inherits Attribute
+	"""
+	Put this attribute on properties that represent a collection of subnodes of the declaring node class.
+	Node.replaceChild will use these properties when searching for node references to be replaced (which happens during node transformation).
+	There may be other uses for this in the future.
+	The property value should respond to .indexOf(node) and "subnodes[index] = newNode" which are covered by List<of>.
+	Since dynamic binding is used, inheriting from List<of> is not strictly required.
+	"""
+	pass
+
+
+class SourceException inherits SystemException
+	"""
+	The abstract base class of all exceptions about the source code that is being compiled.
+	This includes both errors and warnings.
+	"""
+
+	var _message as String
+
+	cue init(msg as String?)
+		base.init(msg)
+		_message = msg to !
+
+	get isError as bool
+		return true
+	
+	get hasSourceSite as bool
+		"""
+		Return true if the error really has source information (filename and line number). The
+		`fileName` and `lineNum` properties will not be invoked if this returns false.
+		"""
+		return false
+		
+	get fileName as String
+		require .hasSourceSite
+		return ''  # CC: use abstract
+
+	get lineNum as int
+		require .hasSourceSite
+		return 0  # CC: use abstract
+	
+	get message as String is override
+		return _message
+
+	def consoleString as String
+		type = if(.isError, 'error', 'warning')
+		if .hasSourceSite
+			return '[.fileName]([.lineNum]): [type]: [.message]'
+		else
+			return '[type]: ' + .message
+
+	def appendToMessage(text as String)
+		_message += text
+		
+	def toString as String is override
+		return '[.getType.name]: [.consoleString]'
+
+	def writeHtmlTo(dest as HtmlWriter)
+		type = if(.isError, 'error', 'warning')
+		tdClass = if(.isError, 'typeError', 'typeWarning')
+		if .hasSourceSite
+			pathName = Path.combine(Environment.currentDirectory, .fileName)
+			fileLink = '<a class=fileName href="txmt://open/?url=file://[_urlEncode(pathName)]&line=[.lineNum]">[_htmlEncode(.fileName)]</a>'  # TODO: eliminate hard coding of TextMate URL scheme
+			dest.writeHtml('<tr class=[type]> <td class=fileName>[fileLink]</td> <td class=lineNum>[.lineNum]</td> <td class=[tdClass]> [type] </td> <td class=message>[_htmlEncode(.message)]</td> </tr>[dest.newLine]')
+		else
+			dest.writeHtml('<tr class=[type]> <td class=fileName></td> <td class=lineNum></td> <td class=[tdClass]> [type] </td> <td class=message>[_htmlEncode(.message)]</td> </tr>[dest.newLine]')
+
+	get trClass as String
+		return 'error'
+
+	def _htmlEncode(s as String) as String
+		return CobraCore.htmlEncode(s)
+
+	def _urlEncode(s as String) as String
+		return s  # TODO
+
+
+class NodeException
+	inherits SourceException
+	
+	var _node as INode
+
+	cue init(node as INode, msg as String)
+		base.init(msg)
+		_node = node
+
+	get node from var
+
+	get hasSourceSite as bool is override
+		return _node inherits ISyntaxNode
+		
+	get fileName as String is override
+		return (_node to ISyntaxNode).token.fileName
+		
+	get lineNum as int is override
+		return (_node to ISyntaxNode).token.lineNum
+		
+	def prefixMessage(s as String)
+		_message = s + _message
+
+
+class DummyNode
+	inherits Node
+	pass
+
+
+class NodeMultiException
+	inherits NodeException
+	"""
+	To provide good error recovery and to fully report all errors, it can be useful for parts of
+	the code to catch exceptions that they then may need to throw all at once. Hence, the
+	NodeMultiException. At least BinaryOpExpr and SequenceLit use it and Compiler.recordErrorAndThrow checks
+	for it.
+	"""
+
+	# TODO: override .prefixMessage( to do the right thing
+	
+	var _exceptions as List<of NodeException>
+
+	cue init(exceptions as vari NodeException?)
+		"""
+		As a convenience to the caller, nil exceptions are quietly ignored and
+		NodeMultiExceptions are recursively processed.
+		"""
+		.init(exceptions to IEnumerable<of NodeException?>)
+
+	cue init(exceptions as IEnumerable<of NodeException?>)
+		base.init(DummyNode(), 'multi exception')  # TODO: the use of DummyNode() here shows that the class hierarchy is off
+		_exceptions = List<of NodeException>()
+		_addExceptions(exceptions)
+		assert _exceptions.count, 'At least one exception must exist.'
+
+	def _addExceptions(exceptions as IEnumerable<of NodeException?>)
+		for exc in exceptions
+			if exc
+				if exc inherits NodeMultiException
+					_addExceptions(exc.exceptions to passthrough)
+				else
+					_exceptions.add(exc)
+
+	get exceptions from var
+
+
+class SyntaxNodeException
+	inherits NodeException
+
+	var _synNode as ISyntaxNode
+
+	cue init(node as ISyntaxNode, msg as String)
+		require
+			node.token.lineNum
+		body
+			base.init(node, msg)
+			_synNode = node
+
+	get hasSourceSite as bool is override
+		return true
+
+	get fileName as String is override
+		return _synNode.token.fileName
+
+	get lineNum as int is override
+		return _synNode.token.lineNum
+
+
+interface INode
+	"""
+	Just about everything in the Cobra compiler that forms a data
+	structure of a program ultimately inherits from Node. For example,
+	all types and ASTs descend from Node.
+
+	However, the tokenizer, parser, compiler object and command line
+	objects do not. They don't form the data structure that represents a
+	program.
+	"""
+
+	get serialNum as int
+
+	get addOnValues as Dictionary<of String, dynamic>
+		"""
+		Returns a dictionary, initially empty, of named values that add-ons
+		can use to store data related to the node.
+		"""
+
+	pro superNode as INode?
+
+	get hasError as bool
+
+	##
+	## Binding
+	##
+
+	def bindInh
+		"""
+		Invoke this method; do not override it.
+		"""
+
+	def bindInt as INode  # CC: as same
+		"""
+		Invoke this method; do not override it.
+		"""
+
+	def computeMatchingBaseMembers
+		"""
+		Invoke this method; do not override it.
+		"""
+
+	def bindImp as dynamic  # CC: as same
+		"""
+		Invoke this method; do not override it.
+		"""
+
+	def bindAll as INode  # CC: as same
+
+	get didBindInt as bool
+
+	get didBindImp as bool
+
+	def throwError(msg as String)
+		"""
+		Sometimes an object detects an error in a subobject or argument. On that occasion,
+		invoke `throwError` on that object. There are other error related methods and
+		properties in Node.
+		"""
+
+	def recordError(msg as String)
+		"""
+		Records an error message for this node, but does not throw an exception.
+		This is appropriate when the error can be immediately recovered from.
+		"""
+
+	##
+	## Transformation
+	##
+
+	def replaceChild(find as INode, replace as INode) as bool
+
+	pro transformedFrom as INode?
+
+	##
+	## Converting to string
+	##
+
+	def toTechString as String
+
+	get idString as String
+
+	get minimalString as String
+		"""
+		Includes only atomic data like numbers and strings.
+		"""
+
+	get shallowString as String
+		"""
+		Includes minimal string plus references to other objects (their minimal strings).
+		"""
+
+	get deepString as String
+		"""
+		Includes shallow string plus subobjects (their deep strings).
+		"""
+
+	def writeDeepString(iw as IndentedWriter)
+
+	def writeDeepString
+		"""
+		Wraps Console.out in an IndentedWriter.
+		"""
+
+
+class Node
+	is abstract, partial
+	implements INode
+	"""
+	Just about everything in the Cobra compiler that forms a data
+	structure of a program ultimately inherits from Node. For example,
+	all types and ASTs descend from Node.
+
+	However, the tokenizer, parser, compiler object and command line
+	objects do not.
+
+	Rules:
+		* Override _bindFoo methods. Invoke base.
+		* Invoke .bindFoo methods. Do not override them except for special circumstances.
+		* Override _replaceChild if the default implementation is not sufficient or performant.
+		* Override .superNode if the default implementation is not sufficient (rare).
+
+	What you can do:
+		* Get .superNode during _bindFoo if you need it for anything.
+		* Invoke _transformTo(newNode) to replace the current node with newNode in the .superNode.
+		* Assign the results of .bindFoo to a local var. This will contain the transformed value, if any.
+		  Or you can just rely on the original field such as "_left.bind; print _left".
+
+	Study subclasses for examples of following these rules and using these features.	
+	"""
+
+	shared
+		var _nextNodeSerialNum = 1001
+		var _compiler as ICompilerForNodes?
+
+		def setCompiler(c as ICompilerForNodes?)
+			_compiler = c
+
+		def getCompiler as ICompilerForNodes
+			assert _compiler
+			return _compiler to !
+
+		var _typeProvider as ITypeProvider?
+		
+		get hasTypeProvider as bool
+			return _typeProvider is not nil
+
+		pro typeProvider as ITypeProvider?
+			get
+				if _typeProvider, return _typeProvider
+				if _compiler, return _compiler
+				return nil
+			set
+				_typeProvider = value
+
+		var _secondToLast as Node?
+
+		def reset
+			# invoked by Compiler.init
+			.setCompiler(nil)
+			.typeProvider = nil
+			_secondToLast = nil
+
+
+	get compiler as ICompilerForNodes?
+		"""
+		Compiler is an object property instead of a shared property so that it shows up in
+		exception reports which then leads to a compiler details table.
+		Eh, but then it's always nil because a finally clause sets it so...
+		TODO: the exception report feature needs a delegate for adding additional information
+		"""
+		return _compiler
+
+	get backEnd as BackEnd?
+		return .compiler.backEnd
+
+	# CC: use a `private` section instead
+	var _serialNum as int is private
+
+	var _isImplicit as bool is private
+
+	var _didStartBindInh as bool is private
+	var _didStartBindInt as bool is private
+	var _didStartBindImp as bool is private
+
+	var _isBindingInh as bool is private
+	var _isBindingInt as bool is private
+	var _isBindingImp as bool is private
+
+	var _didBindInhBase as bool is private
+	var _didBindIntBase as bool is private
+	var _didBindImpBase as bool is private
+
+	var _didBindInh as bool is private
+	var _didBindInt as bool is private
+	var _didBindImp as bool is private
+
+	var _superNode as INode?
+		"""
+		Possibly points to the node that owns this node.
+		Set automatically in .bindImp.
+		"""
+
+	var _transformedTo as INode?
+		"""
+		Set by _transformTo and used by .bind.
+		"""
+	var _transformedFrom as INode?
+		"""
+		Set by _transformTo.
+		"""
+	var _willReplaceChild as dynamic?
+		"""
+		Used by replaceChild and _finishTransformation.
+		"""
+
+	cue init
+		ensure
+			.serialNum > 1000
+			not .didBindInh
+			not .didBindInt
+			not .didBindImp
+		body
+			base.init
+			_serialNum = _nextNodeSerialNum
+			_nextNodeSerialNum += 1
+
+	get serialNum from var
+
+	pro isImplicit from var
+		"""
+		Indicates if the source code defined this node. Defaults to false.
+		Implicit nodes can include implicit symbols like `value` and nodes defined for _transfromTo purposes.
+		Checking .isImplicit is used for various purposes including avoiding false warnings.
+		Setting .isImplicit to true is only required in cases where it affects the compiler.
+		"""
+
+	def setSerialNum(serialNum as int) is protected
+		"""
+		Only call this method if you need to reset the serial number of a cloned/copied node.
+		Otherwise, the serial number should be considered read only.
+		"""
+		require
+			.serialNum > 0
+			serialNum > .serialNum
+		ensure
+			.serialNum == serialNum
+		body
+			_serialNum = serialNum
+
+	pro superNode as INode?
+		get
+			return var
+		set
+			var = value
+
+	var _addOnValues as Dictionary<of String, Object>?
+	
+	get addOnValues as Dictionary<of String, dynamic>
+		if _addOnValues is nil
+			_addOnValues = Dictionary<of String, dynamic>()
+		return _addOnValues to !
+
+	##
+	## Binding
+	##
+
+	def _stackPush
+		"""
+		Invoked during various bind phases to push this onto the .compiler.nodeStack.
+		Can be overridden by subclasses to maintain other stacks (often of a more specific type).
+		"""
+		if .compiler, .compiler.nodeStack.push(this)
+
+	def _stackPop
+		"""
+		Invoked at the end of various bind phases to pop this off the .compiler.nodeStack.
+		Can be overridden by subclasses that maintain additional stacks.
+		"""
+		if .compiler, .compiler.nodeStack.pop
+
+	def bindInh
+		require
+			.compiler or .typeProvider
+		ensure
+			old .isBindingInh implies .isBindingInh and not .didBindInh
+			# to-do: breaks 134-constructed-class-inheritance-self-referencing.cobra
+			# not old .didBindInh implies .didBindInh and not .isBindingInh
+		body
+			if not _didBindInh and not _isBindingInh
+				_didStartBindInh = true
+				_isBindingInh = true
+				_stackPush
+				try
+					_didBindInhBase = false
+					_bindInh
+					assert _didBindInhBase
+					_didBindInh = true
+				finally
+					_finishChildReplacements
+					_stackPop
+					_isBindingInh = false
+
+	def _bindInh
+		"""
+		Bind inheritance such as base classes and implemented interfaces.
+		Override this method; do not send it. Invoke base.
+		"""
+		require .didStartBindInh and .isBindingInh
+		_didBindInhBase = true
+
+	def bindInt as INode  # CC: as same
+		"""
+		Invoke this method; do not override it.
+		Maintains .compiler.nodeStack.
+		"""
+		require
+			.compiler
+			not .compiler.isBindingInh
+		body
+			v = .compiler.verbosity
+			v = 0
+			if v > 3
+				print
+			if v > 3 and _isBindingInt
+				print '<> currently in bind int. this = [this]'
+			if not _didBindInt and not _isBindingInt
+				_didStartBindInt = true
+				_isBindingInt = true
+				_stackPush
+				try
+					_didBindIntBase = false
+					if v > 3
+						if .toString.startsWith('Class')
+							print Environment.stackTrace
+						print '<> will _bindInt on ' stop
+						#.writeDeepString
+					_bindInt
+					assert _didBindIntBase
+					_didBindInt = true
+				finally
+					_finishChildReplacements
+					_stackPop
+					_isBindingInt = false
+					if v > 3
+						print
+						print '<< did _bindInt() on [this]'
+			return this
+
+	def _bindInt
+		"""
+		Bind interface elements such as return types and parameter types.
+		Override this method; do not send it. Invoke base.
+		"""
+		require .didStartBindInt and .isBindingInt
+		_didBindIntBase = true
+
+	def computeMatchingBaseMembers
+		_stackPush
+		try
+			_computeMatchingBaseMembers
+		finally
+			_stackPop
+	
+	def _computeMatchingBaseMembers
+		pass
+	
+	def bindImp as dynamic  # CC: as same
+		"""
+		Invoke this method to bind implemenation.
+		Subclasses typically override _bindImp, not this method.
+		However, if they do override this method, they should invoke base and return .bindImpResult.
+		Maintains .compiler.nodeStack.
+		
+		Supports node transformations. Consequently, if you cache an object var in a local (example: `expr = .expr`),
+		be sure to do so *after* invoking .bindImp on it, or to reassign the result of .bindImp to the local
+		(example: `expr = .expr.bindImp`).
+		"""
+		require
+			.compiler
+			not .compiler.isBindingInh
+			not .compiler.isBindingInt or this inherits Expr  # TODO: lameness. the Expr escape clause is for box vars like "var _t = Dictionary<of int>()"
+		ensure
+			true # CC: result implements INode
+		body
+			if not _didBindImp and not _isBindingImp
+				_didStartBindImp = true
+				_isBindingImp = true
+				_superNode = if(.compiler.nodeStack.count > 0, .compiler.nodeStack.peek, _superNode ? nil)
+				_stackPush
+				try
+					_didBindImpBase = false
+					if .compiler.verbosity>3
+						print '<> will _bindImp on ' stop
+						.writeDeepString
+					_bindImp
+					assert _didBindImpBase
+					_didBindImp = true
+				finally
+					_finishChildReplacements
+					_stackPop
+					_isBindingImp = false
+			return .bindImpResult
+
+	def bindImpResult as dynamic is nonvirtual  # CC: as same
+		"""
+		Returned by .bindImp. In support of node transformations.
+		"""
+		return _transformedTo ? this
+	
+	def _bindImp
+		"""
+		Bind implementation elements such as statements and expressions.
+		Override this method; do not send it. Invoke base.
+		"""
+		require .didStartBindImp and .isBindingImp
+		_didBindImpBase = true
+
+	def bindAll as INode  # CC: as same
+		.bindInh
+		.bindInt
+		return .bindImp
+
+	get didStartBindInh from var
+
+	get didStartBindInt from var
+	
+	get didStartBindImp from var
+
+	get isBindingInh from var
+
+	get isBindingInt from var
+
+	get isBindingImp from var
+
+	get didBindInh from var
+
+	get didBindInt from var
+
+	get didBindImp from var
+
+	get didBindInhBase from var
+
+	get didBindIntBase from var
+	
+	get didBindImpBase from var
+
+
+	##
+	## Transforming
+	##
+
+	get transformedTo from var
+
+	pro transformedFrom from var
+
+	shared
+		var _verboseTransform = false
+
+	def _transformTo(newNode as INode) is public
+		# Why is this method public? See the TODO in Box.symbolForName regarding accessing protected members.
+		# Expr.cobra(496): error: Cannot access protected member "Node._transformTo(INode)" via a qualifier of type "DotExpr"; the qualifier must be of type "CallExpr" (or derived from it) (C#)
+		if _verboseTransform
+			print 'transform from [this]'
+			print '            to [newNode]'
+		superNode = .superNode
+		if _verboseTransform
+			print '    superNode:', superNode
+		didReplace = superNode.replaceChild(this, newNode)
+		if newNode.superNode is nil or newNode.superNode is this
+			newNode.superNode = superNode
+		assert didReplace, 'superNode=[superNode], newNode=[newNode]'
+		_transformedTo = newNode
+		newNode.transformedFrom = this
+
+	def replaceChild(find as INode, replace as INode) as bool
+		"""
+		Received by a node whose child node is being transformed.
+		The default implementation uses reflection of fields and properties to perform the replacement.
+		Nodes with other needs like examining unusual collections or requiring better performance can override this method.
+		See also: class SubnodesAttribute
+		"""
+		# TODO: could use some caching on field and property info
+		for field in .getType.getFields(BindingFlags(Instance, NonPublic))
+			if field.fieldType is Node or field.fieldType.isSubclassOf(Node)
+				value = field.getValue(this)
+				if value is find
+					if _verboseTransform, print '    replacing:', field
+					try
+						field.setValue(this, replace)
+					catch argExc as ArgumentException
+						throw ArgumentException('[argExc.message] field = "[field]", this type = "[.getType.name]"')
+					didReplace = true
+		for prop in .getType.getProperties(BindingFlags(Instance, Public, NonPublic))
+			for attr in prop.getCustomAttributes(true)
+				if attr inherits SubnodesAttribute
+					subnodes = prop.getValue(this, nil) to dynamic?
+					if subnodes
+						i = -1
+						while true
+							i = subnodes.indexOf(find, i+1)
+							if i >= 0
+								if _verboseTransform, print '    replacing [i] of [subnodes] in [prop.name]'
+								# subnodes[i] = replace
+								# .NET complains if you modify a collection while its enumerated (Mono does not), so
+								if _willReplaceChild is nil, _willReplaceChild = []
+								_willReplaceChild.add([subnodes, i, replace])
+								didReplace = true
+							else
+								break
+/#
+						I dont think this method needs to be recurse deeply into the nodes.
+						But if it did, here is the code.
+						i = 0
+						count = subnodes.count
+						while i < count
+							subnode = subnodes[i]
+							if subnode == find
+								if _verboseTransform, print '    replacing [i] of [subnodes] in [prop.name]'
+								# subnodes[i] = replace
+								# .NET complains if you modify a collection while its enumerated (Mono does not), so
+								if _willReplaceChild is nil, _willReplaceChild = []
+								_willReplaceChild.add([subnodes, i, replace])
+								didReplace = true
+							else if subnode inherits INode
+								if subnode.replaceChild(find, replace)
+									didReplace = true
+							i += 1
+#/
+		return didReplace
+
+	def _finishChildReplacements
+		if _willReplaceChild
+			for pair in _willReplaceChild
+				# CC: subnodes, i, replace = pair
+				subnodes = pair[0]
+				i = pair[1] to int
+				replace = pair[2]
+				subnodes[i] = replace
+			_willReplaceChild = nil
+
+
+	##
+	## Errors
+	##
+
+	var _errors as List<of NodeException>?
+
+	get hasError as bool
+		return _errors and _errors.count > 0
+
+	get errors from var
+
+	def throwError(ne as NodeException)
+		"""
+		Subclasses should invoke this method whenever they detect an error during compilation
+		(bindInt and bindImp, but not code gen during which no user errors should occur).
+		The error will be recorded by the node, but not explicitly noted by the compiler.
+		Control flow does not return to the caller because the exception is thrown.
+		In practice, this exception will be caught at some level as part of error recovery.
+		"""
+		require ne.node is this
+		_recordError(ne)
+		throw ne
+
+	def throwError(msg as String)
+		.throwError(NodeException(this, msg))
+
+	def recordError(ne as NodeException)
+		"""
+		Record an error for this node with the given message.
+		The error will be noted by the compiler.
+		No exception is thrown and control returns to the caller.
+
+		Note that when catching errors from subobjects, the correct invocation is
+		`.compiler.recordError(error)` since the caught error would have already been
+		recorded by that object.
+		"""
+		require
+			.compiler
+			ne.node is this
+		body
+			_recordError(ne)
+			.compiler.recordError(ne)
+
+	def recordError(msg as String)
+		.recordError(NodeException(this, msg))
+
+	def _recordError(ne as NodeException)
+		"""
+		Records the error without notifying the compiler or throwing an exception--those are done
+		by the public `throwError` and `recordError` methods.
+		"""
+		require ne.node is this
+		if _errors is nil
+			_errors = List<of NodeException>()
+		else
+			assert ne not in _errors
+		_errors.add(ne)
+
+
+	##
+	## Converting to string
+	##
+
+	def toString as String is override
+		return .shallowString
+
+	def toTechString as String
+		return .shallowString
+
+	get idString as String
+		return '[.getType.name]([.serialNum])'
+
+	get minimalString as String
+		"""
+		Includes only atomic data like numbers and strings.
+		"""
+		return _toString(true, false, false)
+
+	get shallowString as String
+		"""
+		Includes minimal string plus references to other objects (their minimal strings).
+		"""
+		return _toString(true, true, false)
+
+	get deepString as String
+		"""
+		Includes shallow string plus subobjects (their deep strings).
+		"""
+		return _toString(true, true, true)
+
+	def addMinFields
+		"""
+		Subclasses should override to add minimal fields.
+		"""
+		if .isImplicit, .addField('isImplicit', .isImplicit)
+
+		if .didStartBindInh, .addField('didStartBindInh', .didStartBindInh)
+		if .isBindingInh, .addField('isBindingInh', .isBindingInh)
+		.addField('didBindInh', .didBindInh)
+
+		if .didStartBindInt, .addField('didStartBindInt', .didStartBindInt)
+		if .isBindingInt, .addField('isBindingInt', .isBindingInt)
+		.addField('didBindInt', .didBindInt)
+
+		if .didStartBindImp, .addField('didStartBindImp', .didStartBindImp)
+		if .isBindingImp, .addField('isBindingImp', .isBindingImp)
+		.addField('didBindImp', .didBindImp)
+
+	def addRefFields
+		pass
+
+	def addSubFields
+		pass
+
+	def addField(name as String, value as Object?)
+		"""
+		Subclasses invoke this from their overrides of `addMinFields`,
+		`addRefFields` and `addSubFields`. It's okay for name to be blank.
+		"""
+		__curFields.add(Field(name, value))
+
+	def addField(value as Object)
+		.addField('', value)
+
+	var __curFields as List<of Field>?
+
+	var __toStringSep as String?
+
+	def _toString(doMin as bool, doRef as bool, doSub as bool) as String
+		"""
+		This is the implementation for minimalString, shallowString and deepString.
+		"""
+		if doSub
+			tag = 'de' # for deep
+		else if doRef
+			tag = 'sh' # for shallow
+		else
+			tag = 'mi' # for minimal
+
+		sb = StringBuilder('[.getType.name]-[tag]([.serialNum]')
+		if __toStringSep is nil
+			__toStringSep = Environment.getEnvironmentVariable('COBRA_TECHSTRING_SEPARATOR') ? _
+				if(Environment.getEnvironmentVariable('COBRA_TECHSTRING_INDENT') not in [nil, ''], ',\n\t   ', ',')
+		sep = __toStringSep
+		if doMin
+			__curFields = List<of Field>()
+			try
+				.addMinFields
+				for field in __curFields
+					if field.name.length
+						sb.append('[sep] [field.name]=[field.value]')
+					else
+						sb.append('[sep] [field.value]')
+			finally
+				__curFields = nil
+
+		if doRef
+			__curFields = List<of Field>()
+			try
+				.addRefFields
+				for field in __curFields
+					value as Object?
+					if field.value inherits Node
+						value = (field.value to Node).minimalString
+					else
+						value = field.value
+					sb.append('[sep] [field.name]=[value]')
+			finally
+				__curFields = nil
+
+		if doSub
+			__curFields = List<of Field>()
+			try
+				.addSubFields
+				for field in __curFields
+					value as Object?
+					if field.value inherits Node
+						value = (field.value to Node).minimalString
+					else
+						value = field.value
+					sb.append('[sep] [field.name]=[field.value]')
+			finally
+				__curFields = nil
+
+		sb.append(')')
+		s = sb.toString
+		if s.length>100
+			s = s.substring(0, s.length-1) + ', [.serialNum])'
+
+		return s
+
+	def writeDeepString
+		.writeDeepString(IndentedWriter(Console.out))
+
+	def writeDeepString(iw as IndentedWriter)
+		_writeDeepString(iw, this, true, true, true)
+
+	def _writeDeepString(iw as IndentedWriter, obj as INode, doMin as bool, doRef as bool, doSub as bool)
+		if doSub
+			iw.write(obj.shallowString)
+			iw.write('\n')
+			iw.indent
+			try
+				__curFields = List<of Field>()
+				try
+					.addSubFields
+					for field in __curFields
+						value = field.value
+						if value inherits Node
+							iw.write('[field.name]=')
+							value._writeDeepString(iw, value, doMin, doRef, doSub)
+							#iw.write('\n')
+						else if value inherits System.Collections.IList
+							iw.write('[field.name]=' + r'[')  # CC: should be able to say: '[name]=\[\n'
+							iw.writeLine('')
+							iw.indent
+							try
+								for i = 0 .. value.count
+									iw.write('[i]=')
+									if (node = value[i]) inherits Node
+										node._writeDeepString(iw, node, doMin, doRef, doSub)
+									else
+										# TODO: fix this to work for nested lists like those found in DictLit
+										iw.write(node.toString)
+							finally
+								iw.dedent
+							iw.write(']\n')
+						else
+							iw.write('[field.name]=[value]\n')
+				finally
+					__curFields = nil
+			finally
+				iw.dedent
+			return
+		if doRef
+			iw.write(obj.shallowString)
+			return
+		if doMin
+			iw.write(obj.minimalString)
+
+
+	## Cloning
+	
+	def clone as dynamic
+		require not .didBindImp  # for now, not expecting a clone after binding implementation
+		ensure result is not nil
+		clone = .memberwiseClone to Stmt
+		clone._innerClone
+		return clone
+	
+	def _innerClone
+		pass
+		
+	def memberwiseClone as Object is protected
+		node = base.memberwiseClone to Node
+		node.setSerialNum(_nextNodeSerialNum)
+		_nextNodeSerialNum += 1
+		node._didStartBindInh = false
+		node._didStartBindInt = false
+		node._didStartBindImp = false
+		node._isBindingInh = false
+		node._isBindingInt = false
+		node._isBindingImp = false
+		return node
+
+
+interface ISyntaxNode inherits INode
+
+	get token as IToken
+	pro isHelpRequested as bool
+
+
+class SyntaxNode
+	is abstract, partial
+	inherits Node
+	implements ISyntaxNode
+	"""
+	An abstract tree syntax node (AST).
+	Also: a node with a token.
+	Also: a node that came from parsing.
+
+	Descendants include NamedNode, Box (indirectly), Stmt and Expr.
+	
+	This is somewhat misleading as various descendant classes may be instantiated to represent what
+	is inside a DLL. Or down the road, another project might construct code programmatically.
+	
+	TODO: Rename to NodeWithToken or even just merge this up into Node.
+	"""
+
+	var _token as IToken
+
+	cue init(token as IToken)
+		base.init
+		_token = token
+
+	cue init
+		"""
+		If a node is not created from parsing, it will have no meaningful token. One example is
+		creating nodes from reading DLLs. Another would be the CodeDOM implementation.
+		"""
+		.init(TokenFix.empty)
+
+	get token from var
+
+	pro isHelpRequested from var as bool
+
+	get idString as String
+		if .token.isEmpty
+			return base.idString
+		else
+			return '[.getType.name]([.serialNum], [.token.shortLocationString])'
+
+	def addMinFields
+		base.addMinFields
+		.addField('token', .token.toTechString)
+
+	def throwError(msg as String) is override
+		.throwError(SyntaxNodeException(this, msg))
+
+	def recordError(msg as String) is override
+		.recordError(SyntaxNodeException(this, msg))
+		
+
+interface INamedNode
+	is partial
+	inherits INode
+	"""
+	A NamedNode is just a syntax node plus a name.
+
+	There is both a typeForIdentifier and typeForReceiver. That's
+	because some NamedNodes like Class are a Type in the first case (`t
+	= Console`) and themselves in the second case (`Console.out').
+
+	TODO: can typeForIdentifier and typeForReceiver be moved down to
+	IMember?
+	"""
+
+	get name as String
+
+	get typeForIdentifier as IType
+		"""
+		The type that should be used when an identifier refers to this
+		NamedNode as in "c = Console". See IdentifierExpr.
+		"""
+
+	get typeForReceiver as IType
+		"""
+		The type that should be used when a dotted expression refers to
+		this NamedNode on the left side of the dot. See IdentifierExpr.
+		"""
+
+	get isMethod as bool
+		"""
+		Returns true if the named node is effectively a method. You might think
+		"obj inherits Method" would suffice, but MemberOverload may also return true.
+		"""
+
+	pro isUsed as bool
+		"""
+		Defaults to false and is set to true when a node is used/read.
+		This can then be inspected to generate warnings about unused declarations.
+		"""
+
+
+interface INamedSyntaxNode
+	inherits INamedNode, ISyntaxNode
+
+
+class NamedNode
+	is abstract, partial
+	inherits SyntaxNode
+	implements INamedNode
+
+#	invariant
+#		.name.length
+
+	var _name as String
+	var _isUsed as bool
+
+	cue init(token as IToken, name as String)
+		require name.length
+		base.init(token)
+		_name = name
+
+	cue init(token as IToken)
+		require token.value inherits String
+		base.init(token)
+		_name = token.value to String
+
+	cue init(name as String)
+		base.init
+		_name = name
+
+	get idString as String is override
+		return '[.getType.name]([.serialNum], "[.name]")'
+
+	get name from var
+
+	def addMinFields
+		.addField('name', .name)
+		base.addMinFields
+
+	get typeForIdentifier as IType is abstract
+
+	get typeForReceiver as IType is abstract
+
+	get isMethod as bool
+		return false
+
+	pro isUsed from var
+
+
+class Field
+
+	cue init(name as String, value as Object?)
+		base.init
+		_name, _value = name, value
+
+	get name from var as String
+
+	get value from var as Object?
+
+
+interface ICompilerForNodes inherits ITypeProvider, IWarningRecorder, IErrorRecorder
+
+	# TODO: Support `require` on `get` decl.
+
+
+	## Property queries
+	
+	pro options as OptionValues
+
+	def embedRunTimeSuffix as String  # TODO: make a 'get'?
+
+	get globalNS as NameSpace
+
+	def isBindingInh as bool
+	def isBindingInt as bool
+	def isBindingImp as bool
+
+	pro verbosity as int
+
+	get willTrackLocals as bool
+		# the box stack can be empty because of assembly; has SomeAttr
+
+
+	## Options - TODO: move to OptionValues
+	
+	get includeTests as bool
+	get hasDetailedStackTraceOption as bool
+	get hasExceptionReportOption as bool
+
+
+	## Additional queries
+	
+	def findLocal(name as String) as AbstractLocalVar?
+	def suggestionForUnknown(word as String) as String?
+	def symbolForName(name as String, haveThis as bool) as IMember?
+	def symbolForName(name as String, haveThis as bool, isLowerOkay as bool) as IMember?
+
+
+	## Current objects
+
+	get curModule as Module?
+	get curNameSpace as NameSpace
+	get curBox as Box
+		# require .boxStack.count
+	get curBoxMember as IBoxMember
+		# require .boxMemberStack.count
+	get curCodeMember as AbstractMethod
+		# require .codeMemberStack.count
+
+
+	## Stacks and levels
+	
+	get nodeStack as Stack<of INode>
+	get nameSpaceStack as Stack<of NameSpace>
+	get boxStack as Stack<of Box>
+	get boxMemberStack as Stack<of IBoxMember>
+	get codeMemberStack as Stack<of AbstractMethod>
+	pro refExprLevel as int
+
+
+	## Warnings, errors and corrections
+	
+	def correctSource(token as IToken, replace as String)
+	def warning(node as ISyntaxNode, msg as String)  # TODO: move to IWarningRecorder
+
+	get errors as List<of SourceException>  # TODO: review the usages of this
+
+	def augmentWarning(node as ISyntaxNode, lookFor as String, search as String, augment as String) as bool
+		require 
+			lookFor.length
+			augment.length
+
+
+	## More types
+	# TODO: move up to ITypeProvider?
+
+	get primitiveToITypeCache as IDictionary<of dynamic, IType>?
+
+	get basicTypes as IList<of PrimitiveType>
+
+	get anyFloatType as AnyFloatType
+	get anyIntType as AnyIntType
+	def attributeType as Box
+	def collectionType as Box
+	def collectionOfType as Box
+	def delegateType as Class
+	def dictEnumeratorType as Box
+	def dictionaryOfType as Class
+	def enumerableType as Box
+	def enumeratorType as Box
+	def enumerableOfType as Box
+	def enumeratorOfType as Box
+	def exceptionType as Class
+	def idictionaryType as Box
+	def idictionaryOfType as Box
+	def ilistType as Box
+	def ilistOfType as Box
+	def listOfType as Class
+	def nilableDynamicType as NilableType
+	def objectClass as Class
+	def setOfType as Class
+	def stringType as Class
+
+	# multiple backends
+	get backEnd as BackEnd
+	def objectTypeProxy as AbstractTypeProxy 
+	def typeTypeProxy as AbstractTypeProxy 
+	def installNativeMethods(box as Box, nativeType as NativeType)
+
+	## Other
+
+	def addIntermediateFile(path as String)
+	def loadReference(reference as String, addExtn as bool) as String?

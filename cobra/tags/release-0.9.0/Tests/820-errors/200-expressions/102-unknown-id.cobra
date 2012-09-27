@@ -1,0 +1,6 @@
+class Test
+
+	def main
+		is shared
+		x = y  # .error. Cannot find "y"
+		CobraCore.noOp(x)

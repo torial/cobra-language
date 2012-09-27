@@ -1,0 +1,4 @@
+class Test
+
+	def main
+		print '[=0|]'  # .error. expecting an expression

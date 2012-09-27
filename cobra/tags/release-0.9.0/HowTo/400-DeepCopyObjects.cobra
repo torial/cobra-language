@@ -1,0 +1,23 @@
+# .skip.
+"""
+One way to deep copy an object is to serialize it and the deserialize it.
+
+See also:
+http://www.codeproject.com/KB/tips/SerializedObjectCloner.aspx
+"""
+
+
+class ObjectCopier
+
+	def copy(obj) is shared
+		require
+			obj.typeOf.isSerializable
+		test
+			pass
+		body
+			try
+				stream = MemoryStream()
+				Serializer.serialize(stream, obj)
+				stream.close
+			catch exc as Exception
+				throw InvalidOperationException('', exc)
