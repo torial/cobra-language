@@ -1,0 +1,1684 @@
+"""
+Cobra Command Line Program (compiler and more)
+"""
+
+use System.Diagnostics
+use System.Reflection
+use System.Text.RegularExpressions
+
+
+class OptionSpec inherits Dictionary<of String, dynamic>
+	"""
+	Represents a specific, named command line option specification.
+
+	In addition to being a dictionary containing the original raw specification key+value pairs,
+	several convenient properties and methods are provided such as .name, .type and .hasDefault.
+	"""
+
+	var _isUnpacked = false	
+	var _name = ''
+	var _type = 'unknown'
+	var _synonyms = List<of String>()
+	var _description = 'No description.'
+	var _isAccumulator = false
+	var _hasDefault = false
+	var _default = ''
+	var _choices = List<of String>()
+
+	get isUnpacked from var
+
+	get name as String
+		require .isUnpacked
+		return _name
+
+	get isMain from var as bool
+	
+	get type as String
+		require .isUnpacked
+		ensure result in ['accumulator', 'args-list', 'bool', 'int', 'menu', 'set', 'string']
+		return _type
+
+	get synonyms from var
+
+	get description from var
+
+	get isAccumulator from var
+	
+	get hasDefault from var
+	
+	get default from var
+		"""
+		Check .hasDefault before using this property for anything useful.
+		"""
+
+	get choices from var
+		"""
+		The choices for options that are type 'menu'.
+		"""
+			
+	def isOptionSpecRestrictionViolated as bool
+		"""
+		Returns true if the option spec has a 'restriction' key and the check against that restriction is true.
+		"""
+		if .containsKey('restriction')
+			branch this['restriction'] to String
+				on 'mono-only'
+					return not CobraCore.isRunningOnMono
+		return false
+
+	def unpack
+		_name = this['name'] to String
+		try
+			_type = this['type'] to String
+		catch KeyNotFoundException
+			if .containsKey('isAccumulator') and this['isAccumulator'] to bool
+				this['type'] = _type = 'accumulator'
+			else
+				this['type'] = 'string'
+		if _type == 'main'
+			_isMain, _type = true, 'bool'
+		if .containsKey('is-main'), _isMain = this['is-main'] to bool
+		assert _type in ['accumulator', 'args-list', 'bool', 'int', 'menu', 'set', 'string']
+		if .containsKey('synonyms')
+			for syn in this['synonyms']
+				_synonyms.add(syn)
+		if .containsKey('description')
+			_description = this['description']
+		if .containsKey('isAccumulator')
+			_isAccumulator = this['isAccumulator'] to bool
+		if .containsKey('default')
+			_default = this['default']
+			_hasDefault = true
+		if .containsKey('choices')
+			for choice in this['choices']
+				_choices.add(choice)
+		_unpackPlatforms
+		_isUnpacked = true
+		assert .type=='menu' implies .choices.count > 0
+		assert .choices.count <> 0 implies .type in ['menu', 'set']
+
+	def _unpackPlatforms
+		if not .containsKey('platforms')
+			this['platforms'] = ['jvm', '.net', 'objc']
+		for platform in this['platforms']
+			assert platform in ['jvm', '.net', 'objc']
+		this['platforms'] = Set<of String>(this['platforms'] to List<of String>)
+
+
+class CommandLineOptionSpecs
+	"""
+	Returns the command line option specifications, via .specsList, as a List of OptionSpec.
+	Also, the raw option specifications are contained and maintained in this class.
+	"""
+
+	var _specs = List<of OptionSpec>()
+
+	cue init
+		base.init
+		for rawSpec in _rawCommandLineOptionSpecs
+			spec = OptionSpec()
+			if rawSpec inherits Dictionary<of String, Object>
+				for key in rawSpec.keys, spec[key] = rawSpec[key]
+			else if rawSpec inherits Dictionary<of String, String>
+				for key in rawSpec.keys, spec[key] = rawSpec[key]
+			else
+				throw FallThroughException(rawSpec.getType)
+			spec.unpack
+			_specs.add(spec)
+
+	def specsList as List<of OptionSpec>
+		"""
+		Returns the option specs in the order they were declared.
+		"""
+		return _specs
+
+	var _rawCommandLineOptionSpecs = [
+		{
+			'name': 'about',
+			'description': 'Print the name, copyright, etc. but no usage.',
+			'type': 'main',
+		},
+		{
+			'name': 'back-end',
+			'description': 'Specify the back-end of the compiler, possibly different than the build platform. Used for cross-compilation.',
+			'type': 'menu',
+			'choices': ['none', 'clr', 'jvm', 'objc'],
+			'args': 'none|clr|jvm|objc',
+			'default': 'none',
+		},
+		{
+			'name': 'build-standard-library',
+			'synonyms': ['bsl'],
+			'description': 'Builds the standard library.',
+			'type': 'main',
+			'developer-only': true,
+		},
+		{
+			'name': 'clr-platform',
+			'description': 'Target a CLR binary to a platform such as x86, x64 or anycpu.',
+			'type': 'string',  # choices are not limited, in order to have flexibily with different C# compilers and .NET versions
+			'args': 'PLATFORM',
+			'platforms': ['.net'],
+		},
+		{
+			'name': 'clr-profile',
+			'description': 'Builds against a different CLR profile than the one the compiler was installed for.',
+			'type': 'string',
+			'args': '/PATH/TO/PROFILE',
+			'platforms': ['.net'],
+		},
+		{
+			'name': 'compile',
+			'synonyms': ['c'],
+			'description': 'Compile the library (to DLL) or the program (to EXE) without running the code.',
+			'type': 'main',
+		},
+		{
+			'name': 'compile-if-needed',
+			'synonyms': ['cin'],
+			'type': 'bool',
+			'description': 'Compile if any source file is newer than the existing output file (or there is no output file). Does not consider changes in compiler flags; only source code.',
+		},
+		{
+			'name': 'color',
+			'type': 'bool',
+			'description': 'Colorizes the output of error messages and the messages "Compilation failed" and "Compilation succeeded" (as red, red and blue).',
+		},
+		{
+			'name': 'contracts',
+			'description': 'Control treatment of code generation for contracts.',
+			'type': 'menu',
+			'choices': ['none', 'inline', 'methods'],
+			'args': 'none|inline|methods',
+			'default': 'inline',
+		},
+		{
+			'name': 'copy-core',
+			'type': 'bool',
+			'description': 'Copy the Cobra.Core library to the same location as the resulting executable which will insulate the executable from newer Cobra installations.',
+			'default': 'no',
+		},
+		{
+			'name': 'correct-source',
+			'synonyms': ['cs'],
+			'description': 'Rewrite source files with corrections, only when unambiguous. For example, "string" --> "String". If possible, you should set your editor to automatically reload files when using this option.',
+			'type': 'set',
+			'choices': ['none', 'bang-equals', 'case', 'all'],
+			'args': 'none|case|all',
+			'default': 'none',
+		},
+		{
+			'name': 'debug',
+			'synonyms': ['d'],
+			'type': 'string',
+			'description': 'Turn on system debugging information. The value 1 implies full, which enables attaching a debugger to a running program. Turning this on explicitly implies -debugging-tips:no.',
+			'args': '0|1|pdbonly|full',
+			'default': '1',
+		},
+		{
+			'name': 'debugging-tips',
+			'description': 'Display debugging tips when an unhandled exception occurs. Overridden by -exception-report.',
+			'type': 'bool',
+			'default': 'yes',
+		},
+		{
+			'name': 'delay-sign',
+			'type': 'bool',
+			'description': 'Delay-sign the assembly using only the public portion of the strong name key.',
+			'platforms': ['.net'],
+		},
+		{
+			'name': 'detailed-stack-trace',
+			'synonyms': ['dst'],
+			'type': 'bool',
+			'description': 'Enable a detailed stack trace which gives great postmortem information for uncaught exceptions, but slows execution. Also, detects stack overflow which is needed for Mono but not .NET which already does this. Works in combination with -exception-report, or see ObjectExplorer-WinForms.cobra and its doc string for ideas on how to present this information graphically.',
+		},
+		{
+			'name': 'document',
+			'synonyms': ['doc'],
+			'type': 'main',
+			'description': 'Generate HTML docs for the Cobra source.',
+		},
+		{
+			'name': 'document-library',
+			'synonyms': ['doc-lib'],
+			'is-main': true,
+			'type': 'string',
+			'description': 'Generate HTML docs for a library.',
+		},
+		{
+			'name': 'embed-run-time',
+			'synonyms': ['ert'],
+			'type': 'bool',
+			'default': 'no',
+			'description': 'Embed the Cobra run-time support code in the assembly so that no reference to an external Cobra.Core.dll is required. Approximately 85KB - 130KB overhead depending on other options such as -include-asserts or -turbo.',
+		},
+		{
+			'name': 'exception-report',
+			'synonyms': ['exc-rpt', 'er'],
+			'type': 'bool',
+			'description': 'Turn on an informative HTML report that will be generated if the program throws an uncaught exception. Also, see ObjectExplorer-WinForms.cobra and its doc string for an alternative, GUI approach.',
+		},
+		{
+			'name': 'files',
+			'isAccumulator': true,
+			'description': 'Specify the files for Cobra to process in a separate text file. One file per line; # comments and blank lines are ignored.',
+			'args': 'filename',
+		},
+		{
+			'name': 'editor',
+			'type': 'string',
+			'description': 'Specify an editor and command line options to invoke if there is a compile-time error. Use underscore (_) for space in the specification. Can also set via COBRA_EDITOR environment variable (in which case spaces work fine).',
+			'example': ['uedit32_FILE/LINE', 'mate_FILE_-l_LINE'],
+			'args': 'editor_spec_with_FILE_LINE',
+		},
+		{
+			'name': 'extra-source',
+			'type': 'string',
+			'args': 'SOURCE',
+			'description': 'Add extra source code to be compiled with the rest. Generally used only internally by the compiler.',
+			'developer-only': true,
+		},
+		{
+			'name': 'help',
+			'synonyms': ['h'],
+			'type': 'main',
+			'description': 'Display this help message.',
+		},
+		{
+			'name': 'highlight',
+			'description': 'Write HTML versions of the source files with syntax highlighting.',
+			'type': 'main',
+		},
+		{
+			'name': 'include-asserts',
+			'type': 'bool',
+			'default': 'yes',
+			'description': 'Include assert statements in the program.',
+		},
+		{
+			'name': 'include-nil-checks',
+			'type': 'bool',
+			'default': 'yes',
+			'description': 'Include checks on non-nilable class variables, method arguments and "to !" casts.',
+		},
+		{
+			'name': 'include-tests',
+			'type': 'bool',
+			'default': 'yes',
+			'description': 'Includes unit tests for classes and members in the output assembly.',
+		},
+		{
+			'name': 'include-traces',
+			'type': 'bool',
+			'default': 'yes',
+			'description': 'Includes trace statements in the output assembly.',
+		},
+		{
+			'name': 'keep-intermediate-files',
+			'synonyms': ['kif'],
+			'type': 'bool',
+			'description': 'Keeps any intermediate files that Cobra generates, which are normally deleted. Example intermediate files are *.cobra.cs.',
+		},
+		{
+			'name': 'key-container',
+			'type': 'string',
+			'args': 'FILE',
+			'description': 'Specify a strong name key container used to strongname the output assembly.',
+			'platforms': ['.net'],
+		},
+		{
+			'name': 'key-file',
+			'type': 'string',
+			'args': 'FILE',
+			'description': 'Specify a strong name key file used to sign the output assembly.',
+			'platforms': ['.net'],
+		},
+		{
+			'name': 'legacy-one-default-initializer',
+			'type': 'bool',
+			'description': 'When a class does not provide initializers, Cobra will mirror each initializer in the base class. The old behavior was to provide one parameterless initializer. Use this option to switch to the old behavior.',
+		},
+		{
+			'name': 'library-directory',
+			'synonyms': ['lib'],
+			'type': 'string',
+			'isAccumulator': true,
+			'description': 'Specify additional directories to search in for references. Maps to -lib: on .NET and -classpath on JVM.',
+			'args': 'PATH',
+		},
+		{
+			'name': 'main',
+			'type': 'string',
+			'description': 'Specify the type containing the "main" method, particularly when more than one type declaration has a "main" method.',
+			'args': 'TYPENAME',
+		},
+		{
+			'name': 'namespace',
+			'synonyms': ['name-space', 'ns'],
+			'type': 'string',
+			'description': 'Set the namespace for all Cobra source files as if each one started with "namespace <name>". Can be a qualified name.',
+			'example': 'Foo.Bar',
+		},
+		{
+			'name': 'native-compiler',
+			'synonyms': ['sharp-compiler'],
+			'description': 'Specify the path to the back-end native compiler. This can be an executable (such as csc.exe or javac), a library (such as Cobra.Sharp.dll), "auto" or "provider".',
+			'type': 'string',
+			'args': 'file-system-path',
+			'default': 'auto',
+		},
+		{
+			'name': 'number',
+			'type': 'menu',
+			'choices': ['decimal', 'float', 'float32', 'float64'],
+			'args': 'decimal|float|float32|float64',
+			'default': 'decimal',
+			'description': "Set the real numeric type for both the 'number' type and fractional literals such as '1.0'.",
+		},
+		{
+			'name': 'optimize',
+			'synonyms': ['o'],
+			'type': 'bool',
+			'description': 'Enable optimizations.',
+		},
+		{
+			'name': 'out',
+			'type': 'string',
+			'description': 'Specify output file name (default: base name of first file). -test overrides this with a temporary program that runs only the unit tests and is then removed afterwards.',
+			'args': 'FILENAME',
+		},
+		{
+			'name': 'output-html',
+			'type': 'bool',
+			'description': "The command line's output will be in HTML.",
+		},
+		{
+			'name': 'path',
+			'description': 'Print the full path to cobra.exe.',
+			'type': 'main',
+		},		
+		{
+			'name': 'pkg',
+			'type': 'string',
+			'isAccumulator': true,
+			'description': 'References package via "pkg-config --libs". (Mono only.)',
+			'args': 'NAME',
+			'restriction': 'mono',
+			'platforms': ['.net'],
+		},
+		{
+			'name': 'reference',
+			'synonyms': ['ref'], 
+			'isAccumulator': true,
+			'description': 'Add a DLL reference.',
+			'args': 'Some.dll',
+		},
+		{
+			'name': 'reveal-internal-exceptions',
+			'description': 'When true, uncaught exceptions from the Cobra compiler itself are not caught and wrapped in error messages. This is useful when developing on the Cobra compiler itself. Set to true if the environment variable COBRA_IS_DEV_MACHINE.',
+			'type': 'bool',
+			'developer-only': true,
+		},
+		{
+			'name': 'run',  	# this is a switch only   
+			'synonyms': ['r'], 
+			'description': 'Runs the Cobra program. This is the default behavior if specify any Cobra source files.',
+			'type': 'main',
+		},
+		{
+			'name': 'run-args',
+			'synonyms': ['-'],  # '--'
+			'description': 'Remaining args are to be passed to executable.',
+			'eg':          '-- arg1 arg2 arg3',
+			'type': 'args-list',
+		},
+		{
+			'name': 'native-compiler-args',
+			'synonyms': ['sharp-args'],
+			'description': 'Pass additional arguments to the native back-end compiler (such as C# or Java).',
+			'isAccumulator': true,
+			'type': 'string',
+			'args': '"arg1 arg2"',
+		},
+		{
+			'name': 'target',
+			'synonyms': ['t'],
+			'description': 'Build a specific target.',
+			'type': 'menu',
+			'choices': ['exe', 'winexe', 'lib', 'module'],
+			'args': 'exe|winexe|lib|module',
+			'platforms': ['.net'],
+		},
+		{
+			'name': 'test',
+			'description': 'Run the unit tests in the code without running .main. Works for libraries too.',
+			'type': 'main',
+		},
+		{
+			'name': 'test-runner',
+			'type': 'string',
+			'description': 'Specify the method to invoke to run the unit tests. The method must be "shared". Typically the method will make use of classes in Cobra.Core.Test to set up and initiate the test run.',
+			'default': 'Cobra.Core.CobraCore.runAllTests',
+			'args': 'QUALIFIED-METHOD-NAME|nil',
+		},
+		{
+			'name': 'testify',
+			'description': '...',
+			'type': 'main',
+			'developer-only': true,
+		},
+		{
+			'name': 'testify-results',
+			'description': 'The filename to write the testify results to. Progress is still written to console.',
+			'type': 'string',
+			'default': 'r-testify.text',
+			'developer-only': true,
+		},
+		{
+			'name': 'testify-threads',
+			'description': '...',
+			'type': 'int',
+			'developer-only': true,
+		},
+		{
+			'name': 'timeit',
+			'description': 'Gives the total duration of running cobra (including the target program, if it is to be run). This is "wall time", not "cpu time".',
+			# although this option is implied by 'testify', the description does not say so, since 'testify' is a hidden option
+			'type': 'bool',
+		},
+		{
+			'name': 'turbo',
+			'description': 'Maximum run-time performance. This is a convenience for -contracts:none -include-asserts:no -include-nil-checks:no -include-tests:no -include-traces:no -optimize',
+			'type': 'bool',
+		},
+		{
+			'name': 'verbosity',
+			'synonyms': ['verbose', 'v'],
+			'type': 'int',
+			'min': 0,
+			'max': 5,
+			'args': 'N',
+			'description': 'Enable extra output from Cobra. Mostly useful for debugging Cobra and reporting problems. Values 0 - 5. Warning: Level 5 causes megabytes of output.',
+		},
+		{
+			'name': 'verbosity-ref',
+			'type': 'int',
+			'min': 0,
+			'max': 5,
+			'args': 'N',
+			'description': 'Enable extra output from Cobra regarding the resolution of references to libraries. Mostly useful for debugging Cobra and reporting problems. Values 0 - 5.',
+		},
+		{
+			'name': 'version',
+			'description': 'Print just the version number.', # ([.versionString]).',
+			'type': 'main',
+		},
+	]
+
+
+class CommandLine
+	"""
+	The main options that control the command line's behavior are:
+		run
+		test
+		compile
+		testify
+		help
+
+	"testify" is private to the implementor of Cobra.
+
+	"run" is the default if none are specified and at least one path is provided.
+
+	If no arguments are passed at all, "help" becomes the default.
+
+	You need to put at least one dash in front of an option. Also, you can leave
+	out the ".cobra" extension if you like. For example:
+
+		cobra -compile foo bar
+
+	"""
+
+	get versionString as String is shared
+		ensure result.count(c'.') >= 2 or result.startsWith('svn:')
+
+		# Can't just take CobraCore.versionDescription as is, because that will be the one from Snapshot,
+		# not the current Source directory. And Snapshot can be a final release such as '0.7.4' for a
+		# period of time where this Cobra source represents an svn-post-RELEASE.
+		# Keep three components to the version number: X.Y.Z
+
+		ver = 'svn:[CompileTimeInfo.subversionRevision] (post 0.9.2) / [CompileTimeInfo.date]'
+		# ver += ', informal release 2009-03-01'
+		return ver
+
+	get platformString as String is shared
+		return .clrVersion + ' on ' + .opSysString
+
+	get clrVersion as String is shared
+		""" Get runtime version, like '.NET CLR v4.0.30319' or 'Mono 2.6.7 CLR v2.0.50727'. """
+		if CobraCore.isRunningOnMono
+			ver = 'Mono'
+			try
+				mvs = CobraCore.monoVersionString
+				if mvs and mvs.length > 0
+					ver += ' ' + mvs.split(@[c' '], 2)[0]
+			catch
+				pass  # if the above fails for any reason, that's okay
+		else
+			ver = '.NET'
+		ver += ' CLR ' + Assembly.getAssembly(Object).imageRuntimeVersion
+		return ver
+
+	get opSysString as String is shared
+		# to-do: after next compiler snapshot, replace this with CobraCore.operatingSystemDescription
+		name = ''
+		if File.exists('/System/Library/CoreServices/SystemVersion.plist')
+			# Mac
+			content = File.readAllText('/System/Library/CoreServices/SystemVersion.plist')
+			match = Regex.match(content, r'<string>(Mac[^<]+)')
+			if match.success
+				name += match.groups[1].toString
+			match = Regex.match(content, r'<string>(\d+\.[\d\.]+)')
+			if match.success
+				name += ' ' + match.groups[1].toString
+		else if File.exists('/etc/lsb-release')
+			# Ubuntu, ...
+			content = File.readAllText('/etc/lsb-release')
+			d = Dictionary<of String, String>()
+			for line in content.splitLines
+				line = line.trim
+				if line == '' or line.startsWith('#') or '=' not in line, continue
+				pair = line.split('=', 2)
+				d[pair[0].trim] = pair[1].trim
+			if d.containsKey('DISTRIB_DESCRIPTION'), name = d['DISTRIB_DESCRIPTION'].trim
+			if name == ''
+				try
+					name = d['DISTRIB_ID'] + ' ' + d['DISTRIB_RELEASE']
+				catch
+					pass
+			if name.startsWith('"') and name.endsWith('"'), name = name[1:-1]
+		else if File.exists('/etc/arch-release')
+			# Arch Linux
+			name = 'Arch Linux ' + _getCommandOutput('/bin/uname', '-r').trim
+			pacman = _getCommandOutput('pacman', '--version')
+			match = Regex.match(pacman, r'[Pp]acman v?(\d+\.[\d\.]+)')
+			if match.success
+				name += ' (pacman ' + match.groups[1].toString.trim + ')'
+		else if File.exists('/etc/system-release')
+			# CentOS, Fedora, ...
+			name = File.readAllText('/etc/system-release')
+		else if File.exists('/etc/redhat-release')
+			# RedHat, ...
+			name = File.readAllText('/etc/redhat-release')
+		name = name.trim
+		if name == ''
+			# everyone else
+			name = Environment.osVersion.toString
+		return name
+
+	def _getCommandOutput(command as String, args as String) as String is shared
+		p = System.Diagnostics.Process()
+		p.startInfo.fileName = command
+		p.startInfo.arguments = args
+		p.startInfo.useShellExecute = false
+		try
+			return p.runAndCaptureAllOutput.trim
+		catch
+			# specific to users of this method: return '' rather than error
+			return ''
+
+	var _startTime as DateTime
+	var _verbosity = 0
+
+	var _options = OptionValues()
+	var _pathList as List<of String>?
+	var _htmlWriter as HtmlWriter?
+
+	var _compiler as Compiler?
+	var _argParser as ArgParser
+
+	cue init
+		base.init
+		_startTime = DateTime.now
+		_argParser = ArgParser(.versionString, nil)
+
+	get compiler from var
+
+	get options from var
+
+	get argParser from var
+
+	get verboseLineSeparator as String
+		try
+			w = Console.bufferWidth
+		catch IOException
+			w = 0
+		if w < 20, w = 80
+		w -= 1
+		return String(c'-', w)
+
+	get verbosity as int
+		return _verbosity
+
+	def parseArgs(args as List<of String>)
+		.parseArgs(args, out _options, out _pathList)
+
+	def parseArgs(args as IList<of String>, options as out OptionValues?, paths as out List<of String>?)
+		try
+			_argParser.parseArgs(args, out options, out paths)
+		catch ape as ArgParseException
+			options = nil
+			paths = nil
+			.error(ape.message)
+		_verbosity = _argParser.verbosity
+		CobraMain.willTimeIt = _argParser.willTimeIt
+		
+	def run
+		"""
+		Run the command line using the command line arguments.
+		"""
+		.run(CobraCore.commandLineArgs[1:])
+
+	def run(args as List<of String>)
+		"""
+		Run the command line using the given arguments.
+		The `args` should include only the arguments and not the executable/program name.
+		"""
+		if args.count == 0
+			.doAbout
+			return
+		.parseArgs(args)
+
+		if _options.boolValue('output-html')
+			_htmlWriter = HtmlWriter(Console.out)
+			dest = _htmlWriter to TextWriter
+		else
+			dest = Console.out
+		if _htmlWriter
+			stylePath = Path.combine(Path.getDirectoryName(CobraCore.exePath), 'styles-output-html.css')
+			_htmlWriter.writeHtml('<html><head><link href="file://[stylePath]" rel=stylesheet type="text/css"></head><body>[_htmlWriter.newLine]')
+		print to dest
+			paths = _pathList to !
+			options = _options
+			if .verbosity > 0
+				print 'Cobra Command Line [.versionString]'
+				print 'Copyright (C) 2003-[DateTime.now.year] by Cobra Language LLC.'
+				print
+				print 'OS Version:  ', Environment.osVersion
+				print 'CLR Platform:', if(CobraCore.isRunningOnMono, 'Mono', '.NET')
+				print 'CLR Version: ', Environment.version
+				print 'Current Directory: [Environment.currentDirectory]'
+				print 'Current Exe: [CobraCore.exePath]'
+				print 'Option Dictionary:'
+				options.print
+				print 'Paths:'
+				for path in paths
+					print '    [path]'
+			if options.boolValue('testify')
+				.doTestify(paths)
+			else if options.boolValue('run')
+				.doRun(paths)
+			else if options.boolValue('test')
+				.doTest(paths)
+			else if options.boolValue('compile')
+				.doCompile(paths)
+			else if options.boolValue('highlight')
+				.doHighlight(paths)
+			else if options.boolValue('document')
+				.doDocument(paths)
+			else if options.isSpecified('document-library')
+				.doDocumentLibrary
+			else if options.boolValue('help')
+				.doHelp
+			else if options.boolValue('version')
+				.doVersion
+			else if options.boolValue('about')
+				.doAbout
+			else if options.boolValue('path')
+				.doPath
+			else if options.boolValue('build-standard-library')
+				.doBuildStandardLibrary
+			else if not paths.count
+				.doHelp
+			else
+				.doRun(paths)
+		if _htmlWriter
+			_htmlWriter.writeHtml('</body></html>[_htmlWriter.newLine]')
+
+	def doHighlight(paths as List<of String>) as Compiler
+		"""
+		Syntax highlighting via HTML generation.
+		"""
+		comp = .doCompile(paths, false, false, do(c as Compiler)=c.lastPhase inherits BindInterfacePhase)
+		Node.setCompiler(comp)
+		try
+			comp.highlightFiles
+		finally
+			Node.setCompiler(nil)
+		return comp
+
+	def doCompile(paths as List<of String>) as Compiler
+		return .doCompile(paths, true, false, nil)
+
+	def doCompile(paths as List<of String>, willPrintSuccessMsg as bool, 
+					writeTestInvocation as bool, stopCompilation as Predicate<of Compiler>?) as Compiler
+		sep = Path.directorySeparatorChar.toString
+		oldPaths = for path in paths get path.replace('\\', sep).replace('/', sep)
+		paths.clear
+		for path in oldPaths
+			if File.exists(path)
+				paths.add(path)
+			else if Directory.exists(path)
+				.error('Cannot process directories in general ("[path]").')
+			else
+				.error('Cannot find file "[path]".')
+		if paths.count == 0 and not .options.buildStandardLibrary
+			.error('No files to process.')
+		_compiler = c = Compiler(.verbosity)
+		c.commandLineArgParser = _argParser
+		c.options = _options
+		c.willPrintSuccessMsg = willPrintSuccessMsg
+		c.htmlWriter = _htmlWriter
+		try
+			c.compileFilesNamed(paths, writeTestInvocation, stopCompilation)
+			if _verbosity <> c.verbosity, _verbosity = c.verbosity
+		catch StopCompilation
+			# Each phase of the compiler may throw an exception to stop compilation.
+			# Before doing so, it prints its errors.
+			assert c.errors.count>0
+			if _options.containsKey('editor')
+				spec = _options['editor'] to String?
+			else
+				spec = Environment.getEnvironmentVariable('COBRA_EDITOR')
+			if spec and spec <> ''
+				if spec.indexOf('FILE')==-1
+					.error('Missing FILE from editor spec.')
+				if spec.indexOf('LINE')==-1
+					.error('Missing LINE from editor spec.')
+				i = spec.indexOf('_')
+				if i == -1
+					i = spec.indexOf(' ')
+					if i == -1
+						.error('Missing underscore or space from editor spec.')
+				exeName = spec.substring(0, i)
+				args = spec.substring(i+1)
+				for error in c.errors
+					if error.isError and error.hasSourceSite
+						if error.fileName.trim <> ''
+							# trace error.fileName, error.lineNum
+							args = args.replace('FILE', error.fileName)
+							args = args.replace('LINE', error.lineNum.toString)
+							p = System.Diagnostics.Process()
+							p.startInfo.fileName = exeName
+							p.startInfo.arguments = args
+							p.startInfo.useShellExecute = false
+							if _verbosity >= 3
+								print 'Running: [p.startInfo.fileName] [p.startInfo.arguments]'
+							try
+								p.start
+								p.waitForExit  # TODO: is this really needed?
+							catch exc as Exception
+								print 'Cannot invoke editor:'
+								print '    Command: [p.startInfo.fileName] [p.startInfo.arguments]'
+								print '    Exception: [exc]'
+							break
+		CobraMain.compiler = c
+		return c
+
+	def doDocument(paths as List<of String>) as Compiler
+		comp = .doCompile(paths, false, false, do(c as Compiler)=c.lastPhase inherits BindInterfacePhase)
+		GenerateHtmlDocVisitor(do(module)=module inherits CobraModule).gen(comp)
+		return comp
+
+	def doDocumentLibrary
+		docModules = Set<of Module>()
+		comp = Compiler(.verbosity)
+		comp.commandLineArgParser = _argParser
+		comp.options = .options
+		Node.setCompiler(comp)
+		try
+			comp.initBackEnd
+			reference = .options['document-library'] to String  # to-do: pick out type name. to-do: support multiple references
+			reference = comp.backEnd.fixLibExtension(reference)
+			.options['reference'] = [reference]
+			phaseClasses = [
+				BindRunTimeLibraryPhase,
+				ReadLibrariesPhase,
+				BindUsePhase,
+				BindInheritancePhase,
+				BindInterfacePhase,
+				ComputeMatchingBaseMembersPhase,
+			]
+			phases = for phaseClass in phaseClasses get phaseClass(comp) to Phase
+			hasErrors = false
+			for phase in phases
+				if not hasErrors or phase.willRunWithErrors
+					if comp.runPhase(phase), hasErrors = true
+			# running a phase unsets the compiler, so set it again:
+			Node.setCompiler(comp)
+			comp.printMessages
+			if hasErrors, Environment.exit(1)		
+			for module in comp.modules.clone
+				if module.fileName.endsWith(reference)
+					_prepIfNeeded(module)
+					docModules.add(module)
+			GenerateHtmlDocVisitor(do(m)=docModules.contains(m to Module)).gen(comp)  # CC: shouldn't need typecast
+		finally
+			Node.setCompiler(nil)
+
+	def _prepIfNeeded(node)
+		if node inherits AssemblyModule
+			_prepIfNeeded(node.topNameSpace to passthrough)
+		else if node inherits NameSpace
+			for decl in node.declsInOrder
+				_prepIfNeeded(decl to passthrough)
+		else if node inherits Box
+			node.prepIfNeeded
+		else if node implements INameSpaceMember
+			# ex: Enum
+			pass
+		else
+			throw FallThroughException(node)
+
+	def doTest(paths as List<of String>)
+		if paths.count == 0
+			.error('You must specify one or more Cobra files to run unit tests for.')
+		c = .doCompile(paths, false, true, nil)
+		if c.errors.count
+			print 'Not running tests due to errors above.'
+			return
+		try
+			p = c.runProcess
+			if _verbosity >= 1
+				print 'Running: [p.startInfo.fileName] [p.startInfo.arguments]'
+				print .verboseLineSeparator
+			p.startInfo.useShellExecute = false
+			p.start
+			p.waitForExit  # TODO: is this necessary?
+		catch
+			try, File.delete(c.fullExeFileName)
+			catch IOException, pass
+			catch UnauthorizedAccessException, pass
+			throw
+		success
+			try
+				File.delete(c.fullExeFileName)
+			catch IOException
+				print 'warning: Cannot remove "[c.fullExeFileName]"'
+			catch UnauthorizedAccessException
+				print 'warning: Cannot remove "[c.fullExeFileName]"'
+
+	def doRun(paths as List<of String>)
+		c = .doCompile(paths, false, false, nil)
+		if c.errors.count
+			print 'Not running due to errors above.'
+			return
+		if .options.boolValue('compile')  # maybe changed by compiler directive
+			return
+
+		sw = System.Diagnostics.Stopwatch()
+		sw.start
+	
+		exeFileName as String? = nil
+		runArgs	= .options.getStringList('run-args')
+		# TODO: what's this?
+		# exeArgs = .options.getDefaultLOStr('exe-args')
+		# if exeArgs.count
+		#	exeFileName = exeArgs[0]
+		#   runArgs = exeArgs[1:]
+		p = c.runProcess(exeFileName, runArgs)
+		if _verbosity >= 1
+			print 'Running: [p.startInfo.fileName] [p.startInfo.arguments]'
+			print .verboseLineSeparator
+		p.startInfo.useShellExecute = false
+		try
+			p.start
+			p.waitForExit  # TODO: is this necessary?
+		catch exc as Exception
+			print 'ERROR: Compilation succeeded, but cannot run "[p.startInfo.fileName]" because: [exc.typeOf.name]: [exc.message]'
+			print 'You may be able to launch the executable program directly from the command line.'
+			if 'elevation' in exc.message
+				print 'If you are on Windows Vista, using an admin or power user account may avoid this problem.'
+			Environment.exit(1)
+		sw.stop
+		CobraMain.runTime = sw.elapsed
+		
+	def doHelp
+		.doAbout
+		print ''
+		print 'Usage:'
+		print ''
+		print '  cobra <options> <filename>'
+		print '    * run filename'
+		print '    * compile if needed'
+		print '    * .cobra extension is optional'
+		print ''
+		print '  cobra <options> <command> <path(s)>'
+		print '    * commands that operate on path(s) are:'
+		print '      -compile .... Compile only. Also, -c'
+		print '      -run ........ Run the program (compile if necessary). Also -r (Default)'
+		print '      -test ....... Run the unit tests of a library.'
+		print '      -document ... Document the program (partial compilation). Also, -doc'
+		print '      -highlight .. Syntax highlight the program in HTML.'
+		print ''
+		print '  cobra <options> <command>'
+		print '    * standalone commands are:'
+		print '      -help ...... Print full help information.'
+		print '      -about ..... Print name, copyright, etc. no usage.'
+		print '      -path ...... Print the full path to cobra.exe'
+		print '      -version ... Print just the version number ([.versionString]).'
+		print ''
+		print '  <options> can be:'
+
+		# print options from their specs (but not the main ones which are covered above)
+		leftMarginStr = '        '
+		width = _calcWidth()
+		for spec in CommandLineOptionSpecs().specsList
+			if spec.isMain, continue
+			if spec.containsKey('developer-only') and spec['developer-only'] to bool and not Utils.isDevMachine
+				continue
+			if spec.isOptionSpecRestrictionViolated
+				continue
+			print
+			print '    -[spec["name"]]' stop
+			if spec.containsKey('args')
+				if spec.hasDefault
+					lbracket = r'['
+					print '[lbracket]:[spec["args"]]]' stop
+				else
+					print ':[spec["args"]]' stop
+			else if spec.type == 'bool'
+				print r'[:no|yes]' stop
+			if spec.hasDefault
+				print '  default is [spec.default]' stop
+			print
+			if spec.synonyms.count
+				print '    ' stop
+				sep = ''
+				for syn in spec.synonyms
+					print '[sep]-[syn]' stop
+					sep = ', '
+				print
+			s = spec.description
+			while s.length
+				if s.length < width
+					print '[leftMarginStr][s]'
+					s = ''
+				else
+					# TODO: bug in here for narrow widths. try "width = 20" to reproduce
+					j = width + 1
+					if j >= s.length, j = s.length - 1
+					while j > 0 and s[j] <> ' ', j -= 1
+					if j
+						sub = s.substring(0, j)
+						s = if(s.length, s.substring(j+1), '')
+						print '[leftMarginStr][sub]'
+			if spec.containsKey('example')
+				if spec['example'] inherits System.Collections.IList
+					first = true
+					for example in spec['example'] to System.Collections.IList
+						if first, print '[leftMarginStr]Examples: ' stop
+						else,     print '[leftMarginStr]          ' stop
+						print '-[spec["name"]]:[example]'
+						first = false
+				else
+					print '[leftMarginStr]Example: -[spec["name"]]:[spec["example"]]'
+			if spec.containsKey('eg') # verbatim example line
+				print '[leftMarginStr]e.g. [spec["eg"]]'
+
+	def doAbout
+		print
+		print 'The Cobra Programming Language [.versionString]'
+		print 'on [.platformString]'
+		compilerPath = Assembly.getEntryAssembly.location
+		print 'at [compilerPath]'
+		cobraCore = Path.combine(Path.getDirectoryName(compilerPath), 'Cobra.Core.dll')
+		if not File.exists(cobraCore)
+			print
+			print 'WARNING: There is no Cobra.Core.dll next to the compiler.'
+		print
+		print 'Copyright (C) 2003-[DateTime.now.year] by Cobra Language LLC.  All Rights Reserved.'
+		print ''
+		print 'On the web:  http://cobra-language.com/'
+		print 'Source:      http://cobra-language.com/source'
+		print 'Support:     http://cobra-language.com/support'
+		print 'License:     http://www.opensource.org/licenses/mit-license.php'
+		print
+		print 'Usage:       cobra -h'
+
+	def doPath
+		print Assembly.getEntryAssembly.location
+
+	def doVersion
+		print 'Cobra [.versionString] on [.platformString]'
+
+	def error(msg as String)
+		if msg.length
+			print 'cobra: error: [msg]'
+			print 'Run Cobra without options to get full usage information.'
+		Environment.exit(1)
+
+	def _calcWidth as int
+		leftMargin = 8
+		try
+			consoleWidth = Console.windowWidth
+		catch IOException
+			# 2008-04-11, When redirecting output, MS .NET 2.0 throws IOException while Novell Mono 1.9 returns 0
+			consoleWidth = 0
+		if consoleWidth < 1
+			try
+				consoleWidth = Console.bufferWidth
+			catch IOException
+				consoleWidth = 0
+		totalWidth = consoleWidth - 2
+		if totalWidth < 0, 	totalWidth = 0
+		if totalWidth == 0, totalWidth = 78
+		else if totalWidth < 20, totalWidth = 20
+		assert totalWidth > 0
+		width = totalWidth - leftMargin
+		assert width > 0
+		return width
+	
+
+	## Build Standard Library
+
+	def doBuildStandardLibrary
+		v = .verbosity
+		if v, print 'Building standard library'
+		dllInfo = FileInfo('Cobra.Core.dll')
+		if dllInfo.exists
+			prevName = 'Cobra.Core-previous.dll'
+			if v, print 'Renaming Cobra.Core.dll to [prevName]'
+			prevInfo = FileInfo(prevName)
+			try
+				if prevInfo.exists, prevInfo.delete
+			catch UnauthorizedAccessException
+				print 'warning: Cannot delete [prevName]'
+			success
+				try
+					FileInfo('Cobra.Core.dll').moveTo(prevName)
+				catch UnauthorizedAccessException
+					print 'warning: Cannot move Cobra.Core.dll to [prevName]'
+		_options['target'] = 'lib'
+		_options['include-tests'] = false
+		_options['embed-run-time'] = true  # because the runtime is what we're building!
+
+		# embed the version
+		reMatch = Regex(r'^\d+\.\d+\.\d+\b').match(.versionString)
+		if reMatch.success
+			version = reMatch.value to !
+		else
+			reMatch = Regex(r'^svn:(\d+)\b').match(.versionString)
+			if reMatch.success
+				version = reMatch.groups[1].value to !
+			else
+				print 'warning: Cannot extract version number from version string: [.versionString]'
+				version = '999'
+			version = '0.0.' + version
+		assert version.count(c'.') == 2  # ex: '0.9.0'
+		if ' ' in .versionString or 'post' in .versionString  # ex: '0.9.0 post'
+			# 'post' versions have a fourth version component of 1, as opposed to 0
+			version += '.1'
+			assert version.count(c'.') == 3
+		_options.addExtraUse('use System.Reflection')
+		_options.addExtraSource("assembly\n\thas AssemblyVersion('[version]')\n")
+		.doCompile(List<of String>(), true, false, nil)
+
+
+	## Testify
+
+	def doTestify(paths as List<of String>)
+		"""
+		Used internally for testing cobra during development.
+		Why not just 'test'? because that is reserved for regular developers to run true unit tests.
+		"""
+		TestifyRunner(_startTime, this, paths).run
+		
+	
+
+class ArgParseException
+	inherits Exception
+
+	cue init(msg as String?)
+		base.init(msg)
+
+
+class ArgParser
+	"""
+	Parse command line arguments into a dictionary of recognized OptionValues and a list of paths.
+	"""
+
+	var _versionString as String
+	var _verbosity = 0
+	var _willTimeIt = false
+	var _optsOnly = false
+	
+	get versionString from var
+	get verbosity from var
+	get willTimeIt from var
+
+	var _optionSpecs as List<of OptionSpec>
+
+	var	_specDict as Dictionary<of String, OptionSpec>
+		# will contain keys for all spec names and their synonyms
+
+	var _synToName as Dictionary<of String, String>
+		# maps synonyms to their full names
+
+	var _synList as List<of String>
+
+	cue init(version as String, optionSpecs as List<of OptionSpec>?)
+		base.init
+		_versionString = version
+		# prep the option specs
+		if optionSpecs
+			_optionSpecs = List<of OptionSpec>(optionSpecs)
+		else
+			_optionSpecs = CommandLineOptionSpecs().specsList
+		_specDict = Dictionary<of String, OptionSpec>()
+		_synToName = Dictionary<of String, String>()
+		_synList = List<of String>()
+		_initSynonyms
+
+	def parseToOptions(args as IList<of String>) as OptionValues
+		"""
+		Reuse ArgParser to parse some additional string option args. Files are not allowed.
+		Return new set of Options from given args list
+		"""
+		opts = OptionValues()
+		paths = List<of String>()
+		# TODO: mark which opts as unusable in this context and filter out
+		_optsOnly = true
+		.parseArgs(args, out opts, out paths)
+		if .verbosity or opts.getDefault('verbosity', 0) to int
+			print 'parseToOptions Option Dictionary:'
+			opts.print
+		return opts
+		
+	def parseArgs(args as IList<of String>, options as out OptionValues?, paths as out List<of String>?)
+		"""
+		Parse command line arguments: options and files.
+		The `args` should include only the arguments and not the executable/program name.
+		"""
+		_optsOnly = false
+		_parseArgs(args, out options, out paths)
+		
+	def _parseArgs(args as IList<of String>, options as out OptionValues?, paths as out List<of String>?)
+		ensure
+			options
+			paths
+		body
+			optionPrefix = '-'
+			if not args.count
+				options = OptionValues()
+				options.add('about', true)
+				paths = List<of String>()
+				return
+
+			# set up initial valueDict
+			valueDict = Dictionary<of String, Object>()
+			didSpecify = Dictionary<of String, bool>()  # CC: could just be a Set
+			if Utils.isDevMachine
+				valueDict['reveal-internal-exceptions'] = true  # this is a specially computed default, but can still be overridden on the command line
+
+			valueStr = 'no-value'
+			fileList = List<of String>()
+			mainOptions = List<of String>()
+			argn = 0
+			for arg in args
+				argn += 1  # offset next arg after current
+				if not arg.trim.length, continue
+
+				isOption = arg.startsWith(optionPrefix)
+				if isOption
+					name = _getOptionParts(arg, optionPrefix, out valueStr)
+					assert name.trim <> ''
+					spec = _specDict[name]
+
+					if spec.isAccumulator
+						_accumulateOptValue(name, valueStr, spec, valueDict, didSpecify)
+						continue
+						
+					value = _processToValue(name, valueStr, spec, mainOptions)
+					if value == 'args-list'
+						value = args[argn:]
+					if value is nil
+						errMsg = 'Cannot parse value "[valueStr]" for option "[name]".'
+						branch spec.type
+							on 'bool', errMsg += ' Possible values include yes, no, y, n, true, false, t, f, 1, 0, + and -.'
+							on 'menu', errMsg += ' Possible values are [spec.choices.join(", ", " and ")].'
+						_error(errMsg)
+					valueDict[name] = value to !
+					didSpecify[name] = true
+					if spec.type == 'args-list'
+						break   # absorbed remainder of args
+				else # not isOption
+					if _optsOnly
+						_error('Filenames are not allowed here, All the args provided must be "-" prefixed options')
+					if arg.startsWith('/')
+						errHint = ' If you meant to specify an option, use dash (-) instead of slash (/).'
+					_processAsFile(arg, fileList, errHint)
+
+			_handleSynonyms(valueDict)			
+			_addInDefaults(valueDict)		
+
+			# TODO: make the option names case-insensitive
+
+			if mainOptions.count > 1
+				_error('Cannot have these main options at the same time: [mainOptions.join(", ")]')
+
+			_unpackOptions(valueDict, fileList)	
+
+			# set the out parameters
+			options = OptionValues(valueDict)
+			options.setSpecified(didSpecify)
+			paths = fileList
+			_computeArgImplications(options to !)
+		
+	def _getOptionParts(arg as String, optionPrefix as String, valueStr as out String) as String
+		arg = .fixOptionArg(arg, optionPrefix)	
+		# CC: name, valueStr = .splitOpt(arg)
+		parts = .splitOpt(arg) 
+		name = parts[0]
+		valueStr = parts[1]
+		name = .validateOptionName(name)
+		return name			
+
+	def fixOptionArg(arg as String, optionPrefix as String) as String	
+		"""
+		Strip any leading switch chars.
+		"""
+		while arg.startsWith(optionPrefix)
+			arg = arg[1:]
+		if not arg.length  # '--'
+			arg = 'run-args'
+		return arg
+
+	def splitOpt(arg as String) as IList<of String>
+		"""
+		Split option into name and valueStr
+		"""
+		valuePrefix = c':'
+		parts = arg.split(@[valuePrefix], 2)
+		if parts.length == 1
+			name = parts[0]
+			if name.endsWith('+')
+				name = name[:-1]
+				valueStr = 'on'
+			else if name.endsWith('-')
+				name = name[:-1]
+				valueStr = 'off'
+			else
+				valueStr = 'on'  # this should probably be done at a later point, like _processToValue
+		else
+			assert parts.length == 2
+			name = parts[0]
+			valueStr = parts[1]
+		assert name.length, [arg, parts]
+		# assert valueStr.length  # not valid. an option could be cleared out like: -editor:"" 
+		return [name, valueStr]	
+		
+	def _initSynonyms
+		"""
+		Init supporting data structures for handling option synonyms		
+		"""		
+		for spec in _optionSpecs
+			if spec.isOptionSpecRestrictionViolated
+				continue
+			_specDict[spec.name] = spec
+			if spec.synonyms.count
+				for syn in spec.synonyms
+					assert not _specDict.containsKey(syn)
+					_specDict[syn] = spec
+					_synToName[syn] = spec.name
+					_synList.add(syn)
+			
+	def validateOptionName(name as String) as String
+		"""
+		Ensure the given name exists as an option name or synonym mappable
+		to an option name; return the canonical name for the option/synonym
+		"""
+		require name.trim <> ''
+		ensure result.trim <> ''
+		name = _synToName.get(name, name)
+		assert name.trim <> ''
+		if not _specDict.containsKey(name)
+			msg = 'No such option "[name]".'
+			if name.contains('=')
+				msg += ' If you meant to specify an option value, use colon (:) instead of equals (=).'
+			_error(msg)
+		return name
+		
+	def _accumulateOptValue(name as String, valueStr as String,
+			spec as OptionSpec,
+			valueDict as Dictionary<of String, Object>,
+			didSpecify as Dictionary<of String, bool>)
+		# accumulators are always treated as strings. TODO: assert that
+		value = _interpretValue(valueStr, spec)
+		if valueDict.containsKey(name)
+			(valueDict[name] to System.Collections.IList).add(value)
+		else
+			valueDict[name] = [value to String]
+			didSpecify[name] = true
+
+	def _fixDebug(valueStr as String) as String?
+		if valueStr == 'pdbonly' or valueStr == 'full'
+			return valueStr
+			
+		value as String? = 'no-value'	
+		try
+			b = _boolForString(valueStr)
+		catch FormatException
+			value = nil
+		success
+			value = if(b, '+', '-')
+		return value
+	
+	def _processToValue(name as String, valueStr as String, spec as OptionSpec, mainOptions as List<of String>) as dynamic?
+		value = 'no-value' to dynamic?
+	
+		if name == 'debug' 		# special case
+			return _fixDebug(valueStr)
+		
+		branch spec.type
+			on 'main'
+				mainOptions.add(name)
+				value = true
+			on 'args-list'  # remainder of args are for execution of exe file 
+				value = 'args-list'
+			else
+				value = _interpretValue(valueStr, spec)
+		return value
+
+	def _handleSynonyms(valueDict as Dictionary<of String, Object>)
+		for syn in _synList
+			if valueDict.containsKey(syn)
+				valueDict[_synToName[syn]] = valueDict[syn]
+				valueDict.remove(syn)
+			
+	def _addInDefaults(valueDict as Dictionary<of String, Object>)
+		for spec in _optionSpecs
+			if not valueDict.containsKey(spec.name) and spec.hasDefault
+				defaultValue = _interpretValue(spec.default, spec) to !
+				if .verbosity
+					print 'Setting option "[spec.name]" to default value [defaultValue].'
+				valueDict[spec.name] = defaultValue
+
+	def _unpackOptions(valueDict as Dictionary<of String, Object>, fileList as List<of String>)	
+		"""
+		Unpack certain options (verbosity and timeit) into specific class fields, 
+			do files option processing
+		"""
+		if valueDict.containsKey('verbosity')
+			_verbosity = valueDict['verbosity'] to int
+
+		if not valueDict.containsKey('timeit') and valueDict.containsKey('testify')
+			valueDict['timeit'] = true
+		if valueDict.containsKey('timeit')
+			_willTimeIt = valueDict['timeit'] to bool
+
+		if valueDict.containsKey('files')
+			fileNamesList = valueDict['files'] to System.Collections.IList
+			_processFilesFile(fileNamesList, fileList)
+
+	def readFilesFile(filesFilePath as String) as List<of String>
+		"""
+		Augments the list of files held by the arg parser with those passed in.
+		"""
+		paths = List<of String>()
+		_processFilesFile([filesFilePath], paths)
+		return paths
+
+	def _processFilesFile(fileNamesList as System.Collections.IList, fileList as List<of String>)
+		"""
+		Treat entries in fileNamesList as names of files containing filenames to compile, 
+		validate names and add into fileList
+		"""
+		for fileName as String in fileNamesList
+			try
+				try
+					baseDir = Path.getDirectoryName(fileName)
+				catch ArgumentException
+					_error('Cannot open file "[fileName]" which appears to be an invalid path.')
+				for line in File.readAllLines(fileName)
+					line = line.trim
+					if line.length==0 or line.startsWith('#'), continue
+					# note that source files are relative to the location of the "files file"
+					try
+						fileArg = Path.combine(baseDir, line)
+					catch ArgumentException
+						_error('Cannot properly read file "[fileName]" for file names.')
+					_processAsFile(fileArg, fileList, nil)
+			catch IOException
+				_error('Cannot open file "[fileName]".')
+
+	def _processAsFile(arg as String, fileList as List<of String>, errHint as String?)
+		"""
+		Validate arg as filename and on success add into fileList
+		"""
+		sep = Path.directorySeparatorChar.toString
+		arg = arg.replace('\\', sep).replace('/', sep)
+		if File.exists(arg)
+			fileList.add(arg)
+		else if File.exists(arg+'.cobra')
+			fileList.add(arg+'.cobra')
+		else if Directory.exists(arg)
+			fileList.add(arg)
+		else 
+			_error('Cannot find "[arg]" as a file.' + (errHint?''))
+
+	def _computeArgImplications(options as OptionValues)
+		if options.getDefault('target', '') == 'lib' and not options.isSpecified('compile')
+			options['compile'] = true
+		if options.isSpecified('debug') and _
+			options.getDefault('debug', '') not in ['', '0', '-'] and _
+			not options.isSpecified('debugging-tips')
+			# then
+			options['debugging-tips'] = false
+		if options.boolValue('turbo')
+			options['contracts'] = 'none'
+			options['include-asserts'] = false
+			options['include-nil-checks'] = false
+			options['include-tests'] = false
+			options['include-traces'] = false
+			options['optimize'] = true
+			
+	def _interpretValue(valueStr as String, spec as OptionSpec) as dynamic?
+		value as dynamic?
+		branch spec.type
+			on 'main'
+				throw InvalidOperationException('This method does not handle the main type.')
+			on 'bool'
+				try
+					value = _boolForString(valueStr)
+				catch FormatException
+					value = nil  # cannot process
+			on 'int'
+				if valueStr == 'on'  # set internally when there is no value
+					valueStr = '1'
+				try
+					value = int.parse(valueStr)
+				catch FormatException
+					value = nil
+				catch OverflowException
+					value = nil
+				# TODO: check min and max
+			on 'string' or 'accumulator'
+				if valueStr.startsWith('"') and valueStr.endsWith('"'), valueStr = valueStr[1:-1]
+				else if valueStr.startsWith("'") and valueStr.endsWith("'"), valueStr = valueStr[1:-1]
+				value = valueStr
+			on 'menu'
+				if valueStr.length == 0
+					value = 'all'
+				else if not valueStr in spec.choices
+					value = nil
+				else
+					value = valueStr
+			on 'set'
+				if valueStr in ['', 'on'], valueStr = 'all'
+				valueSet = Set<of String>()
+				for choice in valueStr.split(c',')
+					if choice == 'none'
+						valueSet = {'none'}
+					else if choice == 'all'
+						valueSet = Set<of String>(for choice in spec.choices where choice not in ['none', 'all'])
+					else
+						valueSet.add(choice)
+				value = valueSet
+			else
+				throw FallThroughException(spec.type)
+		return value
+		
+	def _boolForString(s as String) as bool
+		if s.toLower in ['', '+', 'on', 'true', 't', 'yes', 'y', '1']
+			return true
+		else if s.toLower in ['-', 'off', 'false', 'f', 'no', 'n', '0']
+			return false
+		else
+			throw FormatException()
+		
+	def _error(msg as String)
+		throw ArgParseException(msg)
+
+
+
+class HtmlWriter
+	inherits TextWriter
+	"""
+	In support of the output-html option.
+	"""
+
+	var _otherWriter as TextWriter
+	var _isWritingHtml as bool
+
+	cue init(otherWriter as TextWriter)
+		base.init
+		_otherWriter = otherWriter
+
+	get encoding as Encoding? is override
+		return Encoding.default
+
+	def write(c as char) is override
+		_otherWriter.write(c)
+		if not _isWritingHtml and c == c'\n'
+			_otherWriter.write('<br>')
+
+	def writeHtml(html as String)
+		_isWritingHtml = true
+		try
+			.write(html)
+		finally
+			_isWritingHtml = false
+
+
+class OptionValues inherits Dictionary<of String, Object>
+
+	var _isSpecified = Dictionary<of String, bool>()  # CC: could just be a Set
+
+	cue init
+		base.init
+		# .init(nil) - cannot call base.init(d) with nil
+
+	cue init(d as IDictionary<of String, Object>?)
+		base.init(d)
+
+	def isSpecified(name as String) as bool
+		"""
+		Returns true if the given option name is explicitly specified (as opposed to being present
+		in the options dictionary due to having a default value).
+		"""
+		return _isSpecified.containsKey(name)
+
+	def didSpecify(name as String)
+		_isSpecified[name] = true
+
+	def setSpecified(specify as Dictionary<of String,bool>)
+		for name in specify.keys
+			.didSpecify(name)
+
+	def boolValue(key as String) as bool
+		if .containsKey(key)
+			return this[key] to bool
+		else
+			return false
+
+	def get(key as String) as dynamic?
+		return this[key]
+
+	def getDefault(key as String, default as dynamic?) as dynamic?
+		if .containsKey(key)
+			return this[key]
+		else
+			return default
+
+	def getStringList(key as String) as List<of String>
+		"""
+		Returns a List<of String> for the given key.
+		If the key is not present, returns an empty list.
+		"""
+		if .containsKey(key)
+			return this[key] to List<of String>
+		else
+			return List<of String>()
+
+	# CC: def getDefault<of T>(key as String, value as T) as T ...
+
+	def setValue(key as String) as Set<of String>
+		""" Returns an empty string if no such set exists. """
+		if .containsKey(key)
+			try
+				return this[key] to Set<of String>
+			catch InvalidCastException
+				throw InvalidCastException('Cannot cast [CobraCore.toTechString(this[key])] for key "[key]" to Set<of String>.')
+		else
+			return Set<of String>()
+
+	def combine(options as OptionValues)
+		if options is not this
+			for key in options.keys
+				this[key] = options[key]
+
+	def combineNew(options as OptionValues)
+		if options is not this
+			for key in options.keys 
+				if not .isSpecified(key)
+					this[key] = options[key]
+
+	def print
+		for key in .keys
+			print '    [key]: [CobraCore.toTechString(this[key])]'
+
+	get buildStandardLibrary as bool
+		return .boolValue('build-standard-library')
+
+	def addExtraUse(useSource as String)
+		es = .getDefault('extra-source', '') to String
+		useSource = useSource.trim
+		if not useSource in es
+			es = useSource + '\n' + es
+		this['extra-source'] = es
+
+	def addExtraSource(source as String)
+		es = .getDefault('extra-source', '') to String
+		es = es + source + '\n'
+		this['extra-source'] = es
+
+
+	var _uniqueIdentifier as String?
+
+	def uniqueIdentifier as String
+		"""
+		Returns a unique id such as '95b141d670c19f2f20a820751897b9c6' which is guaranteed to be
+		unique per Cobra process. Can be used in identifiers. Motivated by -embed-run-time
+		option which suffixes the Cobra.Core namespace to avoid collisions with other assemblies.
+		"""
+		if _uniqueIdentifier is nil
+			components = [DateTime.now, this, Environment.currentDirectory, Process.getCurrentProcess.id]
+			_uniqueIdentifier = components.toPrintString.md5HashInHex
+		return _uniqueIdentifier to !
+
+	def embedRunTimeSuffix as String
+		if .boolValue('embed-run-time') and not .boolValue('build-standard-library')
+			return '_ert_' + .uniqueIdentifier
+		else
+			return ''

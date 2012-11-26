@@ -1,0 +1,92 @@
+class Property
+	is partial
+	inherits ProperDexer
+	implements IBoxCodeMember
+
+	cue init(token as IToken, idToken as IToken, box as Box, name as String, isNames as String*, attribs as AttributeList, coverVar as BoxVar, coverAccess as String, docString as String)
+		base.init(token, idToken, box, name, isNames, attribs, docString)
+		_coverVar = coverVar
+		_coverAccess = coverAccess
+		_isNames = isNames.toList
+
+	cue init(token as IToken, idToken as IToken, box as Box, name as String, returnTypeOrNode as INode, isNames as String*, attribs as AttributeList, docString as String)
+		base.init(token, idToken, box, name, returnTypeOrNode, isNames, attribs, docString)
+
+	def cobraSourceSignature as String is override
+		keyword = if(.getPart and .setPart, 'pro', if(.getPart, 'get', 'set'))
+		sb = StringBuilder('[keyword] [.name] as [.resultType.name]')
+		if .isShared, sb.append(' is shared')
+		return sb.toString
+
+	def cobraSourceSignatureInHtml as String is override
+		keyword = if(.getPart and .setPart, 'pro', if(.getPart, 'get', 'set'))
+		sb = StringBuilder('<span class="shl-kw-md">[keyword]</span> ' + _
+				'<span class="shl-mdn">[.name.htmlEncode]</span> ' + _ 
+				'<span class="shl-kw">as</span> ' + _
+				'<span class="shl-rt">[.resultType.name]</span>')
+		if .isShared, sb.append(' <span class="shl-kw">is shared</span>')
+		return sb.toString
+
+	get isCallable as bool is override
+		return false
+
+	get englishName as String is override
+		return 'property'
+
+	def makeGetPart(token as IToken) as AbstractMethod is override
+		_getPart = PropertyGetter(token, this)
+		return _getPart to !
+
+	def makeSetPart(token as IToken) as AbstractMethod is override
+		_setPart = PropertySetter(token, this)
+		return _setPart to !
+
+
+class PropertyGetter
+	inherits ProperDexerXetter
+
+	cue init(token as IToken, prop as Property)
+		base.init(token, prop, List<of String>())  # TODO: take in docString
+
+	get englishName as String is override
+		return 'property getter'
+
+	get xetPartName as String is override
+		return 'get'
+
+	def _bindInt
+		base._bindInt
+		_returnType = .parent.returnType
+		assert _returnType
+
+
+class PropertySetter
+	inherits ProperDexerXetter
+
+	cue init(token as IToken, prop as Property)
+		base.init(token, prop, List<of String>())  # TODO: take in docString
+
+		# make a token for the Param()
+		t = token.copy
+		t.which = 'ID'
+		t.text = 'value'
+		t.value = 'value'
+
+		if prop.returnType
+			p = Param(t, prop.returnType, isImplicit=true)
+		else if prop.returnTypeNode
+			p = Param(t, prop.returnTypeNode, isImplicit=true)
+		else
+			throw FallThroughException(prop)
+		_params.add(p)
+
+	get englishName as String is override
+		return 'property setter'
+
+	get xetPartName as String is override
+		return 'set'
+
+	def _bindInt
+		base._bindInt
+		_returnType = .compiler.voidType
+		assert _returnType

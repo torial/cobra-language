@@ -1,0 +1,6 @@
+
+enum X  # .error. cannot
+	is partial
+	
+	Foo
+

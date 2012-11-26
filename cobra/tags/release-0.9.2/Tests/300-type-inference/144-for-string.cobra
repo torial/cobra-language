@@ -1,0 +1,8 @@
+class Program
+
+	def main is shared
+		c as char
+		for ch in 'aoeu'
+			assert ch<>'z'
+			c = ch
+		CobraCore.noOp(c)

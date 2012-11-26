@@ -1,0 +1,16 @@
+class Foo
+	def bar as String
+		is shared
+		return ''
+
+class Test
+
+	def main is shared
+		c = Path.directorySeparatorChar
+		c = c'x'
+		CobraCore.noOp(c)
+
+	def baz
+		s = Foo.bar
+		s = 'c'
+		CobraCore.noOp(s)

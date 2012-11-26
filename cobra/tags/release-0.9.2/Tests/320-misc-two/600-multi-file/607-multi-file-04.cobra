@@ -1,0 +1,17 @@
+# .multipart.
+class Number
+
+	var _value as int
+
+	cue init(value as int)
+		base.init
+		_value = value
+		
+	get value from _value
+	
+	def fromLetter(le as Letter) as Number?
+		is shared
+		branch le.value
+			on 'a', return Number(1)
+			on 'b', return Number(2)
+		return nil

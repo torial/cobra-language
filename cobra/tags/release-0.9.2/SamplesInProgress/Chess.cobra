@@ -1,0 +1,265 @@
+"""
+Chess.cobra
+
+== To Do
+
+	[ ] Everything
+	[ ] Castling
+	[ ] Promote pawn
+	[ ] Enpassant
+	[ ] Gothic chess
+	[ ] Different board game, like Pente: http://www.boardgamegeek.com/game/1295
+	
+"""
+
+class Program
+
+	def main is shared
+		board = Board.makeJuniorBoard
+		white = ComputerPlayer(Color.White)
+		black = ComputerPlayer(Color.Black)
+		g = Game(board, white, black)
+		g.print
+		
+
+class Game
+
+	var _moves as IList<of Move>
+	
+	cue init(board as Board, white as Player, black as Player)
+		require
+			white.color == Color.White
+			black.color == Color.Black
+		body
+			base.init
+			_board = board
+			_white = white
+			_black = black
+			white.game = this
+			black.game = this
+			_whoseTurn = white
+			_moves = List<of Move>()
+
+	get board from var as Board
+	
+	get white from var as Player
+
+	get black from var as Player
+
+	get whoseTurn from var as Player
+	
+	def print
+		whiteTurn = if(_whoseTurn is _white, '> ', '  ')
+		blackTurn = if(_whoseTurn is _black, '> ', '  ')
+		print
+		print 'Game - move [_moves.count+1]'
+		print '  Board:'
+		.board.print
+		print '  Players:'
+		print '    [whiteTurn][.white]'
+		print '    [blackTurn][.black]'
+		
+	def playOneMove
+		_whoseTurn.playOneMove
+		_whoseTurn = if(_whoseTurn is _white, _black, _white)
+
+			
+class Move
+
+	pass
+	
+	
+class Board implements IEnumerable<of Cell>
+	
+	var _rows as List<of List<of Cell>>
+	
+	shared
+
+		def makeJuniorBoard as Board
+			numRows = 6
+			numCols = 4
+			maxRow = numRows - 1
+			maxCol = numCols - 1
+			b = Board(numRows, numCols)
+			for col in numCols
+				b.setCell(Pawn(Color.Black), 1, col)
+				b.setCell(Pawn(Color.White), numRows-2, col)
+			b.setCell(Rook(Color.Black), 0, 0)
+			b.setCell(Rook(Color.Black), 0, maxCol)
+			b.setCell(Rook(Color.White), maxRow, 0)
+			b.setCell(Rook(Color.White), maxRow, maxCol)
+			b.setCell(Bishop(Color.Black), 0, 1)
+			b.setCell(King(Color.Black), 0, 2)
+			b.setCell(Bishop(Color.White), maxRow, 1)
+			b.setCell(King(Color.White), maxRow, 2)
+			return b
+			
+	cue init(numRows as int, numCols as int)
+		require
+			numCols >= 2
+			numRows >= 2
+		body
+			base.init
+			_numRows = numRows
+			_numCols = numCols
+			_rows = List<of List<of Cell>>(numRows)
+			for rowNum in numRows
+				row = List<of Cell>(numCols)
+				_rows.add(row)
+				for colNum in numCols
+					row.add(Cell(rowNum, colNum, numRows-rowNum))
+
+	get numCols from var as int
+
+	get numRows from var as int
+
+	def setCell(piece as Piece, row as int, col as int)
+		require
+			0 <= row < .numRows
+			0 <= col < .numCols
+		body
+			cell = _rows[row][col]
+			cell.piece = piece
+			piece.cell = cell
+
+	get rows as IList<of Cell>*
+		for row in _rows, yield row
+
+	get [rowIndex as int] as IList<of Cell>
+		return _rows[rowIndex]
+		
+	def getEnumerator as IEnumerator<of Cell>
+		for row in .rows, for cell in row, yield cell
+
+	def getEnumerator as System.Collections.IEnumerator
+		implements System.Collections.IEnumerable
+		return .getEnumerator to System.Collections.IEnumerator
+	
+	def print
+		for row in .rows
+			for cell in row, cell.dump
+			print
+
+
+class Player
+	
+	var _game as Game?
+	var _board as Board?
+	var _color as Color
+	var _pieces as IList<of Piece>
+	
+	cue init(color as Color)
+		base.init
+		_color = color
+		_pieces = List<of Piece>()
+		
+	pro game as Game?
+		get
+			return _game
+		set
+			require
+				value
+				.game is nil
+			body
+				_game = value
+				_board = _game.board
+				for cell in _board
+					p = cell.piece
+					if p and p.color == _color
+						_pieces.add(p)
+						
+	get board from var
+	
+	get color from var
+	
+	def playOneMove
+		throw Exception('override playOneMove')
+		
+		
+class ComputerPlayer inherits Player
+
+	cue init(color as Color)
+		base.init(color)
+
+	def toString as String is override
+		return '[.getType.name]([.color])'
+
+	def playOneMove is override
+		pass
+		
+
+class HumanPlayer inherits Player
+	
+	cue init(color as Color)
+		base.init(color)
+	
+	
+enum Color
+	Black
+	White
+
+
+class Cell
+
+	var _rowNum as int
+	var _colNum as int
+	var _displayRow as int
+	var _piece as Piece?
+	
+	cue init(rowNum as int, colNum as int, displayRow as int)
+		base.init
+		_rowNum = rowNum
+		_colNum = colNum
+		_displayRow = displayRow
+	
+	pro piece from var
+	
+	get displayCoordinates as String
+		col = (_colNum + c'a' to int) to char
+		return '[col][_displayRow]'
+		
+	def dump
+		s = '  | ([_rowNum],[_colNum]) [.displayCoordinates]  [if(_piece,_piece.toString,"")]'
+		s = s.padRight(27)
+		print s stop
+		
+
+class Piece
+
+	var _cell as Cell?
+	var _color as Color
+	
+	cue init(color as Color)
+		base.init
+		_color = color
+	
+	get color from var
+	
+	pro cell from var
+	
+	def toString as String is override
+		return '[.getType.name]-[.color]'
+		
+		
+class Pawn inherits Piece
+	
+	cue init(color as Color)
+		base.init(color)
+		
+		
+class Rook inherits Piece
+	
+	cue init(color as Color)
+		base.init(color)
+
+
+class Bishop inherits Piece
+	
+	cue init(color as Color)
+		base.init(color)
+		
+	
+class King inherits Piece
+	
+	cue init(color as Color)
+		base.init(color)

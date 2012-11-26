@@ -1,0 +1,2038 @@
+"""
+This module contains BoxMember on down, except Property and Indexer which have their own files.
+"""
+
+interface IBoxMember inherits IMember is partial
+	"""
+	Anything that can be a member of a box should implement IBoxMember.
+	This includes methods, properties, enums and more.
+	It even includes Box as nested boxes are an anticipated feature.
+	"""
+	get docString as String?
+	get idToken as IToken
+	get isNames as String*
+	get parentBox as Box
+	get token as IToken
+
+	def cobraSourceSignature as String
+	def cobraSourceSignatureInHtml as String
+	def mangleName(name as String) as String
+		# TODO require .compiler.curBoxMember is this
+	def mergedIntoPartialBox(newBox as Box)
+		require
+			newBox is not .parentBox
+			newBox.name == .parentBox.name
+
+
+interface IBoxCodeMember inherits IBoxMember
+
+	get hasParams as bool
+	get isExtensionMember as bool
+	get params as IList<of Param>
+	get testMethods as IList<of TestMethod>
+
+	def matchesSignature(member as IBoxCodeMember) as bool
+	
+
+interface IOverloadable inherits IBoxCodeMember
+	"""
+	Implemented by AbstractMethod and Indexer.
+	"""
+
+	pro overloadGroup as MemberOverload?
+	def cobraSourceSignature(includeShared as bool) as String
+	def cobraSourceSignatureInHtml(includeShared as bool) as String
+
+
+class BoxMember
+	is abstract, partial
+	inherits NamedNode
+	implements IBoxMember
+
+	shared
+		var _accessLevels = ['public', 'protected', 'internal', 'protected internal', 'private']
+			"""
+			The access level names are the same in both Cobra and C#.
+			"""
+
+	var _idToken as IToken
+	var _parentBox as Box
+	var _docString as String?
+	var _isNames as IList<of String>?
+	var _attribs as AttributeList
+	var _overloadGroup as MemberOverload?
+	var _testMethods as List<of TestMethod>?
+	var _matchingBaseMember as IBoxCodeMember?
+	var _sharedMethodBacking as String?
+	var _sharedMethodBackingIsAlias as bool
+	var _aliasedMethodBacking as String?
+	var _binaryName as String?
+
+	cue init(token as IToken, idToken as IToken, parentBox as Box, name as String, isNames as String*, attribs as AttributeList)
+		.init(token, idToken, parentBox, name, isNames, attribs, nil)
+
+	cue init(token as IToken, idToken as IToken, parentBox as Box, name as String, isNames as String*, attribs as AttributeList, docString as String?)
+		base.init(if(idToken.isEmpty, token, idToken), name)
+		_idToken = idToken
+		_isNames = isNames.toList
+		_attribs = attribs
+		_parentBox = parentBox
+		_docString = docString
+
+	## Properties
+
+	get attributes from _attribs
+
+	get idToken from var
+	
+	get parentBox from var
+
+	get canHaveMatchingBaseMember as bool
+		"""
+		Used by _computeMatchingBaseMembers to skip over members that cannot have base members.
+		Typically, explicit interface implementations like 'ICollection.IsSynchronized'
+		"""
+		return '.' not in _name
+
+	pro binaryName from var
+		"""
+		If this BoxMember was scanned from an assembly (usually a DLL), this property holds the assembly-based name.
+		For example, you might say "writeLine" in Cobra, but the binary name is probably "WriteLine" and *could be* "writeLine".
+		"""
+
+	pro docString from var
+
+	get isNames as String*
+		for name in _isNames, yield name
+
+	pro overloadGroup from var
+
+	pro sharedMethodBacking from var
+
+	pro sharedMethodBackingIsAlias from var
+
+	pro aliasedMethodBacking from var
+	
+	get testMethods as IList<of TestMethod>
+		if _testMethods is nil, _testMethods = List<of TestMethod>()
+		return _testMethods to !
+
+	get isAbstract as bool
+		return 'abstract' in _isNames
+
+	get isCallable as bool
+		return false
+
+	get isInternal as bool
+		return 'internal' in _isNames
+
+	get isOverride as bool
+		return 'override' in _isNames
+
+	get isProtected as bool
+		return 'protected' in _isNames
+
+	get isPrivate as bool
+		return 'private' in _isNames
+
+	get isPublic as bool
+		return 'public' in _isNames
+
+	get isReadOnly as bool
+		return 'readonly' in _isNames
+		
+	get isShared as bool
+		return 'shared' in _isNames
+
+	pro isUsed as bool
+		get
+			return base.isUsed
+		set
+			base.isUsed = value
+			.resultType.isUsed = true
+
+	get englishName as String is abstract
+
+	get defaultAccessLevel as String
+		if .isInterfaceMember and not .isExtensionMember
+			return ''
+		if .name.startsWith('__')
+			return 'private'
+		if .name.startsWith('_')
+			return if(.isStructMember, 'private', 'protected')
+		return 'public'
+
+	get hasVariParams as bool
+		"""
+		Retuns true if the class member takes variable number of arguments.
+		"""
+		return false
+
+	get hasParams as bool
+		"""
+		Returns true if the class member has one or more parameters defined.
+		"""
+		return .params.count > 0
+
+	get params as IList<of Param>
+		"""
+		Returns the list of params of this method, possibly empty.
+		Checking hasParams first is recommended since it's more efficient.
+		"""
+		return List<of Param>()
+
+	get isClassMember as bool
+		return _parentBox inherits Class or (_parentBox inherits Extension and (_parentBox to Extension).extendedBox inherits Class)
+
+	get isInterfaceMember as bool
+		return _parentBox inherits Interface or (_parentBox inherits Extension and (_parentBox to Extension).extendedBox inherits Interface)
+
+	get isStructMember as bool
+		return _parentBox inherits Struct or (_parentBox inherits Extension and (_parentBox to Extension).extendedBox inherits Struct)
+
+	get isExtensionMember as bool
+		return _parentBox inherits Extension
+
+	pro matchingBaseMember as IBoxCodeMember?
+		get
+			return _matchingBaseMember
+		set
+			_matchingBaseMember = value 
+
+	pro parentNameSpace as NameSpace?
+		get
+			return nil
+		set
+			throw NotSupportedException()
+
+	get requiresThis as bool
+		return not _name.startsWith('_')
+
+	get resultType as IType is abstract
+		"""
+		The result type of the var, method or property.
+		"""
+
+	get shouldBeVirtual as bool
+		return false
+
+
+	## Other
+
+	def cobraSourceSignature as String
+		return .idString
+
+	def cobraSourceSignatureInHtml as String
+		return .cobraSourceSignature.htmlEncode
+
+	def unNilReturnType
+		"""
+		Subclasses should override to change their "return type node" to non-nilable.
+		No need to invoke `base`.
+		This is invoked to fix up the CLR library which does not indicate, for example, that StringBuilder.toString returns String not String?
+		"""
+		pass
+
+	def mangleName(name as String) as String
+		require .compiler.curBoxMember is this
+		return name
+		
+	def mergedIntoPartialBox(newBox as Box)
+		require
+			newBox is not .parentBox
+			newBox.name == .parentBox.name
+		body
+			_parentBox = newBox
+
+	def removeIsName(name as String)
+		require name in .isNames
+		_isNames.remove(name)
+
+
+	## INamedNode
+
+	get typeForIdentifier as IType is override
+		return .resultType
+
+	get typeForReceiver as IType is override
+		return .resultType
+
+
+	## Binding
+
+	def _bindInt is override
+		base._bindInt
+		isNames = Set<of String>()
+		for name in _isNames
+			if name in isNames and not .parentBox.isFromBinaryLibrary
+				.compiler.warning(this, 'Duplicate modifier "[name]". You can remove it.')
+			isNames.add(name)
+		_isNames = List<of String>(isNames)
+		if .defaultAccessLevel.length
+			# CC: if not find level in _accessLevel where level in _isNames
+			found = false
+			for level in _accessLevels
+				if level in _isNames
+					found = true
+					break
+			if not found
+				_isNames.insert(0, .defaultAccessLevel)
+		if .shouldBeVirtual
+			found = false
+			for name in ['nonvirtual', 'virtual', 'shared', 'override', 'abstract']
+				if name in _isNames
+					found = true
+					break
+			if not found
+				_isNames.add('virtual')
+		for attrib in _attribs
+			attrib.bindInt
+		if _testMethods and _testMethods.count
+			for tm in _testMethods, tm.bindInt
+
+	def bindImp as dynamic
+		assert not .parentBox.isConstructed
+		return base.bindImp
+			
+	def _bindImp is override
+		base._bindImp
+		assert .didBindInt  # class members should have always received a bindInt first
+		assert not .parentBox.isConstructed  # not expecting to bindImp on a constructed type
+		for attrib in _attribs, attrib.bindImp
+		if _testMethods and _testMethods.count
+			for tm in _testMethods, tm.bindImp
+
+	def usesBase
+		# Needed by AbstractMethod and ProperDexer
+		if 'new' in _isNames or 'override' in _isNames, return
+		# using base implies override, but only if the method sig in the base class is the same
+		# (otherwise it's just an overload)
+		if (parentBox = .parentBox) inherits Class
+			assert parentBox.baseClass
+			# Why not use .matchingBaseMember? Because currently that's only method-to-method. Does not work for properties.
+			baseMember = parentBox.baseClass.memberForName(_name)
+			if baseMember
+				if baseMember inherits MemberOverload
+					matched = false
+					for member in baseMember.members
+						if .matchesSignature(member)
+							baseMember = member
+							matched = true
+							break
+					if not matched, return
+				if baseMember inherits IBoxCodeMember
+					if .matchesSignature(baseMember)
+						if 'nonvirtual' in baseMember.isNames
+							_isNames.add('new')
+						else
+							_isNames.add('override')
+						_isNames.remove('virtual')  # virtual is the default for properties and methods
+				else
+					throw FallThroughException(baseMember)
+
+	def matchesSignature(member as IBoxCodeMember) as bool
+		if .name <> member.name, return false
+		params, otherParams = .params, member.params
+		if params.count <> otherParams.count, return false
+		for i in params.count
+			if not _matchesForOverride(params[i].type, otherParams[i].type)
+				return false
+		return true
+
+	def _matchesForOverride(a as IType, b as IType) as bool
+		if a == b
+			return true
+		if (a inherits NilableType) <> (b inherits NilableType)
+			return a.nonNil == b.nonNil
+		return false
+
+
+	## Fields
+
+	def addMinFields is override
+		base.addMinFields
+		.addField('name', _name)
+		.addField('isNames', _isNames)
+
+	def addRefFields is override
+		base.addRefFields
+		.addField('parentBox', .parentBox)
+
+	def addSubFields is override
+		base.addSubFields
+		if _isNames.count
+			.addField('isNames', _isNames)
+		.addField('docString', _docString)
+
+
+	## Generics
+	
+	def constructedFor(box as Box, gpToType as Dictionary<of GenericParam, IType>) as BoxMember  # CC: as same
+		require .didBindInt
+		newMember = .memberwiseClone to BoxMember
+		newMember._parentBox = box
+		newMember._overloadGroup = nil
+		return newMember
+
+
+class BoxEvent
+	is partial
+	inherits BoxMember
+	
+	var _handlerType as IType?
+	var _handlerTypeProxy as ITypeProxy?
+
+	cue init(token as IToken, idToken as IToken, box as Box, name as String, isNames as String*, attribs as AttributeList, docString as String?, handlerType as ITypeProxy)
+		base.init(token, idToken, box, name, isNames, attribs, docString)
+		_handlerTypeProxy = handlerType
+
+	get englishName as String is override
+		return 'event'
+
+	get handlerType from var
+		"""
+		Returns the underlying handler type for the event.
+		"""
+	
+	get handlerTypeProxy from var
+
+	get isCallable as bool is override
+		return true
+
+	get params as IList<of Param> is override
+		assert .didBindInt
+		if _handlerType inherits MethodSig
+			return _handlerType.params
+		else if _handlerType inherits Class
+			method = _handlerType.memberForName('invoke')
+			if method inherits AbstractMethod
+				return method.params
+			else
+				.compiler.warning(this, 'Cannot locate a single invoke method of "[_handlerType.name]".')
+				return List<of Param>()			
+		else
+			if not .hasError
+				.compiler.warning(this, 'Cannot determine parameters of event "[.name]".')
+			return List<of Param>()			
+
+	get resultType as IType is override
+		return .handlerType to !
+
+	def addSubFields
+		base.addSubFields
+		.addField('handlerType', _handlerType)
+		.addField('handlerTypeProxy', _handlerTypeProxy)
+
+	def _bindInt
+		base._bindInt
+		if not _handlerType
+			_handlerType = _handlerTypeProxy.realType
+		# TODO: error check that _handlerType is a delegate
+		# _handlerType.nonNil.isDescendantOf(.compiler.delegateType)
+
+	def cobraSourceSignature as String is override
+		# ex: event Name(sender, args as EventArgs)
+		sb = StringBuilder('event [.name]')
+		# to-do: ? generic args
+		if .params.count > 0
+			sb.append('(')
+			sep = ''
+			for param in .params
+				if sep == '' and param.type.nonNil == .typeProvider.objectType
+					sb.append(param.name)
+				else
+					sb.append('[sep][param.name] as ')
+					branch param.direction
+						on Direction.In, pass
+						on Direction.InOut, sb.append('inout ')
+						on Direction.Out, sb.append('out ')
+					sb.append('[param.type.name]')
+				sep = ', '
+			sb.append(')')
+		# to-do: return type. although while this is technically possible in .NET, it's almost unheard of. after all, these are events
+		# to-do: other is names
+		return sb.toString
+
+	def cobraSourceSignatureInHtml as String is override
+		sb = StringBuilder('<span class="shl-kw-md">event</span> <span class="shl-mdn">[.name.htmlEncode]</span>')
+		# to-do: ? generic args
+		if .params.count > 0
+			sb.append('(')
+			sep = ''
+			for param in .params
+				if sep == '' and param.type.nonNil == .typeProvider.objectType
+					sb.append('<span class="shl-pn">[param.name.htmlEncode]</span>')
+				else
+					sb.append('[sep]<span class="shl-pn">[param.name.htmlEncode]</span> <span class="shl-kw">as</span> ')
+					branch param.direction
+						on Direction.In, pass
+						on Direction.InOut, sb.append('<span class="shl-kw">inout</span> ')
+						on Direction.Out, sb.append('<span class="shl-kw">out</span> ')
+					sb.append('<span class="shl-pt">[param.type.name.htmlEncode]</span>')
+				sep = ', '
+			sb.append(')')
+		# to-do: return type. although while this is technically possible in .NET, it's almost unheard of. after all, these are events
+		# to-do: other is names
+		return sb.toString
+
+
+class BoxField inherits BoxMember is abstract, partial
+	"""
+	The abstract base class for BoxConst and BoxVar.
+	"""
+	
+	var _typeNode as ITypeProxy?
+	var _type as IType?
+	var _initExpr as Expr?
+	var _isAssignedTo as bool
+
+	cue init(token as IToken, idToken as IToken, box as Box, name as String, typeNode as ITypeProxy?, isNames as String*, initExpr as Expr?, attribs as AttributeList?, docString as String)
+		base.init(token, idToken, box, name, isNames, attribs ? AttributeList(), docString)
+		_typeNode = typeNode
+		_initExpr = initExpr
+
+	def addRefFields is override
+		base.addRefFields
+		if _type, .addField('type', _type)
+		else, .addField('typeNode', _typeNode)
+
+	def addSubFields is override
+		base.addSubFields
+		.addField('initExpr', _initExpr)
+
+	get endToken as IToken
+		if _initExpr, return _initExpr.endToken
+		else if _typeNode, return _typeNode.endToken
+		else, return base.endToken
+
+	pro isAssignedTo from var
+
+	get requiresDotPrefix as bool
+		return not _name.startsWith('_')
+		
+	get resultType as IType is override
+		"""
+		The result type of the var, method or property.
+		"""
+		t = .type
+		if t, return t
+		else, throw FallThroughException('_type is nil. this=[this]')
+
+	pro type as IType?
+		get
+			return _type
+		set
+			assert false, 'Cannot set the type of a box field.'
+
+	get initExpr from var		
+
+	def _bindInt is override
+		base._bindInt
+		assert _typeNode or _initExpr
+		if _type is nil and _typeNode
+			_type = _typeNode.realType
+		if _initExpr
+			_initExpr.bindImp  # that's bindImp intentionally
+			if _type is nil
+				_type = _initExpr.type
+			else if not _initExpr.canBeAssignedTo(_type to !)
+				.throwError('Incompatible types. Cannot assign value of type [_initExpr.type.name] on the right to [_type.name] on the left.')
+		_checkForBaseDuplicate
+	
+	def _checkForBaseDuplicate
+		if not .parentBox.isFromBinaryLibrary and .parentBox.baseClass and .parentBox.baseClass.memberForName(.name)
+			ancestor = (.parentBox.baseClass.memberForName(.name) to IBoxMember).parentBox
+			.recordError('Cannot declare a [.englishName] named "[.name]" because an inherited member with that name already exists in "[ancestor.name]".')
+
+	def constructedFor(box as Box, gpToType as Dictionary<of GenericParam, IType>) as BoxMember  # CC: as same
+		assert .type
+		newMember = base.constructedFor(box, gpToType) to BoxField
+		assert newMember._type
+		newMember._type = newMember._type.secondaryConstructedTypeFor(box, gpToType)
+		return newMember
+
+
+class BoxConst
+	is partial
+	inherits BoxField
+	"""
+	A constant such as:
+		const PI = 3.1415926535897931
+	
+	In practice, when developing libraries, a read-only var is more practical than a constant,
+	because if you update/correct its value, the programs that depend on it will see the update.
+	Constants, on the other hand, are inlined in code and can only be updated in programs by
+	recompiling against a newer library.
+	
+	Also, in practice, properties may be more practical than constants or read-only variables.
+	Their implementation can be revamped later to retrieve values from a config file, database,
+	test harness, etc.
+	"""		
+
+	cue init(token as IToken, idToken as IToken, box as Box, name as String, typeNode as ITypeProxy?, isNames as String*, initExpr as Expr?, attribs as AttributeList?, docString as String)
+		base.init(token, idToken, box, name, typeNode, isNames, initExpr, attribs, docString)
+
+	get isShared as bool is override
+		return true
+
+	get englishName as String is override
+		return 'constant member'
+
+	def _bindInt is override
+		base._bindInt
+		if not _initExpr and not .parentBox.isFromBinaryLibrary
+			.throwError('A constant must be explicitly initialized on declaration')
+
+	def cobraSourceSignature as String is override
+		sb = StringBuilder('const [.name]')
+		if false
+			# to-do: not working
+			if .initExpr inherits SharpExpr, init = (.initExpr to SharpExpr).sharpSource
+			else if .initExpr, init = .initExpr.toCobraSource
+			else, init = '(unknown)'
+			if .initExpr, sb.append(' = ' + init)
+		else
+			sb.append(' = ...')
+		# to-do: other is names
+		return sb.toString
+
+	def cobraSourceSignatureInHtml as String is override
+		sb = StringBuilder('<span class="shl-kw-md">const</span> <span class="shl-mdn">[.name.htmlEncode]</span>')
+		if false
+			if .initExpr inherits SharpExpr, init = (.initExpr to SharpExpr).sharpSource.htmlEncode
+			else if .initExpr, init = .initExpr.toCobraSource.htmlEncode
+			else, init = '(unknown)'
+			if .initExpr, sb.append(' = ' + init)
+		else
+			sb.append(' = ...')
+		# to-do: other is names
+		return sb.toString
+
+
+class BoxVar
+	is partial
+	inherits BoxField
+	implements IVar
+	"""
+	A BoxVar is a variable declared for a box, whether instance or shared. For example:
+		var _x as int
+		var _y as int
+		var _name = ''
+		var _nextSerialNum as int is shared
+
+	Classes and structs can have vars, but interfaces cannot.
+	"""
+
+	var _ifInheritsStack as Stack<of IType>
+
+	cue init(token as IToken, idToken as IToken, box as Box, name as String, typeNode as ITypeProxy?, isNames as String*, initExpr as Expr?, attribs as AttributeList?, docString as String)
+		base.init(token, idToken, box, name, typeNode, isNames, initExpr, attribs, docString)
+		_ifInheritsStack = Stack<of IType>()
+		_useBackEndNameStack = Stack<of String>()  # for if-inherits
+		_useBackEndNameStack.push(name)
+
+	get englishName as String is override
+		return 'variable member'
+
+	pro ifInheritsStack from var
+
+	def attemptAssignmentOf(type as IType) as bool
+		# TODO: dup'ed with AbstractLocalVar
+		if _ifInheritsStack.count == 0
+			return false
+		stack = Stack<of IType>(Stack<of IType>(_ifInheritsStack))
+		assert stack.peek == _ifInheritsStack.peek
+		count = 0
+		post while stack.count and not type.isAssignableTo(stack.peek)
+			stack.pop
+			count += 1
+		if count or type.isAssignableTo(_type to !)
+			_ifInheritsStack = stack
+			# tell each IfStmt not to pop the if-inherits stack since the assignment did so
+			for node in .compiler.nodeStack
+				if node inherits IfStmt
+					if node.ifInheritsVar is this
+						node.doNotPopIfInheritsStack
+						count -= 1
+						if count == 0, break						
+			return true
+		else
+			return false
+
+	def setInitExpr(initExpr as Expr) as bool
+		""" Used in property declaration when providing an initial value for an existing backing var. """
+		if _initExpr, return false
+		_initExpr = initExpr
+		return true	
+
+	## INamedNode
+
+	get typeForReceiver as IType is override
+		return if(_ifInheritsStack.count, _ifInheritsStack.peek, .resultType)
+
+	## IVar
+
+	pro type as IType? is override
+		get
+			return if(_ifInheritsStack.count, _ifInheritsStack.peek, _type)
+		set
+			assert false, 'Cannot set the type of a ClassVar.'
+
+
+interface HasAddStmt
+	def addStmt(stmt as Stmt)
+
+
+class AnonymousMethod
+	is partial
+	inherits AbstractMethod
+	
+	cue init(token as IToken, parentMethod as AbstractMethod, paramsList as List<of Param>, returnTypeNode as ITypeProxy?, isNames as String*)
+		base.init(token, token, parentMethod.parentBox, parentMethod, '(anonymous method)', paramsList, isNames, AttributeList(), '')
+		_name = '(anonymous method [.serialNum])'
+		_returnTypeNode = returnTypeNode
+		for param in .params, param.isAnonymousParam = true
+
+	get englishName as String is override
+		return 'anonymous method'
+
+	get hasReturnStmt as bool is override
+		# the second boolean term is to prevent an extra error in _bindImp for lambdas,
+		# although it's not clear to me why this extra guard is needed
+		return base.hasReturnStmt or (_stmts.count > 0 and _stmts[0] inherits ReturnStmt)
+		
+	get hasVariArgs as bool
+		return false
+
+	get isCallable as bool is override
+		return true
+
+	get isMethod as bool is override
+		return true
+
+	get shouldBeVirtual as bool is override
+		return false
+
+	def lambdaReturnType as IType
+		""" This is a service method for LambdaExpr. """
+		require .didBindInt and .didBindImp
+		stmt = _stmts[0]
+		if stmt inherits ReturnStmt
+			return stmt.expr.type to !
+		else
+			throw FallThroughException(stmt)
+
+	def _bindInt is override
+		base._bindInt
+		if _returnTypeNode is nil
+			_returnType = .compiler.passThroughType  # TODO: infer return type from return statement like C# does
+
+	def _bindImp is override
+		base._bindImp
+		numErrors = .compiler.errors.count
+		base._bindImp
+		if .compiler.errors.count == numErrors and _
+			_returnType not in [.compiler.voidType to IType, .compiler.passThroughType to IType] and _
+			not .hasReturnStmt and not .hasYieldStmt and not .hasThrowStmt and _
+			.bodyExclusion is nil
+			# then
+			.throwError('Missing return statement for method "[_name]" which returns [_returnType.name].')
+		hasYield = false
+		for stmt in _stmts
+			if stmt inherits YieldStmt
+				hasYield = true
+				break
+		if hasYield, .throwError('Cannot yield inside an anonymous method.')
+
+
+class AbstractMethod
+	is abstract, partial
+	inherits BoxMember
+	implements HasAddStmt, IOverloadable
+	"""
+	The abstract ancestor class for
+		Initializer
+		Method
+		PropertyXetter
+
+	But not for Property (which has two code blocks "get" and "set"),
+	or other class decls like variables.
+
+	Subclasses must set _params.
+	"""
+
+	var _parentMethod as AbstractMethod?
+	var _returnTypeNode as ITypeProxy?
+	var _returnType as IType?
+	var _requirePart as RequirePart?
+	var _ensurePart as EnsurePart?
+	var _oldExprs as List<of OldExpr>
+	var _params as IList<of Param>
+	var _locals as List<of LocalVar>
+	var _stmts as List<of Stmt>
+	var _hasReturnStmt as bool
+	var _hasThrowStmt as bool
+	var _hasYieldStmt as bool
+	var _curStmtIndex as int  # to implement .replaceChild
+	var _isCompilerGenerated as bool
+
+	cue init(token as IToken, idToken as IToken, box as Box, parentMethod as AbstractMethod?, name as String, paramsList as IList<of Param>, isNames as String*, attribs as AttributeList, docString as String)
+		base.init(token, idToken, box, name, isNames, attribs, docString)
+		_parentMethod = parentMethod
+		_params = paramsList.clone
+		_oldExprs = List<of OldExpr>()
+		_locals = List<of LocalVar>()
+		_stmts = List<of Stmt>()
+
+	get endToken as IToken
+		if _stmts.count, return _stmts.last.endToken
+		else if _ensurePart, return _ensurePart.endToken
+		else if _requirePart, return _requirePart.endToken
+		else if _returnTypeNode, return _returnTypeNode.endToken
+		else, return base.endToken
+
+	get params as IList<of Param> is override
+		return _params
+
+	get locals from var
+
+	get isCallable as bool is override
+		return true
+
+	pro hasReturnStmt from var
+
+	pro hasThrowStmt from var
+
+	pro hasYieldStmt from var
+
+	pro isCompilerGenerated from var
+
+	def bodyExclusion as String?
+		ensure result in [nil, 'abstract', 'interface', 'extern box', 'dll import']
+		if 'abstract' in .isNames, return 'abstract'
+		if .parentBox inherits Interface and not .parentBox inherits Mixin, return 'interface'
+		if .parentBox.isExtern, return 'extern box'
+		for attrib in .attributes, if attrib.name in ['DllImport', 'DllImportAttribute'], return 'dll import'
+		return nil
+		
+	def addStmt(stmt as Stmt)
+		_stmts.add(stmt)
+
+	pro requirePart from var
+
+	pro ensurePart from var
+
+	get parentMethod from var
+		"""
+		Anonymous methods have a .parentMethod.
+		In the future, there may be nested method declarations which will also then have a .parentMethod.
+		"""
+
+	get resultType as IType is override
+		or require
+			.didBindInt
+			_returnType
+		body
+			return _returnType to !
+
+	get statements from _stmts
+
+	def findLocal(name as String) as AbstractLocalVar?
+		# TODO: should this use a dictionary lookup?
+		for local in _locals, if local.name == name, return local
+		for param in _params, if param.name == name, return param.local
+		if .parentMethod, return .parentMethod.findLocal(name)
+		else, return nil
+
+	def findLocalCI(name as String) as AbstractLocalVar?
+		name = name.toLower
+		# TODO: should this use a dictionary lookup?
+		for local in _locals, if local.name.toLower == name, return local
+		for param in _params, if param.name.toLower == name, return param.local
+		if .parentMethod, return .parentMethod.findLocalCI(name)
+		else, return nil
+
+	def addLocal(local as LocalVar)
+		require
+			.findLocal(local.name) is nil
+		body
+			other = .findLocalCI(local.name)
+			if other, .throwError('Parameters and locals must vary by more than just their case. Change "[local.name]" or "[other.name]" to match, or rename one of them to something different.')
+			local.isTracked = true
+			_locals.add(local)
+	
+	def replaceLocal(local as LocalVar)
+		"""
+		A utility method for EnsurePart to slip in the `result`.
+		"""
+		require
+			.findLocal(local.name)
+		body
+			_locals.remove(.findLocal(local.name) to LocalVar)
+			_locals.add(local)
+
+	def removeLocal(name as String)
+		require
+			name.length
+			.findLocal(name)
+		body
+			for i = 0 .. _locals.count
+				if _locals[i].name==name
+					_locals.removeAt(i)
+					break
+
+	def addOldExpr(oldExpr as OldExpr)
+		_oldExprs.add(oldExpr)
+		oldExpr.sharpVarName = '_lh_old_' + _oldExprs.count.toString
+
+	get oldExprs from var
+		"""
+		Use .addOldExpr(e) instead of method.oldExprs.add().
+		"""
+
+	def changeToPublic
+		ensure
+			.isPublic
+			not .isInternal and not .isProtected and not .isPrivate
+			.isShared == old .isShared
+		body
+			for name in ['internal', 'private', 'protected'], _isNames.remove(name)
+			if 'public' not in _isNames, _isNames.add('public')
+
+	def changeToNonVirtual
+		ensure
+			'virtual' not in .isNames
+			'nonvirtual' in .isNames
+			.isShared == old .isShared
+		body
+			_isNames.remove('virtual')
+			if 'nonvirtual' not in _isNames, _isNames.add('nonvirtual')
+
+	def unNilReturnType is override
+		if _returnType
+			if _returnType inherits NilableType
+				_returnType = _returnType.nonNil
+		else if _returnTypeNode inherits NilableTypeProxy
+			_returnTypeNode = _returnTypeNode.innerTypeProxy
+		
+	def addRefFields is override
+		base.addRefFields
+		.addField('returnTypeNode', _returnTypeNode)
+		.addField('returnType', _returnType)
+
+	def addSubFields is override
+		base.addSubFields
+		.addField('params', _params)
+		.addField('requirePart', _requirePart)
+		.addField('ensurePart', _ensurePart)
+		.addField('locals', _locals)
+		.addField('stmts', _stmts)
+
+	def cobraSourceSignature as String is override
+		return .cobraSourceSignature(true)
+
+	def cobraSourceSignature(includeShared as bool) as String
+		sb = _cobraSourceSignatureStarter
+		sb.append(_cobraSourceSignatureGenericArgs)
+		if .params.count > 0
+			sb.append('(')
+			sep = ''
+			for param in .params
+				sb.append('[sep][param.name] as ')
+				branch param.direction
+					on Direction.In, pass
+					on Direction.InOut, sb.append('inout ')
+					on Direction.Out, sb.append('out ')
+				sb.append('[param.type.name]')
+				sep = ', '
+			sb.append(')')
+		if not .resultType inherits VoidType
+			sb.append(' as [.resultType.name]')
+			if includeShared and .isShared
+				# to-do: other is names
+				sb.append(' is shared')
+		return sb.toString
+
+	def _cobraSourceSignatureStarter as StringBuilder
+		return StringBuilder('def [.name]')
+
+	def _cobraSourceSignatureGenericArgs as String
+		return ''
+
+	def cobraSourceSignatureInHtml as String is override
+		return .cobraSourceSignatureInHtml(true)
+
+	def cobraSourceSignatureInHtml(includeShared as bool) as String
+		sb = _cobraSourceSignatureStarterInHtml
+		sb.append(_cobraSourceSignatureGenericArgsInHtml)
+		if .params.count > 0
+			sb.append('(')
+			sep = ''
+			for param in .params
+				sb.append('[sep]<span class="shl-pn">[param.name.htmlEncode]</span> <span class="shl-kw">as</span> ')
+				branch param.direction
+					on Direction.In, pass
+					on Direction.InOut, sb.append('<span class="shl-kw">inout</span> ')
+					on Direction.Out, sb.append('<span class="shl-kw">out</span> ')
+				sb.append('<span class="shl-pt">[param.type.name.htmlEncode]</span>')
+				sep = ', '
+			sb.append(')')
+		if not .resultType inherits VoidType
+			sb.append(' <span class="shl-kw">as</span> <span class="shl-rt">[.resultType.name.htmlEncode]</span>')
+			if includeShared and .isShared
+				# to-do: other is names
+				sb.append(' <span class="shl-kw">is shared</span>')
+		return sb.toString
+
+	def _cobraSourceSignatureStarterInHtml as StringBuilder
+		return StringBuilder('<span class="shl-kw-md">def</span> <span class="shl-mdn">[.name.htmlEncode]</span>')
+
+	def _cobraSourceSignatureGenericArgsInHtml as String
+		return ''
+
+	get canHaveDetailedStackTrace as bool
+		return .parentBox.canHaveDetailedStackTrace and not .hasYieldStmt
+
+	get hasVariParams as bool is override
+		for param in _params, if param.type inherits VariType, return true
+		return false
+
+	get willRequire as bool
+		# in the future, this will also depend on a command line option to include/exclude preconditions
+		# classes that are sensitive with respect to the DST skip on contracts
+		return .canHaveDetailedStackTrace
+
+	get willEnsure as bool
+		# in the future, this will also depend on a command line option to include/exclude preconditions
+		return .canHaveDetailedStackTrace
+
+	def replaceChild(find as INode, replace as INode) as bool
+		if _curStmtIndex < _stmts.count and _stmts[_curStmtIndex] is find
+			_stmts[_curStmtIndex] = replace to Stmt
+			return true
+		else
+			return base.replaceChild(find, replace)
+
+	def _stackPush
+		base._stackPush
+		.compiler.codeMemberStack.push(this)
+
+	def _stackPop
+		base._stackPop
+		.compiler.codeMemberStack.pop
+		
+	def _bindInt is override
+		assert .compiler.codeMemberStack.peek is this
+		base._bindInt
+		assert .parentBox.didUnNilReturnTypes
+		for param in _params
+			try
+				param.bindInt
+			catch ne as NodeException
+				.compiler.recordError(ne)
+		if _returnType is nil
+			if _returnTypeNode, _returnType = _returnTypeNode.realType
+			else, _returnType = .compiler.voidType
+			assert _returnType, _returnTypeNode
+		if _requirePart is nil and .willRequire, _requirePart = RequirePart(this)
+		if _requirePart, _requirePart.bindInt
+		if _ensurePart is nil and .willEnsure, _ensurePart = EnsurePart(this)
+		if _ensurePart, _ensurePart.bindInt
+
+	def _bindImp is override
+		assert .compiler.codeMemberStack.peek is this
+		base._bindImp
+		params = .params
+		if .matchingBaseMember
+			matchingBaseMember = .matchingBaseMember
+			if 'override' in .isNames and 'private' in matchingBaseMember.isNames
+				.recordError('Cannot override the base member which is declared "private".')
+			for i in params.count
+				param = params[i]
+				if matchingBaseMember.params[i].type inherits NilableType and not param.type inherits NilableType
+					.recordError('Cannot make param "[param.name]" non-nil because the base method declares it is nilable. Change "[param.name]" to "[matchingBaseMember.params[i].type.name]", or change the base method.')
+		for param in params
+			param.bindImp
+		for local in _locals
+			local.bindImp
+		if _requirePart
+			_requirePart.bindImp
+		if _ensurePart and _returnType and _returnType is not .compiler.voidType
+			_backEndResultVarName = '_lh_result'
+		else
+			_backEndResultVarName = ''
+		_curStmtIndex = 0
+		for stmt in _stmts.toArray
+			try
+				stmt.bindImp
+				stmt.afterStatementBindImp  # to let expressions know when they are used as statements
+			catch ne as NodeException
+				.compiler.recordError(ne)
+			_curStmtIndex += 1
+		for param in _params, assert param.ifInheritsStack.count == 0
+		if _ensurePart, _ensurePart.bindImp
+		if _requirePart, _requirePart.checkConnectToken
+		if _ensurePart, _ensurePart.checkConnectToken
+		.checkForUnmarkedOverrideOrNew  # have to do this after statements bindImp since using base can add `override`
+		.checkForUnusedParams
+		.checkForUnusedVariables
+
+	var _didComputeMatchingBaseMember = true
+	
+	get didComputeMatchingBaseMember from var
+
+	def _computeMatchingBaseMembers
+		and ensure .matchingBaseMember is not this
+		base._computeMatchingBaseMembers
+		if not .canHaveMatchingBaseMember, return
+		_didComputeMatchingBaseMember = true
+		if _matchingBaseMember, return
+		if not .canHaveMatchingBaseMember, return
+		if (parentBox = .parentBox) inherits Class
+			if parentBox.baseClass
+				baseMember = parentBox.baseClass.memberForName(_name)
+				if baseMember is nil
+					pass
+				else if baseMember inherits AbstractMethod
+					if .matchesSignature(baseMember)
+						_matchingBaseMember = baseMember
+				else if baseMember inherits MemberOverload
+					if baseMember.members[0] inherits AbstractMethod
+						for member in baseMember.members
+							if .matchesSignature(member)
+								_matchingBaseMember = member
+					else
+						cannotRedeclare = true
+				else
+					cannotRedeclare = true
+				if cannotRedeclare
+					.recordError('Cannot declare a [.englishName] named "[.name]" because the base member "[.name]" is a [baseMember.englishName].')
+				if _matchingBaseMember and _matchingBaseMember.parentBox inherits Interface
+					# not really a base member in the "base class" sense of the word.
+					# would not require marking as "is override" for example
+					_matchingBaseMember = nil
+
+	def checkForUnmarkedOverrideOrNew
+		require .didComputeMatchingBaseMember
+		if 'new' not in .isNames and 'override' not in .isNames and _matchingBaseMember and not _matchingBaseMember.isExtensionMember
+			.throwError('Member "[_name]" also exists in the base class. You must specify "is override" or "is new", or change the name.')
+
+	def checkForUnusedParams
+		pass
+		/#
+		not yet. see http://cobra-language.com/trac/cobra/ticket/279
+		if not .isAbstract and .statements.count
+			for param in _params
+				if not param.isUsed and not param.isOut and not param.isDeclaredAsUnused
+					.compiler.warning(param, 'The value of parameter "[param.name]" is never used in [.parentBox.name].[.name].')
+		#/
+
+	def checkForUnusedVariables
+		for local in _locals
+			if not local.isUsed
+				.compiler.warning(local, 'The value of variable "[local.name]" is never used.')
+
+
+	## Generics
+
+	def constructedFor(box as Box, gpToType as Dictionary<of GenericParam, IType>) as BoxMember  # CC: as same
+		newMember = base.constructedFor(box, gpToType) to AbstractMethod  # CC: this = base. ...
+		assert newMember._returnType
+		newMember._returnType = newMember._returnType.secondaryConstructedTypeFor(box, gpToType)
+		newMember._params = for p in _params get p.constructedFor(box, gpToType)
+		return newMember
+
+
+class Initializer inherits AbstractMethod is partial
+
+	cue init(token as IToken, idToken as IToken, box as Box, paramsList as IList<of Param>, isNames as String*, attribs as AttributeList, docString as String)
+		base.init(token, idToken, box, nil, 'cue.init', paramsList, isNames, attribs, docString)
+		_isNames = isNames.toList
+		_stmts = List<of Stmt>()
+
+	get englishName as String is override
+		return 'initializer'
+
+	get hasVariArgs as bool
+		assert false, 'TODO: complete Initializer.hasVariArgs'
+		return false
+
+	get isCallable as bool is override
+		return true
+
+	get isMethod as bool is override
+		return true  # because this is needed for "base.init" without ()s
+
+	def usesBase is override
+		# initializers cannot be virtual and don't require "is new"
+		pass
+
+	def checkForUnmarkedOverrideOrNew is override
+		# initializers don't say override or new
+		pass
+
+	get lastToken as IToken
+		if _stmts.count
+			return _stmts[_stmts.count-1].lastToken  # CC: use .last
+		else
+			return .token
+
+	def mangleName(name as String) as String is override
+		if name == 'init', return 'cue.init'
+		else, return name
+
+	def _cobraSourceSignatureStarter as StringBuilder is override
+		return StringBuilder('cue init')
+
+	def _cobraSourceSignatureStarterInHtml as StringBuilder is override
+		return StringBuilder('<span class="shl-kw-md">cue</span> <span class="shl-mdn">init</span>')
+
+	def _bindImp
+		if .canHaveDetailedStackTrace  # no extra checks for classes that are sensitive with respect to the DST
+			# add asserts at the end for non-nilable class vars
+			if .compiler.options.boolValue('include-nil-checks')
+				token = .lastToken.copy
+				token.incLineNum
+				stmts = List<of Stmt>()
+				for decl in .parentBox.declsInOrder
+					if decl inherits BoxVar
+						assert decl.type
+						if not decl.type inherits NilableType and decl.type.isReference and not decl.isShared
+							if decl.name.startsWith('_')
+								expr = IdentifierExpr(token, decl) to Expr
+							else
+								expr = DotExpr(token, 'DOT', ThisLit(token, isImplicit=true), MemberExpr(token, decl.name), isImplicit=true) to Expr
+							stmts.add(AssertStmt(token, IsNotNilExpr(token, expr), nil))
+				if stmts.count
+					cond = BinaryOpExpr.make( _
+						.lastToken.copy('DOT', '.'), 'DOT', _
+						IdentifierExpr(.lastToken.copy('ID', 'CobraCore')), _
+						MemberExpr(.lastToken.copy('ID', '_willCheckNil')))
+					block = BlockStmt(token, stmts)
+					ifStmt = IfStmt(token, cond, block, nil)
+					.addStmt(ifStmt)
+
+		base._bindImp
+
+		first = true
+		for stmt in _stmts
+			isBase = isThisInit = false
+			if stmt inherits DotExpr
+				if stmt.left inherits BaseLit
+					isBase = true
+				else if stmt.left inherits ThisLit and ((stmt.right inherits MemberExpr and (stmt.right to MemberExpr).name == 'init') or (stmt.right inherits CallExpr and (stmt.right to CallExpr).name == 'init'))  # CC: axe casts
+					isThisInit = true
+			if first
+				if .isClassMember and not isBase and not isThisInit and not .isShared
+					# structs cannot call base constructors
+					# static initializers cannot call base constructors
+					.compiler.warning(stmt, 'The first statement of an "init" cue should be a call to another "init" in this class or the base class.')
+			else
+				if isBase
+					# TODO: after switching to byte code gen, it would be nice to relax this a bit, by say allowing statements that use args and locals, but can't set class state by, for example, setting class vars or calling members
+					stmt.recordError('The base initializer can only be invoked in the first statement.')
+				else if isThisInit
+					stmt.recordError('Another initializer can only be invoked in the first statement.')
+			first = false
+				
+
+class Method inherits AbstractMethod is partial
+
+	var _implementsTypeNode as ITypeProxy?
+	var _implementsType as IType?
+
+	cue init(token as IToken, idToken as IToken, box as Box, name as String, paramsList as IList<of Param>, returnTypeNode as ITypeProxy, implementsTypeNode as ITypeProxy?, isNames as String*, attribs as AttributeList, docString as String)
+		.init(token, idToken, box, name, List<of IType>(), paramsList, returnTypeNode, implementsTypeNode, isNames, attribs, docString)
+
+	cue init(token as IToken, idToken as IToken, box as Box, name as String, genericParams as List<of IType>, paramsList as IList<of Param>, returnTypeNode as ITypeProxy, implementsTypeNode as ITypeProxy?, isNames as String*, attribs as AttributeList, docString as String)
+		base.init(token, idToken, box, nil, name, paramsList, isNames, attribs, docString)
+		_genericParams = genericParams
+		for gp in _genericParams, if gp inherits GenericParam, gp.parentDefinition = this
+		_returnTypeNode = returnTypeNode
+		_implementsTypeNode = implementsTypeNode
+		if 'virtual' in _isNames and _implementsTypeNode
+			_isNames.remove('virtual')
+		_stmts = List<of Stmt>()
+
+	get endToken as IToken
+		endToken = base.endToken
+		if _implementsTypeNode and _implementsType.endToken.lineNum > endToken.lineNum
+			endToken = _implementsTypeNode.endToken
+		return endToken
+
+	get englishName as String is override
+		return 'method'
+
+	get isCallable as bool is override
+		return true
+
+	pro isMain from var as bool
+
+	pro hasMainParams from var as bool
+		""" Flag that this method needs main entry point params inserted. Used by BackEnd codeGen"""
+	
+	get isMethod as bool is override
+		return true
+
+	get implementsType from var
+
+	get shouldBeVirtual as bool is override
+		return .isClassMember and not .isPrivate and not _implementsTypeNode and not _implementsType
+
+	def addRefFields is override
+		base.addRefFields
+		.addField('implementsType', _implementsType)
+
+	def addSubFields is override
+		base.addSubFields
+		.addField('genericParams', _genericParams)
+		if _implementsTypeNode
+			.addField('implementsTypeNode', _implementsTypeNode)
+
+	get defaultAccessLevel as String is override
+		dal = base.defaultAccessLevel
+		if dal.length and not _implementsType and not _implementsTypeNode
+			return dal
+		else
+			return ''
+
+
+	## Generics
+
+	var _genericParams as List<of IType>
+	var _genericDef as Method?  # non-nil for a method constructed from a generic method
+	var _constructions as Dictionary<of String, Method>?
+
+	get genericDef from var
+
+	get genericParams from var
+
+	get isConstructed as bool
+		return _genericDef is not nil
+
+	get isGenericDef as bool
+		"""
+		Returns true if this type is a definition of a generic type, and
+		therefore capable of making subsequent generic types via the
+		`constructedTypeFor` method. A generic type will have generic
+		parameters which are all GenericParam (as opposed to other types
+		such as `int` or a given class).
+		"""
+		# TODO: make this more efficient, maybe by computing in the initializer
+		if .genericDef or .genericParams.count == 0
+			return false
+		else if .genericParams.count
+			for param in .genericParams
+				if not param inherits GenericParam
+					return false
+			return true
+		else
+			return false
+
+	get containsGenericParameters as bool
+		for param in .genericParams
+			if param inherits GenericParam
+				return true
+			if param inherits Box  # CC: and <next if condition>
+				if param.containsGenericParameters
+					return true
+		return false
+
+	def constructedMethodWith(typeArgs as List<of IType>) as Method
+		"""
+		This is for methods that are generic themselves due to having their own generic parameters.
+		For methods that simply belong to a generic class, see .constructedFor.
+		
+		TODO: Consider the case of a method that implements a specific interface. Can that have generic parameters?
+		"""
+		require
+			.didBindInt
+			.isGenericDef
+			.containsGenericParameters
+			typeArgs.count == .genericParams.count
+		ensure
+			typeArgs <> .genericParams implies this is not result
+			result.genericParams == typeArgs
+		body
+			if typeArgs == _genericParams
+				return this
+
+			# the cache of constructed types has to come from the root generic type def or you end up with duplicate
+			# constructed types which is not only wasteful, but causes problems with inheritance tests
+			genericDef = this
+			while genericDef.genericDef
+				genericDef = genericDef.genericDef to !
+
+			if genericDef._constructions is nil
+				genericDef._constructions = Dictionary<of String, Method>()
+
+			key = TypeUtil.keyForTypeArgs(typeArgs)
+
+			if genericDef._constructions.containsKey(key)
+				return genericDef._constructions[key]
+
+			c = .memberwiseClone to Method
+			assert c is not this
+			genericDef._constructions[key] = c
+			c._genericDef = this
+			c._constructions = nil  # only the generic def tracks the constructions			
+			c._genericParams = List<of IType>(typeArgs)
+			c._params = List<of Param>()
+			typeForParam = TypeUtil.dictionaryOf(.genericParams, typeArgs)
+			for param in .params
+				c._params.add(param.constructedFor(.parentBox, typeForParam))
+			c._returnType = c._returnType.secondaryConstructedTypeFor(.parentBox, typeForParam)
+			c.bindInt
+			return c
+
+	def genericParamForName(name as String) as IType?
+		# idea: return find param in _genericParams where param.name == name
+		for param in _genericParams, if param.name == name, return param
+		return nil
+
+	def _cobraSourceSignatureGenericArgs as String is override
+		if .genericParams.count > 0
+			sb = StringBuilder('<of ')
+			sep = ''
+			for gp in .genericParams
+				sb.append('[sep][gp.name]')
+				sep = ', '
+			sb.append('>')
+			return sb.toString
+		return ''
+
+	def _cobraSourceSignatureGenericArgsInHtml as String is override
+		if .genericParams.count > 0
+			sb = StringBuilder('<span class="shl-kw">&lt;of</span> ')
+			sep = ''
+			for gp in .genericParams
+				sb.append('[sep]<span class="shl-gp">[gp.name.htmlEncode]</span>')
+				sep = ', '
+			sb.append('>')
+			return sb.toString
+		return ''
+
+
+	## Binding
+
+	def _bindInt is override
+		assert .compiler.codeMemberStack.peek is this
+		for param in _genericParams, param.bindInt
+		base._bindInt
+		if .name == '__init__', .compiler.warning(this, 'Initializers are named "init" with no surrounding underscores.')
+		if not 'extern' in .isNames and .bodyExclusion == 'dll import', _isNames.add('extern')
+
+	def _bindImp is override
+		numErrors = .compiler.errors.count
+		base._bindImp
+		for param in _genericParams
+			param.bindImp
+		if _implementsTypeNode
+			_implementsType = _implementsTypeNode.realType
+			# TODO: make sure the type is among the interfaces of the box
+		if .compiler.errors.count == numErrors and _
+			_returnType not in [.compiler.voidType to IType, .compiler.passThroughType to IType] and _
+			not .hasReturnStmt and not .hasYieldStmt and not .hasThrowStmt and _
+			.bodyExclusion is nil
+			# nil
+			.throwError('Missing return statement for method "[_name]" which returns [_returnType.name].')
+		# check for `return` and `yield` in the same method
+		if .resultType is not .compiler.voidType
+			returnStmts = List<of Stmt>()
+			hasYield = false
+			for stmt in _stmts
+				if stmt inherits ReturnStmt
+					returnStmts.add(stmt)
+				else if stmt inherits YieldStmt
+					hasYield = true
+			if hasYield and returnStmts.count
+				for stmt in returnStmts
+					stmt.recordError('Cannot return a value from an iterator. Use the yield return statement to return a value, or yield break to end the iteration.')
+
+
+class ProperDexer
+	is abstract, partial
+	inherits BoxMember
+	"""
+	The abstract base class for Property and Indexer.
+
+	This captures some of the common interface between them--whatever happens to be needed.
+
+	Why not do an IProperDexer interface? Because it wouldn't be compatible with a BoxMember
+	unless we also defined an IBoxMember.
+	"""
+
+	var _getPart as ProperDexerXetter?
+	var _setPart as ProperDexerXetter?
+	var _coverVar as BoxVar?
+	var _coverAccess as String?
+	var _returnType as IType?
+	var _returnTypeNode as ITypeProxy?
+
+	cue init(token as IToken, idToken as IToken, box as Box, name as String, isNames as String*, attribs as AttributeList, docString as String?)
+		base.init(token, idToken, box, name, isNames, attribs, docString)
+
+	cue init(token as IToken, idToken as IToken, box as Box, name as String, returnTypeOrNode as INode, isNames as String*, attribs as AttributeList, docString as String)
+		.init(token, idToken, box, name, isNames, attribs, docString)
+		if returnTypeOrNode inherits IType
+			_returnType = returnTypeOrNode
+			_returnTypeNode = nil
+		else if returnTypeOrNode inherits ITypeProxy
+			_returnType = nil
+			_returnTypeNode = returnTypeOrNode
+		else
+			throw FallThroughException(returnTypeOrNode)
+
+	def makeGetPart(token as IToken) as AbstractMethod is abstract
+		require .getPart is nil
+		ensure .getPart
+
+	def makeSetPart(token as IToken) as AbstractMethod is abstract
+		require .setPart is nil
+		ensure .setPart
+
+	def addRefFields is override
+		base.addRefFields
+		if _coverVar, .addField('coverVar', _coverVar)
+		if _returnType, .addField('returnType', _returnType)
+		else, .addField('returnTypeNode', _returnTypeNode)
+
+	def addSubFields is override
+		base.addSubFields
+		if _getPart, .addField('getPart', _getPart)
+		if _setPart, .addField('setPart', _setPart)
+
+	get endToken as IToken
+		endToken = base.endToken
+		if _getPart and _getPart.endToken.lineNum > endToken.lineNum, endToken = _getPart.endToken
+		if _setPart and _setPart.endToken.lineNum > endToken.lineNum, endToken = _setPart.endToken
+		if _coverVar and _coverVar.endToken.lineNum > endToken.lineNum, endToken = _coverVar.endToken
+		if _returnTypeNode and _returnTypeNode.endToken.lineNum > endToken.lineNum
+			endToken = _returnTypeNode.endToken
+		return endToken
+
+	get returnType from var
+
+	get returnTypeNode from var
+
+	get resultType as IType is override
+		if not .didBindInt, .bindInt  # to call a method from a var/const initializer
+		assert .didBindInt
+		assert _returnType
+		return _returnType to !
+
+	get getPart from var
+
+	get setPart from var
+
+	get shouldBeVirtual as bool is override
+		return .isClassMember and not .isPrivate  # TODO: and not _implementsTypeNode and not _implementsType
+
+	def mergedIntoPartialBox(newBox as Box)
+		base.mergedIntoPartialBox(newBox)
+		if .getPart, .getPart.mergedIntoPartialBox(newBox)
+		if .setPart, .setPart.mergedIntoPartialBox(newBox)
+
+	def unNilReturnType is override
+		if _returnType
+			if _returnType inherits NilableType
+				_returnType = _returnType.nonNil
+		else if _returnTypeNode inherits NilableTypeProxy
+			_returnTypeNode = _returnTypeNode.innerTypeProxy
+
+	def _bindInt is override
+		base._bindInt
+		if _returnType is nil
+			if _coverVar
+				_coverVar.bindInt
+				_returnType = _coverVar.resultType
+			else
+				assert _returnTypeNode
+				_returnType = _returnTypeNode.realType
+		assert _returnType  # properties always have a return type
+
+		if _coverVar
+			if _coverAccess in ['getset', 'get']
+				# return VARNAME
+				.makeGetPart(.token).statements.add(ReturnStmt(.token, IdentifierExpr(.token, _coverVar)))
+			if _coverAccess in ['getset', 'set']
+				# VARNAME = value
+				.makeSetPart(.token).statements.add(AssignExpr(.token, 'ASSIGN', IdentifierExpr(.token, _coverVar), IdentifierExpr(.token, 'value')))
+
+		if _getPart, _getPart.bindInt
+		if _setPart, _setPart.bindInt
+
+	def _computeMatchingBaseMembers
+		base._computeMatchingBaseMembers
+		if _getPart, _getPart.computeMatchingBaseMembers
+		if _setPart, _setPart.computeMatchingBaseMembers
+
+	def _bindImp is override
+		base._bindImp
+		if _getPart, _getPart.bindImp
+		if _setPart, _setPart.bindImp
+
+	def constructedFor(box as Box, gpToType as Dictionary<of GenericParam, IType>) as BoxMember  # CC: as same
+		newMember = base.constructedFor(box, gpToType) to ProperDexer  # CC: this = base. ...
+		assert newMember._returnType
+		newMember._returnType = newMember._returnType.secondaryConstructedTypeFor(box, gpToType)
+		return newMember
+
+
+class ProperDexerXetter
+	is abstract, partial
+	inherits AbstractMethod
+	"""
+	Base class for IndexerGetter, IndexerSetter, PropertyGetter and PropertySetter.
+	"""
+
+	var _parent as ProperDexer
+
+	cue init(token as IToken, parent as ProperDexer, isNames as String*)
+		base.init(token, token, parent.parentBox, nil, parent.name, List<of Param>(), isNames, AttributeList(), '')  # TODO: should be docString, right?
+		_name = parent.name + '.' + .xetPartName  # CC: somewhat awkward. belongs in the base.init() call
+		_parent = parent
+
+	get canHaveMatchingBaseMember as bool is override
+		return _parent.canHaveMatchingBaseMember
+
+	get parent from var
+
+	get xetPartName as String is abstract
+
+	get isNames as String* is override
+		# may need to get more sophisticated here if, in the future, we support C#'s somewhat recent ability to put access modifiers on just the set or get part of a property
+		return _parent.isNames
+
+	get isShared as bool is override
+		return _parent.isShared
+
+	get isOverride as bool is override
+		return _parent.isOverride
+
+	def usesBase is override
+		# it's the property that needs to compute the "is override" or "is new" for itself,
+		# not the get or set part
+		_parent.usesBase
+
+
+class MemberOverload inherits BoxMember is partial
+	"""
+	Methods and indexers can be overloaded.
+	"""
+	
+	var _members as List<of IOverloadable>
+
+	cue init(member as IOverloadable)
+		require
+			member.name.length
+		ensure
+			.members.count
+			.members[0] == member
+		body
+			base.init(member.token, member.idToken, member.parentBox, member.name, member.isNames, AttributeList())
+			member.overloadGroup = this
+			_members = [member]
+			_isNames = member.isNames.toList  # pick up 'shared' for example
+
+	def addMinFields is override
+		base.addMinFields
+		.addField('numMembers', .members.count)
+		
+	def addSubFields is override
+		base.addSubFields
+		.addField('members', _members)
+
+	get members from var
+
+	get englishName as String is override
+		assert _members.count
+		return _members[0].englishName
+
+	get isCallable as bool is override
+		assert _members.count
+		return _members[0].isCallable
+
+	get isMethod as bool is override
+		return _members[0].isMethod
+
+	def addMember(member as IOverloadable)
+		require
+			member.overloadGroup is nil
+			member.name==.name
+			member not in .members
+			member.getType is .members[0].getType
+		body
+			member.overloadGroup = this
+			_members.add(member)
+			.parentBox.addDeclFromOverload(member, this)
+
+	def addInheritedMember(member as IOverloadable)
+		require
+			member.name==.name
+			member.parentBox is not .parentBox
+			member not in .members
+			member.getType is .members[0].getType
+		body
+			_members.add(member)
+
+	def addInheritedMemberIfNoMatch(member as IOverloadable)
+		"""
+		Utility method for _finishOverloads to avoid the mistake of putting an ancestor method in an overload that was an override or new.
+		"""
+		for existing in _members, if member.matchesSignature(existing), return
+		.addInheritedMember(member)
+			
+	get resultType as IType? is override
+		assert .didBindInt
+		return _members[0].resultType
+
+	def unNilReturnType is override
+		for member in _members
+			member.unNilReturnType
+
+	def computeBestOverload(args as List<of Expr>, genericArgTypes as List<of IType>?, strictBindChecking as bool) as IOverloadable
+		# to-do: can this take a list of types instead of args? args seems like more info than it needs
+		verbose = false
+		if verbose
+			print '-------------------------'
+			trace .idString, args, genericArgTypes, strictBindChecking
+		# References:
+		# http://blogs.msdn.com/ericlippert/archive/2007/11/05/c-3-0-return-type-inference-does-not-work-on-member-groups.aspx
+
+		# I cooked up the algorithm below as a quick way to fix some bugs caused by the previous 
+		# implementation of um, doing nothing.
+		# But this likely needs to be rewritten.
+		candidates = []
+		# handle generic arguments to the method		
+		if genericArgTypes and genericArgTypes.count
+			members = List<of IOverloadable>()
+			for member as IOverloadable? in .members
+				if member inherits Method
+					if member.containsGenericParameters
+						if member.genericParams.count == genericArgTypes.count
+							member = member.constructedMethodWith(genericArgTypes to !)
+						else
+							member = nil
+				if member, members.add(member)
+		else
+			members = .members
+
+		if verbose
+			trace .members.count
+			for i, m in members.numbered, trace i, m, m.params, m.cobraSourceSignature(true)
+
+		_calcMembersScore(members, args, strictBindChecking, candidates)
+			
+		maxScore = -10_000
+		winner = nil to IOverloadable?
+		for pair in candidates
+			if verbose, print 'candidate:', pair[0], (pair[1] to IOverloadable).idString
+			if pair[0] to int > maxScore
+				maxScore = pair[0] to int
+				winner = pair[1] to IOverloadable
+
+		if false
+			# detect overload invocation ambiguity
+			# TODO: not ready for this yet
+			count = 0
+			for pair in candidates
+				if pair[0] to int == maxScore
+					count += 1
+			if count > 1
+				# TODO: do this for indexing too
+				msg = 'The call is ambiguous between these methods: '
+				sep = ''
+				for pair in candidates
+					if pair[0] to int == maxScore
+						msg += sep + (pair[1] to IOverloadable).cobraSourceSignature(false)
+						sep = ', '
+				.throwError(msg)
+
+		if verbose
+			print
+			trace .token.fileName
+			trace maxScore, _name, .token.toTechString, winner, winner.params.count, winner.params
+			print 'args:'
+			for arg in args, print '   [arg]'
+			print 'params:'
+			for param in winner.params, print '   [param]'
+			print 'overloads:'
+			for member in .members, print '   [member]'
+			print 'winner:', maxScore, winner
+		assert winner
+		return winner to !
+	
+	def _calcMembersScore(members as IList<of IOverloadable>, args as List<of Expr>, strictBindChecking as bool, candidates)
+		for member in members
+			score = -1000
+			if member.params.count == args.count
+				score = 0
+				if member inherits Method and (member to Method).genericParams.count > 0, score += 1
+				for i, param in member.params.numbered
+					arg = args[i]
+					if strictBindChecking and not arg.didBindImp
+						trace arg
+						trace arg.hasError
+					if strictBindChecking and (arg.type == param.type or arg.type == param.type.nonNil)
+						score += 20
+					else if strictBindChecking and arg.canBeAssignedTo(param.type)
+						score += 10
+					else if strictBindChecking and arg.type.nonNil.isAssignableTo(param.type) 
+						# Cobra's code and data flow analysis sometimes leaves us with a nilable type that's not actually nil anymore
+						# due to an assignment, possibly wrapped in an if statement. Eventually this will be corrected, but for now
+						# compensate here.
+						score += 1
+					else if not strictBindChecking
+						if arg.type is not nil
+							if arg.type == param.type
+								score += 20
+							else if arg.type.isDynamic
+								score += 10
+						else
+							score -= 100
+					else
+						score -= 100
+			# print 'candidate:', score, member.name, member.serialNum, Utils.join(', ', (for param in member.params get param.type.name))
+			candidates.add([score, member])
+
+	def _bindInt is override
+		base._bindInt
+		# sanity check that members all have the right name
+		name = .name
+		for member in _members, assert member.name == name
+		# sanity check that members don't have the same signature
+		#if name <> 'getType'  # TODO: HACK: See Box.prepSystemObjectClass
+		# TODO: having problems with explicit interface implementation. I think these probably should have their name changed from "foo" to "Type.foo"
+		#	for i = 0 .. _members.count
+		#		for j = i+1 .. _members.count
+		#			assert not _members[i].matchesSignature(_members[j])
+		# rename the test members of the overload by suffixing them with '_o1' '_o2' etc.
+
+		for i, member in _members.numbered
+			for tm in member.testMethods, tm.overloadId = i+1
+
+		# TODO: error if the two members have the same arguments
+
+	def _computeMatchingBaseMembers
+		base._computeMatchingBaseMembers
+		for member in _members, member.computeMatchingBaseMembers
+
+	def _bindImp is override
+		base._bindImp
+
+
+class TestMethod
+	is partial
+	inherits Method
+	"""
+	TODO: Does TestMethod need to be altered in light of generic parameters to methods?
+	"""
+
+	var _forMember as BoxMember?
+	var _forBox as Box?
+	var _overloadId = -1
+
+	cue init(token as IToken, member as BoxMember)
+		require
+			member.name.length
+		body
+			base.init(token, Token.empty, member.parentBox, 'test_'+member.name.capitalized, List<of Param>(), .getCompiler.voidType, nil, ['shared'], AttributeList(), '')
+			_forMember = member
+
+	cue init(token as IToken, box as Box)
+		require
+			box.name.length
+		body
+			base.init(token, Token.empty, box, 'test_class_'+box.name.capitalized, List<of Param>(), .getCompiler.voidType, nil, ['shared'], AttributeList(), '')
+			_forBox = box
+
+	get shouldBeVirtual as bool is override
+		return false
+
+	pro name as String is new
+		"""
+		NamedNode.name does not allow the name to be set because that could mess up dictionaries
+		that index the node by name. However, there are no such dictionaries for TestMethod and
+		MemberOverload() needs to mangle test method names so they don't collide.
+		"""
+		get
+			return base.name
+		set
+			require value.length
+			_name = value
+
+	pro overloadId from var
+
+
+class ContractPart
+	is abstract, partial
+	inherits SyntaxNode
+	"""
+	The abstract base class for RequirePart and EnsurePart.
+	"""
+
+	var _connectToken as IToken?  # ex: or, and
+	var _codeMember as AbstractMethod
+	var _exprs as List<of Expr>
+
+	cue init(codeMember as AbstractMethod)
+		base.init(codeMember.token)
+		.isImplicit = true
+		_codeMember = codeMember
+		_exprs = List<of Expr>()
+
+	cue init(connectToken as IToken?, mainToken as IToken, codeMember as AbstractMethod, exprs as List<of Expr>)
+		base.init(mainToken)
+		_connectToken = connectToken
+		_codeMember = codeMember
+		_exprs = exprs
+
+	def addMinFields
+		base.addMinFields
+		.addField('connectToken', _connectToken)
+
+	def addSubFields
+		base.addSubFields
+		.addField('exprs', _exprs)
+
+	get codeMember from var
+
+	get connectWord as String is abstract
+
+	get endToken as IToken
+		return if(_exprs.count, _exprs.last.endToken, base.endToken)
+
+	get exprs from var
+		has Subnodes
+
+	get haveConditions as bool is abstract
+		"""
+		Returns true if this contract part has any conditions, whether directly or through inheritance.
+		"""
+
+	get willGenerateCode as bool
+		# classes that are sensitive with respect to the DST skip on contracts
+		return _codeMember.canHaveDetailedStackTrace and .compiler.options['contracts'] <> 'none' and not (.willInlineCode and not .haveConditions)
+
+	get willInlineCode as bool
+		return .compiler.options['contracts'] == 'inline'
+
+	def _bindImp is override
+		base._bindImp
+		# note: expressions cannot refer to locals in contracts
+		newExprs = List<of Expr>()
+		for expr in _exprs
+			expr.bindImp  # TODO: error recovery
+			assert expr.type
+			if not expr.hasError, _checkForLocalReferences(expr)
+			if expr.type is not .compiler.boolType
+				expr = TruthExpr(expr).bindAll to Expr # CC: axe cast when Cobra supports "as this"
+				assert expr.type
+			newExprs.add(expr)
+		_exprs.clear
+		_exprs.addRange(newExprs)
+
+	def _checkForLocalReferences(expr as Expr)
+		validDefs = Set<of dynamic>()
+		lastExpr as Expr?
+		for expr in expr.allExprs
+			if expr inherits IdentifierExpr
+				if expr.definition inherits LocalVar
+					if (expr.name <> 'result' or not expr.definition.isImplicit) and (expr.definition not in validDefs)
+						if lastExpr inherits ForExpr
+							.flagVar(expr.definition to LocalVar)
+							validDefs.add(expr.definition)
+						else
+							expr.recordError('Cannot refer to local variable "[expr.name]" in a contract. Use an "assert" statement in the implementation to verify conditions on locals.')
+			lastExpr = expr
+
+	def flagVar(varr as LocalVar) is abstract
+
+	def checkConnectToken
+		"""
+		This method checks that you said 'or require' vs. 'require', or 'and ensure' vs. 'ensure'.
+		The check cannot be made during _bindImp because it relies on the .codeMember.isNames which can be altered when binding the statements in the method body (per .usesBase).
+		"""
+		isNames = _codeMember.isNames
+		if not .isImplicit
+			if _connectToken
+				if 'override' not in isNames
+					.recordError('The contract was specified with "[_connectToken.text]", but the code member is neither an "override" nor "new".')
+			else
+				if 'override' in isNames
+					what = if('override' in isNames, 'override', 'new')
+					.recordError('The contract must be declared "[.connectWord] [.token.text]" rather than "[.token.text]" because the code member is "[what]".')
+
+
+class RequirePart
+	is partial
+	inherits ContractPart
+
+	cue init(codeMember as AbstractMethod)
+		base.init(codeMember)
+
+	cue init(connectToken as IToken?, mainToken as IToken, codeMember as AbstractMethod, exprs as List<of Expr>)
+		base.init(connectToken, mainToken, codeMember, exprs)
+		codeMember.requirePart = this
+
+	get connectWord as String is override
+		return 'or'
+
+	def flagVar(varr as LocalVar) is override
+		varr.isForRequire = true
+
+	get haveConditions as bool is override
+		if _codeMember.isOverride
+			have = false
+			curCodeMember = _codeMember to ?
+			post while curCodeMember
+				if curCodeMember.requirePart.exprs.count
+					have = true
+					break
+				curCodeMember = curCodeMember.matchingBaseMember to AbstractMethod?
+			return have
+		else
+			return _codeMember.requirePart.exprs.count > 0
+
+	
+class EnsurePart inherits ContractPart is partial
+
+	cue init(codeMember as AbstractMethod)
+		base.init(codeMember)
+
+	cue init(connectToken as IToken?, mainToken as IToken, codeMember as AbstractMethod, exprs as List<of Expr>)
+		base.init(connectToken, mainToken, codeMember, exprs)
+		codeMember.ensurePart = this
+
+	get connectWord as String is override
+		return 'and'
+
+	def flagVar(varr as LocalVar) is override
+		varr.isForEnsure = true
+
+	get haveConditions as bool is override
+		if _codeMember.parentBox.hasInvariants
+			return true
+		have = false
+		curCodeMember = _codeMember to ?
+		post while curCodeMember
+			if curCodeMember.ensurePart.exprs.count
+				have = true
+			curCodeMember = curCodeMember.matchingBaseMember to AbstractMethod?  # TODO: should a cast really be needed here?
+		return have
+
+	def _bindImp
+		codeMember = _codeMember
+		if codeMember.resultType is .compiler.voidType
+			base._bindImp
+		else
+			resultLocal = codeMember.findLocal('result')
+			resultBuiltIn = ResultVar(.token, _codeMember)
+			if resultLocal, codeMember.replaceLocal(resultBuiltIn)
+			else, codeMember.addLocal(resultBuiltIn)
+			try
+				base._bindImp
+			finally
+				if resultLocal, codeMember.replaceLocal(resultLocal to LocalVar)
+				else, codeMember.removeLocal('result')

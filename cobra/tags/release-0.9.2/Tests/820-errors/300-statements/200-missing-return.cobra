@@ -1,0 +1,10 @@
+class Test
+
+	def main is shared
+		pass
+
+	def foo as int  # .error. missing
+		print 'hi'
+
+	def two as int
+		throw Exception('...')   # no error because this method throws

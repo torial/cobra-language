@@ -1,0 +1,56 @@
+class G1<of TArg>
+	where TArg must be class, callable
+	
+	cue init
+		base.init
+		a = TArg()  # instantiate a generic parameter
+		b = TArg()
+		assert a is not b
+		assert a.getHashCode
+		assert b.getHashCode
+
+
+class G2<of TBaz>
+	where TBaz must be Baz, callable
+	
+	cue init
+		base.init
+		b = TBaz()
+		assert b.two == 2
+		b = TBaz(value=3)
+		assert b.value == 3
+
+
+class Baz
+
+	get two as int
+		return 2
+
+	pro value from var as int
+
+
+class BazSubclass inherits Baz
+	pass
+
+
+class G3<of TInter>
+	where TInter must be Inter
+
+	def foo(x as TInter)
+		assert x.three == 3
+
+interface Inter
+	get three as int
+
+class InterImpl implements Inter
+	get three as int
+		return 3
+
+
+class Test
+
+	def main
+		G1<of Object>()
+		G2<of Baz>()
+		G2<of BazSubclass>()
+		G3<of InterImpl>().foo(InterImpl())

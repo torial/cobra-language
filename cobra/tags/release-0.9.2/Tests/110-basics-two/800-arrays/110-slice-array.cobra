@@ -1,0 +1,11 @@
+class Test
+
+	def main is shared
+
+		numbers as int[] = @[1, 2, 3]
+		assert numbers[:-1] == @[1, 2]
+		assert numbers[1:] == @[2, 3]
+		assert numbers[:-2] == @[1]
+
+	def foo(na as String[]?)
+		na = na[1:]

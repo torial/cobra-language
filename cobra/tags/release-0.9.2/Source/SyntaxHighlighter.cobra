@@ -1,0 +1,325 @@
+"""
+The main test case for the syntax highlighter is the Cobra compiler itself:
+
+cobra -highlight -files:files-to-compile.text
+
+TODO:
+	[ ] The stylesheet path should be computed rather than hardcoded as ..\
+	[ ] Files that are in a deeper subdirectory, like gen-html\BackEndClr\, don't have a correct path to the stylesheet
+	[ ] Partial classes are not getting the 'tdn' style because they are merged into their classes. Likewise, their members are not getting 'mdn' style.
+	[ ] String substitution should not color the brackets [] the same color as the string text.
+	[ ] Negative constants like "-1" don't get highlighted correctly. The - is treated as an operator.
+	[ ] Right now "bool" is a bolded keyword and types like String and Shape are normal. Maybe there should be a "type" highlight.
+	[ ] Use what's found in OperatorSpecs instead of duplicating. This also requires completing a TODO item in OperatorSpecs
+		    # TODO: move the binary op and unary op specs here
+"""
+
+
+class Compiler is partial
+
+	def highlightFiles
+		require
+			.modules.count
+		body
+			Directory.createDirectory(.targetDirectory)
+			for mod in .modules
+				if mod inherits CobraModule
+					if not mod.isImplicit
+						mod.writeHtmlHighlightedFileTo(.targetDirectory)
+
+	get targetDirectory as String
+		return 'gen-html'
+
+
+class CobraModule is partial
+
+	def writeHtmlHighlightedFileTo(targetDirectory as String)
+		htmlFileName = Path.combine(targetDirectory, .fileName + '.html')
+		dir = Path.getDirectoryName(htmlFileName)
+		Directory.createDirectory(dir)  # the .fileName may have relative subdirs in it
+		print 'Writing [htmlFileName]'
+		using tw = File.createText(htmlFileName)
+			.writeHtmlHighlightedFileTo(tw)
+
+	def writeHtmlHighlightedFileTo(tw as TextWriter)
+		tw.writeLine('<html>')
+		tw.writeLine('<head>')
+		tw.writeLine('<meta http-equiv="Content-Type" content="text/html; charset=utf-8">')
+		tw.writeLine('<title>[.fileName]</title>')
+		tw.writeLine('<link rel="stylesheet" href="../styles-cobra-doc.css" type="text/css">')
+		tw.writeLine('<link rel="stylesheet" href="../styles-cobra-shl.css" type="text/css">')
+		tw.writeLine('</head>')
+		tw.writeLine('<body>')
+		tw.write(.htmlSource)
+		tw.writeLine('</body>')
+		tw.writeLine('</html>')
+
+	def htmlSource as String
+		require .typeProvider
+		return .htmlSource(nil)
+
+	def htmlSource(typeProvider as ITypeProvider?) as String
+		require .typeProvider or typeProvider
+		if typeProvider
+			saveProvider = Node.typeProvider
+			Node.typeProvider = typeProvider
+		try
+			source = File.readAllText(.fileName)
+			marks = Marks(.fileName)
+
+			# first do token stream which covers all tokens including comments
+			# not expecting any errors here since we got past this phase before
+			tokenizer = CobraTokenizer(typeProvider=.typeProvider, willReturnComments=true)
+			tokens = tokenizer.startSource(.fileName, source).allTokens
+			marks.add(tokens)
+
+			# now do nodes -- gives better semantic highlighting than just tokens
+			.topNameSpace.highlight(marks)
+
+			sb = StringBuilder('<pre class="shl">')
+			marks.combine(source, sb)
+			sb.append('</pre>')
+			return sb.toString
+		finally
+			if typeProvider
+				Node.typeProvider = saveProvider
+
+
+class Marks
+	"""
+	A collection of marks as in "mark up".
+	Used for syntax highlighting of source files.
+	For example, source code could be rewritten as HTML with <span> tags for each mark.
+	"""
+
+	shared
+
+		var _ignoreTokens = Set<of String>()
+		var _invisibleTokens = {'DEDENT', 'EOL', 'INDENT'}
+		var _normalTokens = {
+			'BANG', 'BANG_EQUALS', 'CARET', 'COLON', 'COMMA', 'DOT', 'DOTDOT', 'LCURLY', 'LPAREN', 'PERCENTPERCENT', 'QUESTION', 'QUESTION_EQUALS', 'RCURLY', 'RPAREN', 'INT_SIZE', 'UINT_SIZE',
+		}
+
+		get ignoreTokens as Set<of String>
+			if _ignoreTokens.count == 0
+				# 2009-03-13 Mono bug re: method overload resolution. https://bugzilla.novell.com/show_bug.cgi?id=485378
+				# _ignoreTokens.addRange(_invisibleTokens)
+				# _ignoreTokens.addRange(_normalTokens)
+				for token in _invisibleTokens, _ignoreTokens.add(token)
+				for token in _normalTokens, _ignoreTokens.add(token)
+			return _ignoreTokens
+
+		var _tokenToStyleSpecs = [
+			'TRUE kw-s',
+			'FALSE kw-s',
+			'NIL kw-s',
+			'BASE kw-b',
+			'THIS kw-t',
+			
+			'CHAR_LIT_SINGLE lc',
+			'CHAR_LIT_DOUBLE lc',
+			'DECIMAL_LIT ld',
+			'AT_ID di',
+			'DIRECTIVE di',
+			'COMMA no',
+			'COMMENT c',
+			'DOC_STRING_START ds',
+			'DOC_STRING_BODY_TEXT ds',
+			'DOC_STRING_STOP ds',
+			'DOC_STRING_LINE ds',
+			'ID i',
+			'FLOAT_LIT lf',
+			'FRACTIONAL_LIT lfr',
+			'INTEGER_LIT li',
+			'STRING_DOUBLE ls',
+			'STRING_SINGLE ls',
+			'STRING_PART_FORMAT spf',
+			'TOQ kw',
+		]
+
+		var _ops = 'ARRAY_OPEN ASSIGN EQ NE GT LT GE LE DOUBLE_GT LBRACKET RBRACKET PLUS MINUS STAR STARSTAR SLASH SLASHSLASH PERCENT MINUS_EQUALS PLUS_EQUALS'
+		
+		var _tokenToStyle = Dictionary<of String, String>()
+
+		get tokenToStyle as Dictionary<of String, String>
+			if _tokenToStyle.count == 0
+				for spec in _tokenToStyleSpecs
+					parts = spec.split
+					_tokenToStyle[parts[0]] = parts[1]
+				for op in _ops.split
+					_tokenToStyle[op] = 'op'
+			return _tokenToStyle
+
+	var _marks = Dictionary<of int, Mark>()
+
+	cue init(fileName as String)
+		base.init
+		_fileName = fileName
+
+	get fileName from var as String
+	
+	def add(tokens as IToken*)
+		ignoreTokens, tokenToStyle = .ignoreTokens, .tokenToStyle
+		for token in tokens
+			# print token.which, token.text, token.charNum, token.isKeyword
+			if token.which in ignoreTokens
+				pass
+			else if tokenToStyle.containsKey(token.which)
+				.add(token, tokenToStyle[token.which])
+			else if token.isKeyword
+				.add(token, 'kw')
+			else
+				charNum = token.charNum - 1
+				len = token.text.length
+				text = token.text
+				branch token.which
+					on 'OPEN_CALL'
+						.add(token, 'i')
+					on 'OPEN_DO'
+						.add(charNum, 2, 'kw', 'do')
+					on 'OPEN_GENERIC'
+						.add(token, 'i')
+					on 'OPEN_IF'
+						.add(charNum, len-1, 'kw', text[:-1])
+					on 'SHARP_SINGLE' or 'SHARP_DOUBLE'  # sharp'...'
+						.add(charNum, 5, 'kw', 'sharp')
+						.add(charNum+5, len-5, 'ls', text[5:])
+					on 'SHARP_OPEN' 
+						.add(charNum, 6, 'kw', '$sharp') # deprecated
+					on 'STRING_START_SINGLE' or 'STRING_START_DOUBLE'
+						.add(charNum, len-1, 'ls', text[:-1])
+						.add(charNum+len-1, 1, 'lslb', '\[')
+					on 'STRING_PART_SINGLE' or 'STRING_PART_DOUBLE'
+						.add(charNum, 1, 'lsrb', ']')
+						if len > 2, .add(charNum+1, len-2, 'ls', text[1:-1])  # else text is ']['
+						.add(charNum+len-1, 1, 'lslb', '\[')
+					on 'STRING_STOP_SINGLE' or 'STRING_STOP_DOUBLE'
+						.add(charNum, 1, 'lsrb', ']')
+						.add(charNum+1, len-1, 'ls', text[1:])
+					else, print '*** unknown token type: [token.which]; [token]'
+
+	def add(token as IToken, kind as String)
+		# second check below guards against partial classes split across files
+		if not token.isEmpty and token.fileName.endsWith(.fileName)
+			# The OPEN_CALL and OPEN_GENERIC tokens come from multiple sources such as declarations
+			# and expressions. So we check for them here in one place.
+			charNum = token.charNum - 1
+			branch token.which
+				on 'OPEN_CALL'
+					.add(charNum, token.text.length-1, kind, token.text[:-1])
+				on 'OPEN_GENERIC'
+					.add(charNum, token.text.length-3, kind, token.text[:-3])
+					.add(charNum+token.text.length-3, 2, 'kw', 'of')
+				else, .add(charNum, token.text.length, kind, token.text)
+
+	def add(charNum as int, length as int, kind as String)
+		.add(charNum, length, kind, '')
+		
+	def add(charNum as int, length as int, kind as String, text as String)
+		_marks[charNum] = Mark(charNum, length, kind, text)
+
+	def combine(plainSource as String, sb as StringBuilder)
+		# CC: TODO: next line causes exception in the compiler
+		# marks = _marks.values.toList.sorted
+		marks = List<of Mark>(_marks.values).sorted
+		closeSpansAt = Set<of int>()
+		ci = mi = 0
+		for c in plainSource
+			if ci in closeSpansAt
+				sb.append('</span>')
+				closeSpansAt.remove(ci)
+			if mi < marks.count
+				mark = marks[mi]
+				if mark.charNum == ci
+					sb.append('<span class="shl-[mark.kind]">')
+					# use next statement in place of above for debugging:
+					# sb.append('<span class="shl-[mark.kind]" what="[mark.text]">')
+					closeSpansAt.add(mark.charNum + mark.length)
+				while mi < marks.count and marks[mi].charNum <= ci
+					mi += 1
+			branch c
+				on c'\t', sb.append('    ')
+				on c'<', sb.append('&lt;')
+				on c'>', sb.append('&gt;')
+				on c'&', sb.append('&amp;')
+				on c'"', sb.append('&quot;')
+				else, sb.append(c)
+			if c <> c'\r', ci += 1
+
+
+class Mark implements IComparable<of Mark>
+
+	cue init(charNum as int, length as int, kind as String, text as String)
+		require
+			charNum >= 0
+			length > 0
+			kind <> ''
+		body
+			base.init
+			_charNum, _length, _kind, _text = charNum, length, kind, text
+	
+	get charNum from var as int
+
+	get length from var as int
+		
+	get kind from var as String
+	
+	get text from var as String
+	
+	def toString as String is override
+		return '[.getType.name]([.charNum], [.length], [.kind], [.text])'
+
+	def compareTo(other as Mark) as int
+		diff = .charNum - other.charNum
+		if diff == 0
+			diff = .length - other.length
+			if diff == 0
+				diff = .kind.compareTo(other.kind)
+		return diff
+
+
+class Container<of TMember> is partial
+
+	def highlight(marks as Marks)
+		h = Highlighter(marks)
+		for decl as dynamic in .declsInOrder
+			h.dispatch(decl)
+
+
+class Highlighter inherits Visitor
+
+	cue init(marks as Marks)
+		base.init
+		_marks = marks
+	
+	get methodName as String is override
+		return 'highlight'
+
+	get marks from var as Marks
+
+	def mark(token as IToken, kind as String)
+		.marks.add(token, kind)
+
+	def highlight(ns as NameSpace)
+		.mark(ns.token, 'tdn')
+		.dispatch(ns.declsInOrder)
+
+	def highlight(box as Box)
+		.mark(box.idToken, 'tdn')
+		.dispatch(box.declsInOrder)
+
+	def highlight(enumDecl as EnumDecl)
+		.mark(enumDecl.idToken, 'tdn')
+		
+	def highlight(member as BoxMember)
+		.mark(member.token, 'kw-md')
+		.mark(member.idToken, 'mdn')
+	
+	def highlight(method as AbstractMethod)
+		.mark(method.token, 'kw-md')
+		.mark(method.idToken, 'mdn')
+		.dispatch(method.statements)
+		
+	def highlight(stmt as Stmt)
+		# nothing for now
+		pass
