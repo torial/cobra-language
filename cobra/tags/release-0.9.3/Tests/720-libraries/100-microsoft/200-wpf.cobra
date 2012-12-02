@@ -1,0 +1,21 @@
+# .require. dotnet
+# .compile-only.
+
+@ref "C:\Program Files\Reference Assemblies\Microsoft\Framework\v3.0\PresentationFramework"
+@ref 'C:\Program Files\Reference Assemblies\Microsoft\Framework\v3.0\PresentationCore'
+@ref 'C:\Program Files\Reference Assemblies\Microsoft\Framework\v3.0\WindowsBase.dll'
+
+use System.Windows
+use System.Windows.Media
+
+class MyWindow inherits System.Windows.Window
+
+	cue init
+		base.init
+		.title = 'WPF Test'
+		.addChild(Controls.Button())
+	
+	def main is shared
+		has STAThread
+		app = Application()
+		app.run(MyWindow())

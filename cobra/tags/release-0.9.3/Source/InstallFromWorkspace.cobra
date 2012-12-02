@@ -1,0 +1,981 @@
+"""
+InstallFromWorkspace.cobra
+
+This program installs Cobra onto your system out of the workspace. It's a great
+convenience for users who only grab the workspace to get the very latest
+version of Cobra (e.g., they are not developing on the compiler). But even for
+developers, it's convenient to "snapshot" the compiler for your system when
+desired.
+
+Normally the compiler and libraries to be installed are compiled with -turbo.
+However, you can pass an argument to this program such as -debug which will
+replace -turbo. This is useful for troubleshooting.
+
+Why not a .bat file? Won't run on Mac, Linux, etc.
+
+Why not a bash script? Won't run on Windows-sans-cygwin.
+
+Also, as a .NET program this installer has easy access to the GAC and any other
+.NET resources. Furthermore, as a Cobra programmer, any Cobra user could
+potentially hack on it.
+
+
+TO RUN
+
+	On Windows
+
+		Update, if desired:
+		> cd \path\to\Workspace
+		> svn up
+
+		Get into the Source:
+		> cd Source
+
+		Use the batch file:
+		> bin\install-from-workspace
+
+	On Mac, Linux, Unix-family, etc.
+
+		Update, if desired:
+		$ cd /path/to/Workspace
+		$ svn up
+
+		Get into the Source:
+		$ cd Source
+
+		Use the script:
+		$ sudo ./bin/install-from-workspace
+
+
+	The installer prints "Success!" at the end, if successful.
+	Otherwise you will see an error message.
+
+	It's safe to run the installer more than once.
+
+	The installer does not change any workspace files that are under source code control.
+
+	To test the installation, try invoking Cobra from *outside* the workspace.
+	The command "cobra -about" will give you version, platform and directory information.
+
+
+NOTES
+
+	In some special cases, users have required that Cobra.Core.dll not be
+	installed to the GAC. There is an option for this called -skip-std-lib.
+	Any other command line options are passed to the Cobra snapshot compiler
+	when invoked to compile the compiler source code. If no options are
+	specified, -turbo is the default.
+
+	
+ASSUMPTIONS
+
+	* Your system meets the requirements for Novell Mono 2.6 or .NET 2.0
+	  http://msdn.microsoft.com/en-us/library/ms229070.aspx
+
+	* This program is run in the Workspace\Source directory.
+
+	* This program is run by Snapshot\cobra.exe. *NOT* .\cobra.exe
+
+
+TODO
+
+	[ ] Create an install log
+
+	[ ] Various "TODO" items in the source itself
+
+"""
+
+use System.Diagnostics
+use System.Reflection
+use System.Security.Principal
+use System.Text.RegularExpressions
+
+# for GAC installation
+use System.EnterpriseServices
+use System.EnterpriseServices.Internal
+
+
+class InstallFromWorkspace
+
+	var installDirectories = [r'C:\Cobra', '/usr/local/cobra']
+
+	const configFileName = 'install-directory.text'
+
+	var libs = [
+		{
+			'name': 'Cobra.Core',
+			'flags': '-build-standard-library',
+			'files': 'Cobra.Core/AssemblyAttrs.cobra',
+		},
+		{
+			'name': 'Cobra.Compiler',
+			'flags': '-c -t:lib -ert:yes -namespace:Cobra.Compiler -files:files-to-compile.text',
+#			'files': 'Cobra.Core/Compiler.Attributes.cobra',  # to-do
+			'files': 'cobra.cobra',
+		},
+	]
+
+	def main is shared
+		InstallFromWorkspace().run
+
+	var _lastCommand as String?
+
+	var _snapshotCompilerPath as String?
+	var _gacutil as String?
+	var _baseVersion as String?       # ex: '0.8.0-post', '0.8.0-post-2009-03-01'
+	var _targetDir as String?         # ex: 'C:\Cobra', '/usr/local/cobra'
+	var _versionDir as String?        # ex: 'C:\Cobra\Cobra-0.8.0-post', 'C:\Cobra\Cobra-0.8.0-post-2009-03-01', '/usr/local/cobra/Cobra-0.8.1-post'
+	var _cobraCommandPath as String?  # ex: 'C:\Cobra\bin\cobra.bat', '/usr/local/cobra/bin/cobra'
+	var _args = List<of String>()
+	var _skipStdLib = false
+	var _willForceDotNet4 = false
+	var _platformArg as String?
+
+	def run
+		print
+		print 'The Cobra Programming Language'
+		print 'Install From Workspace'
+		print
+		print 'Working...'
+		print
+		.printPlatform
+		_args = .parseCommandLineArgs
+		.verifyElevatedPermissions
+		.verifyInstallDirectory
+		.verifyInWorkspace
+		.askNet4
+		.verifyVirtualMachineVersion
+		.locateSnapshotCompiler
+		.buildCobraCompiler
+		.getBaseVersion
+		if not _skipStdLib
+			.locateGacUtil
+			for lib in .libs
+				# keys: name, flags
+				libName = lib['name']
+				assert not libName.endsWith('.dll')
+				.installLibrary(libName, lib['flags'], lib['files'].replace('/', .slash.toString))
+		.verifyNewlyBuiltCobra
+		.copyFilesToInstallDirectory
+		.verifyNewlyInstalledCobra
+		.cleanUpWorkspace
+		.installInPath
+		.changeDirectoryInstruction
+		print 'Visit http://cobra-language.com/ for discussion, wiki, samples, irc and more.'
+		print
+		print 'Success!'
+
+
+	## Self utils
+
+	get compileFlags as String
+		if _args.count > 0, return _args.join(' ')
+		else, return '-turbo'
+
+	def envVar(name as String) as String?
+		require name.length > 0
+		return Environment.getEnvironmentVariable(name)
+
+	def isRunningOnCLR2 as bool
+		ver = Assembly.getAssembly(Object).imageRuntimeVersion
+		return ver.startsWith('v2.') or ver.startsWith('2.')
+
+	def isRunningOnWindows as bool
+		return not .isRunningOnUnix
+
+	def isRunningOnUnix as bool
+		"""
+		Returns true if the current process is running on Unix/Posix/Linux/BSD/etc.
+		"""
+		return CobraCore.isRunningOnUnix
+
+	get lastCommand from var
+
+	get slash as char
+		return Path.directorySeparatorChar
+
+	def parseCommandLineArgs as List<of String>
+		remainingArgs = List<of String>()
+		for arg in CobraCore.commandLineArgs[1:]
+			if arg == '-skip-std-lib'
+				_skipStdLib = true
+			else if arg in ['-net4', '-dotnet4']
+				_willForceDotNet4 = true
+			else if arg.startsWith('-platform:')
+				_platformArg = arg
+			else if arg == '-x86'
+				_platformArg = '-platform:x86'
+			else
+				remainingArgs.add(arg)
+		return remainingArgs
+
+	def setUpCLR4(args as List<of String>)
+		# locate the external C# .NET 4 compiler
+		if CobraCore.isRunningOnMono
+			.setUpCLR4InMono(args)
+		else if .isRunningOnUnix
+			# does not compute. hmmm maybe DotGNU?
+			.error('Running on UNIX, but not running Mono. Cannot support -net4.')
+		else
+			.setUpCLR4InDotNet4(args)
+		args.add('-turbo')
+
+	def setUpCLR4InMono(args as List<of String>)
+		# look for dmcs - the Mono C# .NET 4 compiler
+		found = false
+		for path in .envVar('PATH').split(c':')
+			dmcs = Path.combine(path, 'dmcs')
+			if File.exists(dmcs)
+				found = true
+				break
+		if not found
+			.error('Cannot find the Mono dmcs compiler required by -net4. Make sure you have Mono 2.10+ installed and that dmcs is on your path.')
+		args.add('-native-compiler:' + dmcs)
+
+	def setUpCLR4InDotNet4(args as List<of String>)
+		# should be on Windows and Microsoft.NET at this point
+		# look for the Microsoft .NET 4.0 compiler
+		# Unfortunately, it's mere existance can be a red herring--
+		# a Windows 7 Ult 32-bit user for example, will have this file, but will still need to
+		# install either .NET 4.0 or one of the Microsoft Visual 2010 products.
+		
+		# the 'Windows' enum is only in .NET 4:
+		# windowsPath = Environment.getFolderPath(Environment.SpecialFolder.Windows)  # typically C:\Windows
+
+		# btw .NET 4.5 is an "in place" install over .NET 4 with no change in version info
+		# see http://blogs.msdn.com/b/dotnet/archive/2011/09/26/compatibility-of-net-framework-4-5.aspx
+
+		for envVarName in ['windir', 'WINDIR', 'systemroot', 'SYSTEMROOT']
+			windowsPath = .envVar(envVarName)
+			if windowsPath and windowsPath <> ''
+				break
+		if windowsPath is nil or windowsPath == ''
+			.error('Cannot locate the Windows system directory required by -net4.')
+		csc = Path.combine(windowsPath, r'Microsoft.NET\Framework\v4.0.30319\csc.exe')
+		if not File.exists(csc)
+			.error('Cannot find the Microsoft csc compiler required by -net4. Try installing MS .NET 4.0, or the 4.0+SDK or one of the Visual 2010 products (the Express ones are free).')
+		args.add('-native-compiler:' + csc)
+
+	def error(msg)
+		print '** ERROR:', msg
+		print 'Need help with the above error?'
+		if .isRunningOnUnix
+			print ' * Make sure you ran with sudo or as root.'
+			print ' * Mono 2.6.x or Mono 2.10.x or higher are recommended.'
+		else
+			print ' * Make sure you ran as a Windows Administrator.'
+			print ' * Install .NET or a Visual Studio product if you have not before.'
+		print ' * Review http://cobra-language.com/troubleshooting'
+		print ' * Ask at http://cobra-language.com/discuss'
+		print ' * Ask at http://cobra-language.com/irc'
+		Environment.exit(1)
+		print 'Exiting from error.'
+
+	def warning(msg)
+		print '** WARNING:', msg
+
+	def isAdmin as bool
+		wi = WindowsIdentity.getCurrent
+		wp = WindowsPrincipal(wi)
+		return wp.isInRole(WindowsBuiltInRole.Administrator) or wi.token == IntPtr.zero
+
+
+	## File system
+
+	def copyContents(source as String, target as String)
+		print 'copy from:', source
+		print '       to:', target
+		.copyContents(DirectoryInfo(source), DirectoryInfo(target))
+
+	def copyContents(source as DirectoryInfo, target as DirectoryInfo)
+		if not target.exists, target.create
+		for sourceFile in source.getFiles
+			sourceFile.copyTo(Path.combine(target.fullName, sourceFile.name), true)
+		for sourceSubDir in source.getDirectories
+			targetSubDir = target.createSubdirectory(sourceSubDir.name)
+			.copyContents(sourceSubDir, targetSubDir)
+
+	def deleteDir(dir as String)
+		if Directory.exists(dir)
+			print 'del dir  :', dir
+			spacer = '          '
+			_unReadOnly(dir)
+			numAttempts = 3
+			for attempt in 1 : numAttempts + 1
+				try
+					Directory.delete(dir, true)  # true = recursive
+				catch IOException
+					# sometimes "The directory is not empty." occurs
+					if attempt == numAttempts, throw
+					print spacer, 'Having trouble deleting directory. Try again in [attempt] seconds.'
+					System.Threading.Thread.sleep(attempt*1_000)
+					if not Directory.exists(dir)  # and sometimes it goes away!
+						print spacer, 'Directory is gone.'
+				if not Directory.exists(dir), break
+
+	def _unReadOnly(dirName as String)
+		_unReadOnly(DirectoryInfo(dirName))
+
+	def _unReadOnly(dir as DirectoryInfo)
+		# print 'checking -', dir
+		for file in dir.getFiles
+			if sharp'file.Attributes & System.IO.FileAttributes.ReadOnly'
+				# print 'changing -', file
+				file.attributes = sharp'file.Attributes & ~System.IO.FileAttributes.ReadOnly'
+				# file.attributes = file.attributes & ~FileAttributes.ReadOnly
+		for subDir in dir.getDirectories
+			_unReadOnly(subDir)
+
+	def findAndDeleteDir(baseDir as String, findDir as String)
+		.findAndDeleteDir(DirectoryInfo(baseDir), findDir)
+
+	def findAndDeleteDir(baseDir as DirectoryInfo, findDir as String)
+		for sourceSubDir in baseDir.getDirectories
+			if sourceSubDir.name == findDir
+				.deleteDir(sourceSubDir.fullName)
+			else
+				.findAndDeleteDir(sourceSubDir, findDir)
+
+	def requireDir(dir as String)
+		if Directory.exists(dir)
+			print 'found dir:', dir
+		else
+			print 'make dir :', dir
+			try
+				Directory.createDirectory(dir)
+			catch ex as SystemException
+				.error('Unable to create installation directory.\n[ex.message]\nRun as admin, or put a correct install path into a file called "[.configFileName]".')
+
+	def startStage(description as String)
+		print '====', description
+		print
+		# this installer relies on there being no directory changes
+		assert Environment.currentDirectory.endsWith('Source')
+
+
+	## Running external commands
+
+	def runCommand(command as String, args as String) as String
+		return .runCommand(command, args, true)
+
+	def runCommand(command as String, args as String, displayOutput as bool) as String
+		process as Process?
+		output = .runCommand(command, args, out process, displayOutput)
+		if process.exitCode, .error('Exit code from above command: [process.exitCode]')
+		return output
+
+	def runCommand(command as String, args as String, process as out Process?) as String
+		return .runCommand(command, args, out process, true)
+
+	def runCommand(command as String, args as String, process as out Process?, displayOutput as bool) as String
+		"""
+		Runs the given external command with the given args.
+		Sets the process to the instance of Process created for this purpose.
+		Returns the output, which is also displayed if displayOutput is true.
+		Does not check process.exitCode.
+		"""
+		print 'run: [command] [args]'
+		_lastCommand = command + ' ' + args
+		p = Process()
+		p.startInfo.fileName = command
+		p.startInfo.arguments = args
+		output = p.runAndCaptureAllOutput.trim
+		process = p
+		if displayOutput and output <> ''
+			for line in output.replace('\r', '').split(c'\n')
+				print '   : [line]'
+		print
+		return output
+
+	def runSnapshotCobra(args as String) as String
+		"""
+		Runs the Cobra compiler.
+		Prints the output and returns it.
+		If Cobra gives an error, calls .error.
+		"""
+		process as Process?
+		output = .runSnapshotCobra(args, out process)
+		if process.exitCode, .error('Exit code from running SnapshotCobra: [process.exitCode]')
+		return output
+
+	def runSnapshotCobra(args as String, process as out Process?) as String
+		"""
+		Runs the Cobra compiler.
+		Creates and "returns" the Process instance via the `process` argument.
+		Prints the output and returns it.
+		This does not exit on any errors. Check the process yourself.
+		"""
+		return .runCommand(_snapshotCompilerPath to !, args, out process)
+
+	def runSourceCobra(args as String) as String
+		process as Process?
+		output = .runSourceCobra(args, out process)
+		if process.exitCode, .error('Exit code from running Source Cobra: [process.exitCode]')
+		return output
+
+	def runSourceCobra(args as String, process as out Process?) as String
+		return .runCommand('cobra.exe', args, out process)
+
+
+	## Stages
+
+	def printPlatform
+		.startStage('Print Platform Description')
+		.printPlatformPair('Platform', CobraCore.operatingSystemDescription)
+		if .isRunningOnUnix
+			.printPlatformCommand('sw_vers')  # Mac OS X
+			# .printPlatformCommand('lsb_release -a')  # could try /etc/*-release if this fails
+			.printPlatformPairCommand('Uname', 'uname -a')
+		else
+			# systeminfo is commented out below.  it can churn the hard drive to butter when it
+			# lists hotfixes and there is option to skip them.  additionally, the info is fairly
+			# well covered by other platform commands.
+			# .printPlatformCommand('systeminfo', ['OS Name:', 'OS Version:'])
+			.printPlatformPairCommand('WMI Op Sys Ver', 'wmic os get Caption,CSDVersion /value')
+			.printPlatformPairCommand('Cmd Op Sys Ver', 'cmd.exe /c ver')
+		.printPlatformPair('Virtual Machine', if(CobraCore.isRunningOnMono, 'Mono', '.NET'))
+		.printPlatformPair('CLR Version', Assembly.getAssembly(Object).imageRuntimeVersion)
+		.printPlatformPair('Env Command Line', Environment.commandLine)
+		.printPlatformPair('Env Current Dir', Environment.currentDirectory)
+		.printPlatformPair('Env OS Version', Environment.osVersion)
+		.printPlatformPair('Env System Dir', Environment.systemDirectory)
+		.printPlatformPair('Env Version', Environment.version)
+		if .isRunningOnUnix
+			.printPlatformPairCommand('Mono', 'mono --version')
+		else
+			.printPlatformPairCommand('.NET Dirs', r'cmd.exe /c "dir %WINDIR%\Microsoft.Net\Framework\v* /O:-N /B"')
+		print
+
+	def printPlatformPair(key as String, value)
+		key += ':'
+		print '[key.padRight(18)] [value]'
+
+	def printPlatformPairCommand(key as String, command as String)
+		.printPlatformPair(key, _tighten(_platformCommand(command)))
+
+	def _tighten(s as String?) as String?
+		if s
+			s = s.replace('\r', '').replace('\n', ' ; ').replace('\t', ' ')
+			while s.contains('  '), s = s.replace('  ', ' ')
+			while s.contains('; ;'), s = s.replace('; ;', '; ')
+			while s.contains('  '), s = s.replace('  ', ' ')
+		return s
+
+	def printPlatformCommand(command as String)	
+		.printPlatformCommand(command, List<of String>())
+
+	def printPlatformCommand(command as String, grepList as IList<of String>)
+		output = _platformCommand(command)
+		if output is nil, return
+		if grepList.count > 0
+			for line in output.splitLines
+				found = false
+				for grep in grepList
+					if line.startsWith(grep)
+						found = true
+						break
+				if found, _printRawLine(line)
+		else
+			for line in output.splitLines
+				_printRawLine(line)
+
+	def _platformCommand(command as String) as String?
+		# fails silently as some platform commands may not be available
+		if ' ' in command
+			command, args = command.split(@[c' '], 2)
+		else
+			args = ''
+		p = Process()
+		p.startInfo.fileName = command
+		p.startInfo.arguments = args
+		try
+			return p.runAndCaptureAllOutput.trim
+		catch
+			return nil
+
+	def _printRawLine(line as String)
+		i = line.indexOf(': ')
+		if i == -1, i = line.indexOf(':\t')
+		if i <> -1
+			.printPlatformPair(line[:i].trim, line[i+1:].trim)
+		else
+			print line
+
+	def verifyElevatedPermissions
+		.startStage('Verify running as admin user')
+		if not .isAdmin
+			.error('Please run this executable as an admin user.')
+
+	def verifyInstallDirectory
+		.startStage('Verify installation directory')
+		default = if(.isRunningOnUnix, .installDirectories[1], .installDirectories[0])
+		if File.exists(.configFileName)
+			# get install directory from first line of the file
+			useDir = File.openText(.configFileName).readLine
+			if useDir and useDir.trim.length, default = useDir.trim
+		# TODO: prompt the user for the location
+		.requireDir(default)
+		_targetDir = default
+		print
+
+	def verifyInWorkspace
+		.startStage('Verify running in workspace')
+		msg = 'The current directory does not appear to be a workspace. This program is for installing from the workspace.'
+		if not File.exists('Compiler.cobra'), .error(msg)
+		if not Directory.exists('Snapshot'), .error(msg)
+		print 'Verified.'
+		print
+
+	def askNet4
+		.startStage('.NET 4.0/4.5 Prompt')
+		if _willForceDotNet4
+			print '-net4 was passed on the command line'
+			answer = 'y'
+		else
+			print 'Cobra can be installed for .NET 2.0/3.0/3.5 or .NET 4.0/4.5.'
+			default = 'n'
+			if CobraCore.isRunningOnMono
+				mono = CobraCore.monoVersionString
+				if mono and mono.length >= 'x.y'.length
+					if mono.startsWith('3.')
+						default = 'y'
+					else if mono.startsWith('2.') and mono.split(c'.')[1] in ['10', '11', '12']
+						default = 'y'
+			else if .isRunningOnWindows
+				# windowsPath = Environment.getFolderPath(Environment.SpecialFolder.Windows) # .NET 4 only
+				windowsPath = .envVar('WINDIR') ? .envVar('SYSTEMROOT')
+				if windowsPath
+					net4Path = Path.combine(windowsPath, r'Microsoft.NET\Framework\v4.0.30319\csc.exe')
+					if File.exists(net4Path), default = 'y'
+			while true
+				print 'Do you want to install for .NET 4.0/4.5? \[[default]] ' stop
+				answer = Console.readLine.trim
+				if answer == '', answer = default
+				answer = answer[0].toString.toLower
+				if answer in 'yn', break
+		print
+		if answer == 'y'
+			_willForceDotNet4 = true
+			.setUpCLR4(_args)
+
+	def verifyVirtualMachineVersion
+		if CobraCore.isRunningOnMono
+			.startStage('Verify Novell Mono version')
+			minMonoVersion = if(_willForceDotNet4, '2.10', '2.6')
+			vers = CobraCore.monoVersionString
+			if vers is nil or vers.trim == ''
+				.error('Cannot determine Mono version. Please install Mono [minMonoVersion] or higher.')
+			else
+				print 'Mono Version', vers
+				parts = vers.split(c'.')
+				if parts and parts[0] >= '2'
+					print 'Verified >= [minMonoVersion]'
+					print
+				else
+					.error('Mono version must be [minMonoVersion] or higher.')
+
+	def locateSnapshotCompiler
+		.startStage('Locate and test Cobra Snapshot compiler')
+		_snapshotCompilerPath = 'Snapshot[.slash]cobra.exe'
+		if not File.exists(_snapshotCompilerPath)
+			.error('Cannot locate [_snapshotCompilerPath].')
+		# Not needed; clutters the output; tends to obscure when the Snapshot is being used;
+		# _snapshotCompilerPath = Path.getFullPath(_snapshotCompilerPath)
+		output = .runSnapshotCobra('-about')
+		assert 'The Cobra Programming Language' in output
+		assert 'Copyright' in output
+		assert 'Usage' in output
+
+	def locateGacUtil
+		if _gacutil, return
+		.startStage('Locate gacutil.exe')
+		errorMsg = 'Cannot locate a gacutil. Maybe you can try again using the "Visual Studio Command Prompt" or ".NET SDK Command Prompt".'
+		if _willForceDotNet4 and .isRunningOnCLR2 and .isRunningOnWindows
+			prefixes = List<of String>()
+			for varName in ['PROGRAMFILES', 'ProgramFiles(x86)', 'ProgramW6432']
+				pfiles = .envVar(varName)
+				if pfiles and pfiles.length and pfiles not in prefixes, prefixes.add(pfiles)
+			if prefixes.count == 0
+				pfiles = Environment.getFolderPath(Environment.SpecialFolder.ProgramFiles)
+				if pfiles, prefixes.add(pfiles)
+			if prefixes.count == 0, .error('Cannot find a "Program Files" directory.')
+			for prefix in prefixes
+				# gacutil must be run externally and must come from .NET 4:
+				dirs = [
+					r'Microsoft SDKs\Windows\v8.0A\bin\NETFX 4.0 Tools',
+					r'Microsoft SDKs\Windows\v7.1\Bin\NETFX 4.0 Tools',
+					r'Microsoft SDKs\Windows\v7.0A\Bin\NETFX 4.0 Tools',
+					r'Microsoft SDKs\Windows\v8.0A\bin\NETFX 4.0 Tools',
+					r'Microsoft SDKs\Windows\v7.1\Bin\NETFX 4.0 Tools',
+					r'Microsoft SDKs\Windows\v7.0A\Bin\NETFX 4.0 Tools',
+					# note the following is wrong as it will be gacutil 3.5:
+					# r'Microsoft SDKs\Windows\v7.0A\Bin'
+				]
+				for dir in dirs
+					gacutil = Path.combine(Path.combine(prefix, dir), r'gacutil.exe')
+					if File.exists(gacutil)
+						# to-do: verify version number is 4.x
+						_gacutil = gacutil
+						print 'Found:', _gacutil
+						print
+						return
+			errorMsg += '\r\nYou may need to install the Windows SDK (https://www.google.com/search?q=windows+sdk+.net+4)'
+			.error(errorMsg)
+		slash = .slash
+		gacutil = 'gacutil'
+		p = Process()
+		p.startInfo.fileName = gacutil
+		p.startInfo.arguments = '-silent'
+		try
+			p.runAndCaptureAllOutput
+			found = true
+			print 'found in system PATH'
+		catch FileNotFoundException
+			pass
+		catch ComponentModel.Win32Exception
+			pass
+
+		if not found
+			# try to find the gacutil
+			print 'Searching for gacutil...'
+			gacutil = 'gacutil.exe'
+
+			dirs = [
+				r'Microsoft.NET\SDK\v2.0\bin',        # VS 2005 / SDK .NET 2.0
+				r'Microsoft SDKs\Windows\v6.0A\bin',  # VS 2008
+				r'Microsoft Visual Studio 8\SDK\v2.0\Bin',
+			]
+
+			# search %ProgramFiles% (which can differ internationally)
+			programFilesDir = Environment.getFolderPath(Environment.SpecialFolder.ProgramFiles)
+			for dir in dirs
+				path = '[programFilesDir][slash][dir][slash][gacutil]'
+				print 'checking:', path
+				if File.exists(path)
+					print 'found:', path
+					gacutil = path
+					found = true
+					break
+				# else, print path
+
+			if not found
+				for dir in dirs
+					# search drives for X:\Program Files\...
+					for drive in Directory.getLogicalDrives
+						drive = drive[:1]  # normalize to just one character
+						if drive <= 'B', continue
+						path = '[drive]:[slash]Program Files[slash][dir][slash][gacutil]'
+						print 'checking:', path
+						if File.exists(path)
+							print 'found:', path
+							gacutil = path
+							found = true
+							break
+						# else, print path
+					if found, break
+
+		if not found, .error(errorMsg)
+		_gacutil = gacutil
+		print 'Found:', _gacutil
+		print
+
+	def buildCobraCompiler
+		.startStage('Build new Cobra compiler')
+		args = '-compile [.compileFlags] -ert:yes'
+		args += ' cobra.cobra -files:files-to-compile.text'
+		if _platformArg, args += ' -sharp-args:\"[_platformArg]\"'
+		.runSnapshotCobra(args)
+		if not File.exists('cobra.exe'), .error('No cobra.exe file was produced.')
+
+	def getBaseVersion
+		.startStage('Retrieve Cobra base version number')
+		# It's called "base version" because it doesn't include any text after the numbers
+		# "0.8.0 post release" --> "0.8.0"
+		output = .runSourceCobra('-version')
+		reMatch = Regex.match(output, r'svn:(\d+)')
+		if reMatch.success
+			assert reMatch.value
+			_baseVersion = 'svn-' + reMatch.groups[1].toString
+		else
+			reMatch = Regex.match(output, r'\d+\.\d+\.\d+')
+			if reMatch.success
+				assert reMatch.value
+				_baseVersion = reMatch.value
+			else
+				.error('Could not extract base version number.')
+			_baseVersion += '-post'
+		# check for an informal release
+		parent = Path.getFullPath('..')
+		if File.exists('[parent][.slash]InformalRelease.text')
+			output = File.readAllText('[parent][.slash]InformalRelease.text')
+			re = Regex(r'\d+\-\d+\-\d+')
+			reMatch = re.match(output)
+			if reMatch.success
+				assert reMatch.value
+				_baseVersion += '-' + reMatch.value
+			else
+				.error('Could not extract date from InformalRelease.text')
+		print 'base version: [_baseVersion]'
+		print
+
+	def installLibrary(name as String, flags as String, files as String)
+		.buildLibrary(name, flags, files as String)
+		.installLibraryToGAC(name)
+		.verifyGacInstallation(name)
+
+	def buildLibrary(name as String, flags as String, files as String)
+		"""
+		Builds the copy of the Cobra Standard Library for installation to the GAC.
+		Must build the library using the Source cobra.exe, not the Snapshot
+		Always build with -debug since this is the copy for GAC installation. The debug info (mdb file)
+		will be installed to the GAC along with the dll. This is required for the -d compiler option.
+		"""
+		.startStage('Build [name] library')
+		args = '[flags] -debug [.compileFlags] -out:[name].dll'
+		args += ' -key-file:Cobra.Core[.slash]Cobra.Core.snk '
+		args += ' [files]'
+		if _platformArg, args += ' -sharp-args:\"[_platformArg]\"'
+		.runSourceCobra(args)
+
+	def installLibraryToGAC(name as String)
+		.startStage('Install [name] library to the GAC')
+		dllName = name + '.dll'
+		if _willForceDotNet4 and .isRunningOnCLR2 and .isRunningOnWindows
+			# have to run gacutil command line
+			.locateGacUtil
+			.runCommand(_gacutil, '-i [dllName] -f')
+		else
+			try
+				print 'Invoking Publish.GacInstall...'
+				Publish().gacInstall(dllName)
+				print 'Done.'
+				print
+			catch NotImplementedException
+				print 'Not implemented exception.'
+				print 'Will attempt to use gacutil.exe.'
+				.locateGacUtil
+				.runCommand(_gacutil, '-i [dllName] -f')
+			catch e as Exception
+				print '[e.getType] e.message'
+
+	def verifyGacInstallation(name as String)
+		# TODO: verify the version number: Cobra.Core, Version=0.0.1.0
+		dllName = name + '.dll'
+		.startStage('Verifying [dllName] installed to the GAC')
+		if _willForceDotNet4 and .isRunningOnCLR2
+			print 'Skipping due to running on .NET 2, but installed for .NET 4.'
+			print
+			return
+		try 
+			# temporarily rename the standard library to ensure that assembly
+			# loading is attempted from the GAC.
+			tmpFileName = 'temp-[Process.getCurrentProcess.id]-[dllName]'
+			File.move(dllName, tmpFileName)
+			# avoid warning: "System.Reflection.Assembly.LoadWithPartialName(string)" is obsolete
+			# a = Assembly.loadWithPartialName(name)
+			# with dynamic binding:
+			assemblyType = Assembly to dynamic
+			a = assemblyType.loadWithPartialName(name)
+			if a is nil
+				.error('After installing the library "[name]", it cannot be loaded.')
+			if a.globalAssemblyCache
+				print '[dllName] has been successfully installed to the GAC.'
+			else
+				.warning('After installing the library "[name]", it can be loaded, but does not report that it is in the GAC.')
+			File.move(tmpFileName, dllName)
+		catch NotImplementedException
+			print 'Attempting to use gacutil.'
+			if not _gacutil, .locateGacUtil
+			output = .runCommand(_gacutil, '-l Cobra.Core')
+			if '[dllName], Version=' in output
+				print '[dllName] has been successfully installed to the GAC.'
+			else
+				.error('Installing the library "[name]" to the GAC was unsuccessful.')
+		print		
+
+	def verifyNewlyBuiltCobra
+		.startStage('Verify newly built Cobra compiler')
+		.runSourceCobra('-about')
+		msg = 'Cannot run hello.cobra with new compiler.'
+		if not _skipStdLib
+			if File.exists('hello.exe'), File.delete('hello.exe')  # fresh start
+			File.copy('Misc[.slash]hello.cobra', 'hello.cobra', true)
+			hello = 'hello.cobra'
+			output = .runSourceCobra('-ert:no [hello]')
+			if not output.startsWith('Hello'), .error(msg)
+			output = .runSourceCobra('[hello]')
+			if not output.startsWith('Hello'), .error(msg)
+		output = .runSourceCobra('-ert:yes [hello]')
+		if not output.startsWith('Hello'), .error(msg)
+
+	def copyFilesToInstallDirectory
+		require _targetDir is not nil
+		.startStage('Copy files to install directory')
+		slash = .slash
+		targetDir = _targetDir
+
+		if targetDir, .requireDir(targetDir)
+		if Directory.exists(Path.combine(targetDir, 'Source'))
+			print 'The directory "[targetDir]" appears to contain a workspace or snapshot of the'
+			print 'Cobra source code, due to containing the subdirectory "Source".'
+			print 'Installing to that location can lead to confusion and technical difficulties.'
+			print 'Consider clearing out "[targetDir]" and creating a workspace *inside* it called,'
+			print 'for example, "Workspace".'
+			print
+			.error('Cannot install to workspace or workspace snapshot. See message above.')
+
+		versionDir = '[targetDir][slash]Cobra-[_baseVersion]'  # ex: /usr/local/cobra/Cobra-0.8.0-post
+		.deleteDir(versionDir)
+		.requireDir(versionDir)
+		_versionDir = versionDir
+
+		# TODO: readme file?
+		parent = Path.getFullPath('..')
+
+		versionOutput = ''
+		if File.exists('[parent][slash]InformalRelease.text')
+			versionOutput = File.readAllText('[parent][slash]InformalRelease.text')
+		else
+			svnRevision = SubversionUtils.readSubversionRevision('.', /#checkParentDirs=#/true)
+			if svnRevision, versionOutput = svnRevision.toString
+		if versionOutput <> ''
+			fileName = '[versionDir][slash]Version.text'
+			print 'writing  :', fileName
+			File.writeAllText(fileName, versionOutput)
+		print
+
+		for dir in ['HowTo', 'Reusables', 'Samples', 'Supplements']
+			.copyContents('[parent][slash][dir]', '[versionDir][slash][dir]')
+
+		versionBinDir = '[versionDir][slash]bin'
+		.requireDir(versionBinDir)
+		print 'copy  bin: [versionBinDir]'
+		binFiles = 'cobra.exe Cobra.Sharp.*.dll WebAssets styles-cobra-doc.css styles-cobra-help.css styles-cobra-shl.css styles-exception-report.css styles-output-html.css'.split.toList
+		for lib in .libs
+			binFiles.add(lib['name'] + '.dll')
+			if File.exists(lib['name'] + '.dll.mdb'), binFiles.add(lib['name'] + '.dll.mdb')
+			if File.exists(lib['name'] + '.dll.pdb'), binFiles.add(lib['name'] + '.dll.pdb')
+		for fileName in binFiles
+			if Directory.exists(fileName)
+				.copyContents(fileName, '[versionBinDir][slash][fileName]')
+			else
+				for fileName2 in Directory.getFiles('.', fileName)  # glob
+					File.copy(fileName2, '[versionBinDir][slash][fileName2]')
+
+		.copyContents('Cobra.Core', '[versionBinDir][slash]Cobra.Core')
+
+		# delete _svn or .svn from the installation directory
+		.findAndDeleteDir(versionDir, '_svn')
+		.findAndDeleteDir(versionDir, '.svn')
+
+		# create cobra.bat / cobra for invoking the latest version
+		baseBinDir = '[targetDir][slash]bin'
+		.requireDir(baseBinDir)
+		if .isRunningOnUnix
+			_cobraCommandPath = '[baseBinDir][slash]cobra'
+			print 'writing  :', _cobraCommandPath
+			using f = File.createText(_cobraCommandPath)
+				f.writeLine('#!/bin/sh')
+				f.writeLine('exec mono "[versionDir][slash]bin[slash]cobra.exe" "$@"')
+			.runCommand('chmod', "a+x '[_cobraCommandPath]'")
+		else
+			_cobraCommandPath = '[baseBinDir][slash]cobra.bat'
+			print 'writing  :', _cobraCommandPath
+			using f = File.createText(_cobraCommandPath)
+				f.writeLine('@"[versionDir][slash]bin[slash]cobra.exe" %*')
+			print
+
+	def verifyNewlyInstalledCobra
+		.startStage('Verify newly installed Cobra compiler')
+		output = .runCommand(_cobraCommandPath, '-about', true)
+		if not output.startsWith('The Cobra Programming Language')
+			.error('Cannot run the installed Cobra with -about')
+		output = .runCommand(_cobraCommandPath, '-ert:yes Misc[.slash]hello.cobra', true)
+		if not output.startsWith('Hello')
+			.error('Cannot run the installed Cobra on "hello.cobra"')
+
+	def cleanUpWorkspace
+		.startStage('Clean up workspace')
+		# By removing cobra.exe and friends from the workspace,
+		# we minimize the chances that the user runs the local Cobra compiler
+		# instead of the installed one.
+		fileNames = ['cobra.exe']
+		for lib in .libs, fileNames.add(lib['name'] + '.dll')
+		for fileName in fileNames
+			for ext in ['', '.mdb', '.pdb']
+				try, File.delete(fileName+ext)
+				catch Exception, pass
+
+	def installInPath
+		.startStage('Install "cobra" into a system path directory')
+		commandName = if(.isRunningOnUnix, 'cobra', 'cobra.bat')
+		slash = .slash
+		paths = (.envVar('PATH') ? '').split(Path.pathSeparator).toList
+		for commandDir in paths
+			if commandDir == '.', continue  # skip the 'cobra' in the <workspace>/Source directory
+			# print 'checking path:', commandDir
+			if commandDir.startsWith('~')
+				home = .envVar('HOME')
+				if home, commandDir = home + commandDir[1:]
+			commandPath = Path.getFullPath('[commandDir][slash][commandName]')
+			if File.exists(commandPath)
+				print 'found in PATH:', commandPath
+				found = true
+				break
+#		print
+		baseBinDir = '[_targetDir][slash]bin'
+		if found
+			if String.compare(commandPath, '[baseBinDir][slash][commandName]', not .isRunningOnUnix) == 0
+				# e.g., if the PATH already points to the install directory
+				print 'Your PATH already contains [baseBinDir]'
+				print 'so you can invoke "cobra" from any directory.'
+			else
+				if .newlyCompiledFileIsSymlinkedFromOneFoundOnPath(_cobraCommandPath, commandPath)
+					print 'The existing "cobra" in your path is the correct'
+					print 'symbolic link and has not been changed.'
+				else
+					.copyCobraCommandTo(commandPath, true)
+		else if '/usr/local/bin' in paths
+			.copyCobraCommandTo('/usr/local/bin/[commandName]', false)
+		else
+			# TODO: on unix, create a symlink in /usr/local/bin or /usr/bin if they exist and are in the path
+			print 'The Cobra compiler is not in your PATH. To remedy you can:'
+			print '1. Add [Path.getDirectoryName(_cobraCommandPath)] to your PATH'
+			print '2. Copy [_cobraCommandPath] to any directory in your PATH'
+		print
+
+	def newlyCompiledFileIsSymlinkedFromOneFoundOnPath(cobraCommandPath, commandPath) as bool
+		if .isRunningOnUnix
+			monoAssembly = Assembly.load('Mono.Posix, Version=2.0.0.0, Culture=neutral, PublicKeyToken=0738eb9f132ed756')
+			unixFileSystemInfo = monoAssembly.getType('Mono.Unix.UnixFileSystemInfo') to dynamic
+			if unixFileSystemInfo
+				fileInfo = unixFileSystemInfo.getFileSystemEntry(commandPath)
+				if fileInfo.isSymbolicLink and fileInfo.contentsPath == cobraCommandPath
+					return true
+		return false
+
+	def copyCobraCommandTo(commandPath as String, alreadyExisted as bool)
+		require commandPath.length
+		print 'copy from:', _cobraCommandPath
+		print '       to:', commandPath
+		try, File.delete(commandPath)
+		catch Exception, pass
+		File.copy(_cobraCommandPath, commandPath, true)
+		print
+		if alreadyExisted
+			print 'The existing "cobra" in your path at'
+			print commandPath
+			print 'has been replaced with the new one.'
+		else
+			print 'The "cobra" command has been installed in your PATH at'
+			print commandPath
+
+	def changeDirectoryInstruction
+		if .isRunningOnWindows, return  # the .bat file takes care of this
+		# but on unix-family systems, you cannot change the working dir of a parent process
+		.startStage('Change directory instruction')
+		print 'Now that Cobra has been installed, pleased change out of the'
+		print 'current directory, such as:'
+		print
+		print 'cd ../..'
+		print

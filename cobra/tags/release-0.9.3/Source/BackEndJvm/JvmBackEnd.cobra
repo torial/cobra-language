@@ -1,0 +1,336 @@
+# Backend for generating Java code to run on a JVM - Currently this is cross-compile only fm .net/mono.
+use System.Diagnostics
+
+class JvmBackEnd inherits BackEnd
+
+	var _objectTypeProxy as AbstractTypeProxy?
+	var _typeTypeProxy   as AbstractTypeProxy?
+
+	cue init(compiler as Compiler)
+		base.init(compiler)
+		_name = 'java-jvm'
+		_runTimeLibFileName = 'CobraCore.jar'
+		_runTimeLibNativeSourceFileName = 'CobraImp.java' # backEnd source file containing native code support for Cobra.Core
+
+		
+		_tagToTypeName = { 
+			'Object': 'Java.Lang.Object',
+			'Type'	: 'Java.Lang.Class<of>',	# java.lang.Type is a marker interface
+			'String'	: 		'Java.Lang.String',
+			#'Exception' : 		'Java.Lang.RuntimeException',
+			'Exception' : 		'Java.Lang.Exception',
+
+			'Delegate'  : 		'Cobra.Core.DelegateO',
+			#'Delegate<of>' :	'Cobra.Core.Delegate<of>',
+			'Attribute' : 		'Java.Lang.Annotation.Annotation',
+			'ICloneable': 		'Java.Lang.Cloneable', 
+			'IEnumerable': 		'Java.Lang.Iterable',
+			'IEnumerator': 		'Java.Lang.Iterator',
+			'IEnumerable<of>' : 'Java.Lang.Iterable<of>',
+			'IEnumerator<of>' : 'Java.Lang.Iterator<of>',
+			'IDictionaryEnumerator' : 'Java.Lang.Iterator', # non generic Dictionary enumer interface - Non existant
+			'ICollection': 		'Java.Util.Collection',	    # non generic collection interface Non existant in java
+			'ICollection<of>': 	'Java.Util.Collection<of>',
+			'IList'	:  			'Java.Util.List<of Object>',	# non generic List interface
+			'IList<of>'	:  		'Java.Util.List<of>',
+			'List<of>':   		'Java.Util.ArrayList<of>',
+			#'IDictionary':   	'Java.Util.Map<of Object,Object>', # Non Generic Map/Dict interface
+			'IDictionary':   	'Java.Util.Map<of,>', # Non Generic Map/Dict interface 
+			'IDictionary<of,>': 'Java.Util.Map<of,>',
+			'Dictionary<of,>' : 'Java.Util.HashMap<of,>',
+			'KeyValuePair<of,>':'Java.Util.Map<of,>.Entry<of,>',
+			'Set<of>': 			'Java.Lang.HashSet<of>',
+
+			'bool'	:  'Java.Lang.Boolean',  # boolean
+			'char'  :  'Java.Lang.Character',# char
+			'decimal': 'Java.Lang.Decimal',	#  virtualised -> Double
+			'float':   'Java.Lang.Float',	# float	
+			'float32': 'Java.Lang.Float',	# float	
+			'float64': 'Java.Lang.Double',	# double	
+			'single':  'Java.Lang.Float',	# float	
+			'double':  'Java.Lang.Double',	# double	
+			'sbyte'	:  'Java.Lang.Byte',	# byte
+			'int16'	:  'Java.Lang.Short',	# short	
+			'int32'	:  'Java.Lang.Integer',	# int		
+			'int64'	:  'Java.Lang.Long',	# long
+			'int'	:  'Java.Lang.Integer',	# int primitive (struct) - need same for other primitives??		
+			# rest are unsigned, n/a in Java. But still need to be distinct.
+			# Invent  some fake names and remap at javaClass level
+			'byte'	:  'Java.Lang.UByte',	# virtualised -> Short 
+			'uint16':  'Java.Lang.UShort',	# virtualised -> Integer	
+			'uint32':  'Java.Lang.UInteger',# virtualised -> Long
+			'uint64':  'Java.Lang.ULong',	# virtualised -> Long
+			
+			}
+		
+	def makePhases(phases as IList<of Phase>) is override
+		# TODO
+		#phases.add(ApplyExtendedClasses(.compiler) # ?? done here or earlier
+		#phases.add(AggregatePartialClassesCodePhase(.compiler)
+		phases.add(GenerateJavaCodePhase(.compiler))
+		phases.add(CompileJavaCodePhase(.compiler))
+		
+	def getRecommendedBuiltInType(parentNameSpace as NameSpace?, name as String) as String? is override
+		n = nil to String?
+		if parentNameSpace and parentNameSpace.fullName == 'Java.Lang'
+			branch name
+				on 'Boolean', n = 'bool'
+				on 'boolean', n = 'bool'
+				#on 'SByte',   n = 'int8'
+				on 'Byte',    n = 'uint8'
+				on 'byte',    n = 'uint8'
+				on 'Short',   n = 'int16'
+				on 'short',   n = 'int16'
+				#on 'UInt16',  n = 'uint16'
+				on 'Integer',   n = 'int32'
+				#on 'UInt32',  n = 'uint32'
+				on 'Long',    n = 'int64'
+				on 'long',    n = 'int64'
+				on 'UInt64',  n = 'int64'
+				on 'Character',    n = 'char'
+				on 'Float',  n = 'float32'
+				on 'Double',  n = 'float'
+				on 'BigDecimal', n = 'decimal' # eventually
+		return n
+
+	def computeOutName as String is override
+		return .compiler.computeOutNameJava 
+		
+	def genNativeModule(filename as String, verbosity as int) as Module? is override
+		m as Module?
+		if filename.endsWith('.java')
+			if verbosity, print 'Noting  [filename] as JavaModule'  # extra space to line up with 'Parsing [filename]'
+			m = JavaModule(filename, verbosity)
+		return m
+		
+	get baseExeName as String is override
+		"""Resulting Executable file name for compiled file(s) sans extension."""
+		return .compiler.javaMainClass
+	
+	get fullExeName as String is override
+		"""Resulting executable file name (pathname+extn) for compiled file(s)."""
+		return .compiler.fullJarFileName
+			
+	def setupRunProcess(baseExe as String, fullExe as String) as Process is override
+		"""
+		Setup compiled java process to run assuming using an executable jar file.
+		All info needed should be already set in jarfile manifest - i.e main entry point 
+		and any classpath dependencies
+		"""
+		p = Process()
+		p.startInfo.fileName = 'java'
+		# below is same as 
+		#args = ' -jar [.compiler.fullJarFileName]'
+		args = ' -jar [fullExe]'
+	
+		p.startInfo.arguments = args + ' '
+		#print p.startInfo.fileName, p.startInfo.arguments
+		return p		
+	
+	def setupRunProcessClass(baseExe as String, fullExe as String) as Process #is override
+		"""
+		Setup running a java class file(s), using CobraCore.jar and assuming jarfiles
+		needed set in CLASSPATH env var ('.')
+		Superseded by setupRunProcess above. 	
+		"""
+		p = Process()
+		p.startInfo.fileName = 'java'
+		clPath = Path.getDirectoryName(CobraCore.exePath) to !
+		clPath = Path.combine(clPath, 'CobraCore.jar')
+		classpath = Environment.getEnvironmentVariable('CLASSPATH')
+		cpSep = if(CobraCore.isRunningOnUnix, ':', ';')
+		classpath = '.[cpSep][clPath][cpSep][classpath]'
+		# TODO: additional classpaths for  references 
+		args = '-ea -cp "[classpath]"'
+		args += ' [baseExe]'
+	
+		p.startInfo.arguments = args + ' '
+		#print p.startInfo.fileName, p.startInfo.arguments
+		return p		
+
+	def setDefaultUseDirectives(ns as NameSpace) is override
+		# java packages available by default
+		useToken = Token('(implicit)', 1, 1, 1, 'USE', 'use', nil)
+		# java uses lowercase for package names - Cobra stay capitalised and we remap it
+		ns.addUseDirective(UseDirective(useToken, ['Java', 'Lang']))
+		#ns.addUseDirective(UseDirective(useToken, ['System', 'Collections', 'Generic'])) # generics built in
+		ns.addUseDirective(UseDirective(useToken, ['Java', 'Io']))
+		ns.addUseDirective(UseDirective(useToken, ['Java', 'Util']))
+		ns.addUseDirective(UseDirective(useToken, ['Java', 'Text']))
+		ns.addUseDirective(UseDirective(useToken, ['Cobra', 'Core']))
+		
+	def fixLibExtension(libRef as String) as String is override
+		"""
+		Augment given lib reference string with .jar backend extension if not already have one
+		"""
+		or require libRef.length
+		and ensure result.endsWith('.jar')
+		if not libRef.endsWith('.jar')
+			libRef += '.jar'
+		return libRef
+	
+	def loadLibReference(reference as String) as String? is override
+		"""
+		Load referenced library (jar file)
+		"""
+		# Currently with cross compile fm .Net cant do this (easily) as not in a java environ
+		# (can we use Ikvm for this to bootstrap?)
+		# so what we will do is test for the existance of the jarfile in some sensible places
+		# (cwd, classpath, default install rt and extensions dir) and if it is found return true
+		#
+		#return .compiler.javaLoadReference(reference)
+		# -> reference -> jarFile -> JarSig(jarFile) -> javaReadJar
+		assert reference.endsWith('.jar')
+		return .compiler.jvmLoadReference(reference)   # in ScanJvmType
+	
+	def readSystemTypes is override
+		# Initially we will rely on a external java tool to have been run to produce a precis
+		# file in a known place (same as cobra compiler) containing exported types for
+		# items in a jar file.
+		
+		# JarSig is a holder for a jarfile or package extended with info on contained classes.
+		# javaReadJar loads info on contained classes into Cobra
+		# rt.jar is only one we need
+		JarSig.reset
+		.compiler.javaReadJar(JarSig('rt.jar'))
+	
+	def fixMemberSigs is override
+		.compiler.jvmFixNilableMemberSigs
+		.compiler.jvmFixIndexerMemberSigs
+		
+	def installNativeMethods(box as Box, nativeType as NativeType) is override
+		.compiler.installJvmNativeMethods(box, nativeType)
+		#pass # TODO
+
+	def cobraNameForNativeBoxName(nativeBoxName as String) as String is override
+		return JvmTypeProxy.cobraNameForJvmBoxName(nativeBoxName)
+	
+	def isRunnableFile( fullExeFileName as String) as bool is override
+		"""Test if filename is runnable ( vs a library or something else) """
+		return fullExeFileName.endsWith('.class') or fullExeFileName.endsWith('.jar')
+
+	# Types
+	get objectTypeProxy as AbstractTypeProxy  is override
+		"""Type proxy for backEnd root of Object hierarchy."""
+		if  not _objectTypeProxy
+			_objectTypeProxy = JvmTypeProxy(JarSig.lookupClassByCobraName('Java.Lang.Object'))
+		return _objectTypeProxy	to !
+			
+	get typeTypeProxy  as AbstractTypeProxy  is override
+		"""Type proxy for BackEnd notion of a class describing a Type."""
+		if  not _typeTypeProxy
+			_typeTypeProxy = JvmTypeProxy(JarSig.lookupClassByCobraName('Java.Lang.Class'))
+		return _typeTypeProxy to !	
+		
+	def nativeTypeProxy(type as NativeType) as NativeTypeProxy  is override
+		return JvmTypeProxy(type)
+	
+	def nativeType(type as dynamic) as NativeType  is override
+		return JvmNativeType(type)
+	
+	def nativeTypeByName(qualifiedNameOrTag as String) as NativeType is override
+		# map the qualified name of .net aliased types  to java equivalents
+		# bool, char, decimal, single, double, sbyte, int{16,32,64}, byte, uint{16,32,64}, 
+		qualifiedName = .resolveTypeTag(qualifiedNameOrTag)
+		return JvmNativeType(.compiler.jvmTypeByName(qualifiedName))
+		/#
+		These are the type tags used directly by the compiler code.
+			
+		  	bool 		'Java.Lang.Boolean'
+			char  		'Java.Lang.Char'
+			decimal 	'??System.Decimal'	
+			decimal 	'Java.Lang.Float'	
+			single 		'Java.Lang.Float'		
+			double		'Java.Lang.Double'		
+			sbyte		'Java.Lang.Byte'		
+			int16		'Java.Lang.Short'		
+			int32		'Java.Lang.Integer'		
+			int64		'Java.Lang.Long'	
+			# java not have unsigned types (:-( use next largest signed Type
+			byte		'Java.Lang.Short' #& 0x7f 		
+			uint16		'Java.Lang.Integer'		
+			uint32		'Java.Lang.Long'		
+			uint64		'Java.Lang.Long'		
+		#/
+		
+	def determineExtnNativeType(extn as Extension, nativeType as NativeType) as NativeType is override
+		return extn.jvmExtnNativeType(nativeType) 	# ScanJvmType
+
+	def handleNameSpaceNameCollision(ns as NameSpace, token as IToken, name as String) as NameSpace is override
+		"""
+		Java separates Namespaces and other symbols - Cobra architecture
+		(based on Clr) doesnt easily so currently we'll rename and warn that
+		use of the namespace needs to be changed in user code (:-).
+		"""
+		#print 'In [ns.name] there is already a non-namespace declaration named "[name]".'
+		#print 'Cobra doesnt allow this - a declaration must be either a Namespace or a Type'
+		#print 'so the namespace "[name]" is renamed within Cobra to be "[name]NS".'
+		#print 'Any use of the namespace in cobra code must be changed accordingly.'
+
+		#print 'Cobra name collision in namespace "[ns.name]" for child namespace "[name]" and an existing declaration. Use name "[name]NS" for java namespace/package "[name]" .'
+		print 'Java "[ns.name].[name]" renamed in cobra to "[ns.name].[name]NS". (cobra name collision)'
+		name = name+'NS'
+		return ns.getOrMakeNameSpaceNamed(token, name) # recursive
+		
+	def prepSystemObjectClass(box as Box) is override
+		box.prepSystemObjectClassJvm
+		
+	def scanGenericArgs(box as Box)	 is override
+		box.scanGenericArgsJvm
+		
+	def scanNativeType(box as Box)	 is override
+		""" Do scan/Load of Types from a dll """
+		box.scanNativeTypeJvm
+
+	def scanNativeType(edcl as EnumDecl)  is override
+		edcl.scanNativeTypeJvm
+		
+	def setUnderlyingType(edcl as EnumDecl)	 is override
+		edcl.setUnderlyingTypeJvm
+	
+	def getEnumeratorMember(box as Box) as IMember? is override
+		""" Find iterator method member in given Box."""
+		return box.getIteratorMemberJvm
+		
+	def getEnumeratorMemberType(box as Box, rt as IType) as IType? is override
+		"""Return type from lookup of iterator 'next' field in given Box."""
+		return box.getIteratorNextTypeJvm(rt)
+
+	def validatePrintDestType(t as IType, n as Stmt) is override
+		"""
+		Check that the given Type is a valid destination for a print statement redirection.
+		If not record an error message
+		"""
+		t = t.nonNil
+		if  t.isDescendantOf(.compiler.libraryType('Java.Io.Writer'))
+			return	# commonly PrintWriter or StringWriter
+		if  t.isDescendantOf(.compiler.libraryType('Java.Io.PrintStream'))
+			return	# for System.out
+		n.recordError('Invalid destination of type "[t.name]" for "print". Use a Java.Io.Writer or subclass thereof (PrintWriter, StringWriter) instead.')
+			
+				
+class GenerateJavaCodePhase inherits Phase
+
+	cue init(c as Compiler)
+		base.init(c)
+
+	get description as String is override
+		return 'Generating Java code'
+
+	def innerRun is override
+		c = .compiler
+		c.writeJava  # extension method
+		if c.willWriteTestInvocation
+			c.writeJavaTestInvocation
+
+
+class CompileJavaCodePhase inherits Phase
+
+	cue init(c as Compiler)
+		base.init(c)
+
+	get description as String is override
+		return 'Compiling Java code'
+
+	def innerRun is override
+		.compiler.compileJava

@@ -1,0 +1,20 @@
+class Test
+
+	def main is shared
+		t = Object
+		visited = false
+		if t is Object
+			visited = true
+		assert visited
+		
+		t = System.Object  # assign a qualified type
+		visited = false
+		if t is System.Object  # compare to a qualified type
+			visited = true
+		assert visited
+
+		t = System.Collections.IList
+		visited = false
+		if t is System.Collections.IList
+			visited = true
+		assert visited

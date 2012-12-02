@@ -1,0 +1,7 @@
+#.require. clr 
+namespace Test
+	class Test
+		def main
+			is shared
+			nl as String = Console.out.newLine
+			CobraCore.noOp(nl)

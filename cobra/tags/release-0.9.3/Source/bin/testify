@@ -1,0 +1,83 @@
+#!/bin/bash
+cd "`dirname "$0"`" ; cd ..
+
+tmpOutputFile=r-testify-all.text
+testifyOutputFile=r-testify.text
+
+failures=0
+successes=0
+
+if [ $# -eq 0 ] ; then
+	dirs=`ls -d -1 ../Tests/*-* | sort`
+else
+	dirs="$@"
+fi
+
+setUp() {
+	# clean Tests
+	pushd . > /dev/null
+	cd ../Tests/
+	./clean
+	popd > /dev/null
+	
+	# set aside last output
+	if [ -f $testifyOutputFile ]; then
+		mv $testifyOutputFile r-testify-last.text
+	fi
+
+	# remove tmp output collection file
+	echo "Started: `date`" > $tmpOutputFile
+
+	# set mono path to support using the Cobra.Core.dll in this directory
+	export MONO_PATH="`pwd`:$MONO_PATH"
+}
+
+testify() {
+	mono --debug cobra.exe -testify "$@"
+	exitCode=$?
+	if [ $exitCode -ne 0 ]; then
+		((failures++))
+	else
+		((successes++))
+	fi
+	cat $testifyOutputFile >> $tmpOutputFile
+}
+
+tearDown() {
+	mv $tmpOutputFile $testifyOutputFile
+}
+
+main() {
+	setUp
+	for dir in $dirs ; do
+		heading="\n\n== TESTIFY: $dir\n"
+		echo -e $heading
+		echo -e $heading >> $tmpOutputFile
+		testify "$dir"
+	done
+
+	msg='\nTotal Failures:\n'
+	msg+=`grep -i 'test failure' $tmpOutputFile | wc -l`
+	echo -e $msg
+	echo -e $msg >> $tmpOutputFile
+
+	# 2012-10-31
+	# these counters are not working correctly right now
+	# on ubuntu 12.04, got 10 failed directories and 11 successes
+	# but there were only 7 tests that failed so the max directories failed would be 7
+	# suspect that "cobra -testify" is exiting with 1 when it should not
+#	if [ $failures -gt 0 ] ; then
+#		msg="Directories that failed: $failures\n"
+#		msg+="Directories that succeeded: $successes"
+#		echo -e $msg
+#		echo -e $msg >> $tmpOutputFile
+#	fi
+	echo "Finished: `date`" >> $tmpOutputFile
+	tearDown
+}
+
+time main
+
+if [ $failures -gt 0 ] ; then
+	exit 1
+fi

@@ -1,0 +1,36 @@
+# .require. MySql.Data.dll
+"""
+To setup MySQL client access, see:
+	http://cobra-language.com/trac/cobra/wiki/SetUpMySqlOnUnixLike
+	http://dev.mysql.com/usingmysql/dotnet/
+
+To run:
+	cobra AccessMySQL.cobra
+
+Or just compile:
+	cobra -c AccessMySQL.cobra
+and then run:
+	mono mysql.exe
+"""
+
+@ref 'System.Data'
+@ref 'MySql.Data'
+
+use System.Data
+use MySql.Data
+use MySql.Data.MySqlClient
+
+class Program
+
+	def main
+		connectionString = 'Server=localhost;Database=mysql;User ID=root;Password=;Pooling=false'
+		using conn = MySqlConnection(connectionString) # IDbConnection
+			conn.open
+			using cmd = conn.createCommand # IDbCommand
+				sql = 'select * from user;'
+				cmd.commandText = sql
+				using reader = cmd.executeReader # IDataReader
+					while reader.read
+						userName = reader['User']
+						host = reader['Host']
+						print 'userName=[userName], host=[host]'

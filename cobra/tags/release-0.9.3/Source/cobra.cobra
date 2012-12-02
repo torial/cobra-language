@@ -1,0 +1,64 @@
+"""
+Any enhancements to this file may require enhancements to
+CobraMain-ObjectExplorer-WinForms.cobra.
+
+These files should be kept as small as reasonably possible.
+"""
+
+class CobraMain
+
+	shared
+
+		pro willTimeIt from var as bool
+		pro runTime from var as TimeSpan?
+		pro compiler from var as Compiler?
+		
+		def main
+			# CobraCore.willCheckAll = false
+
+			t = CobraCore.tracer
+			t.separator = '\n          - '
+			t.prefix = '\n    trace : '
+
+			sw = System.Diagnostics.Stopwatch()
+			sw.start
+			try
+				CommandLine().run
+			finally
+				sw.stop
+				if _willTimeIt
+					elapsed = sw.elapsed
+					didCompile = .compiler is not nil
+					didRun = .runTime is not nil
+					if didCompile and didRun
+						.printTimeIt('total', elapsed)
+						.printTimeIt('execute', .runTime to !)
+						.printCompileTimes(elapsed.subtract(.runTime to !))
+					else if didCompile
+						.printCompileTimes(elapsed)
+					else if didRun
+						.printTimeIt('execute', .runTime to !)
+					else
+						.printTimeIt('total', elapsed)
+
+		def printTimeIt(description as String, duration as TimeSpan)
+			print 'timeit [description.padRight(7)] = [duration]' stop
+			if duration.totalSeconds < 2
+				print ' | [duration.totalMilliseconds] ms' stop
+			print
+				
+		def printCompileTimes(elapsed as TimeSpan)
+			.printTimeIt('compile', elapsed)
+			if .compiler, .compiler.printTimingStats(elapsed)
+
+		def printEx(ex as Exception)
+			print
+			if true
+				print ex
+			else
+				print '[ex.getType.name]:'
+				print ex.message
+				if ex.innerException
+					print 'inner exception:'
+					.printEx(ex.innerException to !)
+			print
