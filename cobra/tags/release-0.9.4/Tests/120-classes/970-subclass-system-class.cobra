@@ -1,0 +1,16 @@
+# test subclassing a System class
+
+class NoWriter
+	inherits TextWriter
+
+	get encoding as Encoding is override
+		return nil to passthrough
+
+	def write(value as char) is override
+		pass
+
+
+class AccessNestedClass
+
+	def main is shared
+		assert System.Net.WebRequestMethods.Http.post == 'POST'

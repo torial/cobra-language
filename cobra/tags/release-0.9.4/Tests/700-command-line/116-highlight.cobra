@@ -1,0 +1,14 @@
+# test -highlight option. especially on a file with "def main" with no "is shared"
+
+class Test
+
+	def main
+		sourceFile = '110-hello.cobra'
+
+		source = File.readAllText(sourceFile)
+		assert 'is shared' not in source
+		
+		r = CobraCommand.find.run('-highlight [sourceFile]')
+		assert r.exitCode == 0
+		# trace r.output  # on mac: r.output='Writing gen-html/110-hello.cobra.html\n\n\n
+		assert 'Writing ' in r.output and 'hello.cobra' in r.output

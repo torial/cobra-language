@@ -1,0 +1,32 @@
+# .multi. 112-partial-multi-file-2.cobra
+
+class X is partial
+
+	shared
+		
+		def main
+			assert .foo == 'foo'
+			assert .over(3) == 6
+			assert .over(3.0d) == 9.0d
+			try
+				.fail1
+			catch ae1 as AssertException
+				lastFrame = ae1.stackTrace.trim.splitLines[0]
+				assert '-1.cobra' in lastFrame
+				assert '-2.cobra' not in lastFrame
+			try
+				.fail2
+			catch ae2 as AssertException
+				lastFrame = ae2.stackTrace.trim.splitLines[0]
+				assert '-1.cobra' not in lastFrame
+				assert '-2.cobra' in lastFrame
+
+		def over(i as int) as int
+			assert .foo == 'foo'
+			return i * 2
+
+		def bar as String
+			return 'bar'
+
+		def fail1
+			assert false

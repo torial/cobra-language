@@ -1,0 +1,17 @@
+enum A
+	B
+	C
+	C  # .error. already defined
+
+
+enum E
+
+	Ab
+	ab  # .error. different case
+	ac
+
+
+class P
+
+	def main
+		print 'done.'

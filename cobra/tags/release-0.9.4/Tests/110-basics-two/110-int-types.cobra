@@ -1,0 +1,269 @@
+class Test
+
+	def main
+		.testInt
+		.testUInt16
+		.testInt64
+		.testCompare
+		.testIntLits1
+		.testIntLits2
+		.testIntLits3
+		.testIntLits4
+		TestTruthfulness()
+
+	def testInt
+		i = 2
+		j = 4
+		k = i * j
+		assert k == 8
+
+	def testUInt16
+		i = 2 to uint16
+		j = 4 to uint16
+		assert i < j
+		assert j > i
+
+	def testInt64
+		i = 2 to int64
+		j = 4 to int64
+		i = 2
+		j = 4
+		k = i * j
+		assert k == 8
+		.passInt64(k)
+
+	def passInt64(x as int64)
+		assert x
+
+	def testCompare
+		u8 = 5 to uint8
+		assert u8 > 0
+		i64 = 10 to int64
+		assert i64 > u8
+		assert u8 <> 0
+		assert i64 <> u8
+		i64 = 5
+		assert u8 == i64
+
+	def testIntLits1
+		a as uint8  = 0
+		b as uint16 = 0
+		c as uint32 = 0
+		d as uint64 = 0
+		e as uint   = 0
+		a = 1
+		b = 2
+		c = 3
+		d = 4
+		e = 5
+		CobraCore.noOp(a, b, c, d, e)
+
+	def testIntLits2
+		a as int8  = 0
+		b as int16 = 0
+		c as int32 = 0
+		d as int64 = 0
+		e as int   = 0
+		a = 1
+		b = 2
+		c = 3
+		d = 4
+		e = 5
+		a = -1
+		b = -1
+		c = -1
+		d = -1
+		e = -1
+		CobraCore.noOp(a, b, c, d, e)
+
+	def testIntLits3
+		# new will be _?i(8,16,32,64)?, _?u(8,16,32,64)? 
+		# [uU][lL] NYI
+
+		i = 32761 
+		i0 = 32761_i32 
+		i1 = 32761i32 
+		assert i.getType == Int32
+		assert i0.getType == Int32
+		assert i1.getType == Int32
+	
+		i8 = 33 to int8
+		i8a = 33i8
+		i8b = 33_i8
+		assert i8.getType == SByte
+		assert i8a.getType == SByte
+		assert i8b.getType == SByte
+	
+		i16 = 3345 to int16
+		i16a = 3345i16
+		i16b = 3345_i16
+		assert i16.getType == Int16
+		assert i16a.getType == Int16
+		assert i16b.getType == Int16
+	
+		l = 23232 to int64
+		assert l.getType == Int64
+		##l0 = 23233L
+		la = 327652 to int64
+		assert la.getType == Int64
+		la0 = 327652_i64
+		assert la0.getType == Int64
+		la1 = 327652i64
+		assert la1.getType == Int64
+	
+		# unsigned
+		u = 655 to uint32
+		assert u.getType == UInt32
+	
+		u8 = 254 to uint8
+		assert u8.getType == Byte
+		u8a = 155u8
+		assert u8a.getType == Byte
+		u8b = 240_u8
+		assert u8b.getType == Byte
+	
+		u16 = 655 to uint16
+		assert u16.getType == UInt16
+		u16a = 655u16
+		assert u16a.getType == UInt16
+		u16b = 655_u16
+		assert u16b.getType == UInt16
+		u = 655u
+		assert u.getType == UInt32
+		u0 = 655_u32
+		assert u0.getType == UInt32
+		u1 = 655u32
+		assert u1.getType == UInt32
+		##u2 = 655U
+		ul = 32761 to uint64
+		assert ul.getType == UInt64
+		##ul1 = 32761UL
+		ula = 32761_u64
+		assert ula.getType == UInt64
+		ulb = 32761u64
+		assert ulb.getType == UInt64
+
+
+	def testIntLits4
+		a = 268_435_455
+		assert a.typeOf is int32
+		b = 4_294_967_295
+		assert b.typeOf is uint32
+		c = 68_719_476_735
+		assert c.typeOf is int64
+		d = 18_446_744_073_709_551_615
+		assert d.typeOf is uint64
+
+
+class TestTruthfulness
+
+	cue init
+		base.init
+		_int
+		_uint
+		_int32
+		_uint32
+		_int64
+		_uint64
+
+	def _int
+		# int
+		v as int = 0
+		assert not v
+		v = 1
+		assert v
+		v = -1
+		assert v
+
+		# int?
+		n as int?
+		assert not n
+		n = 0
+		assert not n
+		n = 1
+		assert n
+		n = -1
+		assert n
+
+	def _uint
+		# uint
+		v as uint = 0
+		assert not v
+		v = 1
+		assert v
+
+		# uint?
+		n as uint?
+		assert not n
+		n = 0
+		assert not n
+		n = 1
+		assert n
+
+	def _int32
+		# int32
+		v as int32 = 0
+		assert not v
+		v = 1
+		assert v
+		v = -1
+		assert v
+
+		# int32?
+		n as int32?
+		assert not n
+		n = 0
+		assert not n
+		n = 1
+		assert n
+		n = -1
+		assert n
+
+	def _uint32
+		# uint32
+		v as uint32 = 0
+		assert not v
+		v = 1
+		assert v
+
+		# uint32?
+		n as uint32?
+		assert not n
+		n = 0
+		assert not n
+		n = 1
+		assert n
+
+	def _int64
+		# int64
+		v as int64 = 0
+		assert not v
+		v = 1
+		assert v
+		v = -1
+		assert v
+
+		# int64?
+		n as int64?
+		assert not n
+		n = 0
+		assert not n
+		n = 1
+		assert n
+		n = -1
+		assert n
+
+	def _uint64
+		# uint64
+		v as uint64 = 0
+		assert not v
+		v = 1
+		assert v
+
+		# uint64?
+		n as uint64?
+		assert not n
+		n = 0
+		assert not n
+		n = 1
+		assert n

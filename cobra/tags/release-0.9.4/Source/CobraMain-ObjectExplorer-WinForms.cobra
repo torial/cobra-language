@@ -1,0 +1,69 @@
+"""
+Cobra Compiler WinForms Explorer
+
+This runs the Cobra compiler as usual, but then follows it up with a GUI window (using WinForms) that
+enables you to explore all the objects that resulted from compilation including the compiler, modules,
+namespaces, declarations, statements and expressions.
+
+"""
+
+use System.Windows.Forms
+
+
+class CobraMain
+
+	shared
+
+		pro willTimeIt from var as bool
+		
+		pro runTime from var as TimeSpan?
+
+		pro compiler from var as Compiler?
+
+		def main
+			has STAThread
+			# CobraCore.willCheckAll = false
+			
+			# Run the command line as usual:
+			startTime = DateTime.now
+			exc as Exception?
+			try
+				try
+					commandLine = CommandLine()
+					commandLine.run
+				finally
+					if _willTimeIt
+						print 'timeit = [DateTime.now.subtract(startTime)]'
+			catch exc as Exception?
+				pass
+
+			compiler = commandLine.compiler
+
+			# Now explore the results:
+			Application.enableVisualStyles
+			form = ObjectExplorer()
+			form.text = 'Cobra Compiler WinForms Explorer'
+			if exc, form.addKeyValue('Exception', exc)
+			if CobraCore.hasDetailedStackTrace
+				form.addKeyValue('Detailed Stack Trace', sharp'CobraCoreInternal.CobraImp.DetailedStackTrace')
+			
+			form.addKeyValue('CommandLine', commandLine)
+			form.addKeyValue('Compiler', compiler)
+
+			topDecls = List<of INode>()
+			for decl in compiler.globalNS.declsInOrder
+				topDecls.add(decl)
+			form.addKeyValue('Declarations (Global)', topDecls)
+
+			form.addKeyValue('Messages', compiler.messages)
+
+			topNameSpaces = List<of NameSpace>()
+			topNameSpaces.add(compiler.globalNS)
+			for module in compiler.modules
+				if module inherits CobraModule
+					if not module.isCobraLibrary
+						topNameSpaces.add(module.topNameSpace)
+			form.addKeyValue('Namespaces', topNameSpaces)
+
+			form.show
+			Application.run(form)

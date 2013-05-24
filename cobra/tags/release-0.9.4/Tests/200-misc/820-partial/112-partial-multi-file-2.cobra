@@ -1,0 +1,15 @@
+# .multipart.
+
+class X is partial
+	
+	shared
+	
+		def foo as String
+			assert .bar == 'bar'
+			return 'foo'
+
+		def over(d as decimal) as decimal
+			return d * 3
+
+		def fail2
+			assert false
