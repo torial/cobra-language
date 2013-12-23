@@ -1,0 +1,1865 @@
+class Stmt inherits SyntaxNode is abstract, partial
+
+	var _parent as INode?
+	
+	cue init(token as IToken)
+		base.init(token)
+
+	pro parent from var
+		"""
+		The node that the statement belongs to. This is being set on an as-needed basis.
+		Typical needs are for error checking, but could also include other purposes such as code generation.
+		The common place to set a node's `parent` is in the `_bindImp` of the parent 
+		"""
+		
+	def afterParserRecognizesStatement
+		pass
+
+	def afterStatementBindImp
+		"""
+		Invoked to let expressions know when they are used as statements. This default
+		implementation does nothing. Invoked by OneBlockCodeMember and BlockStmt.
+		"""
+		pass
+
+	def noAssignmentAllowed(expr as Expr)
+		"""
+		Utility method for IfStmt and WhileStmt which do not allow assignment in
+		their expressions.
+		"""
+		if expr inherits BinaryOpExpr
+			if expr.op=='ASSIGN'
+				.throwError('Cannot make an assignment in a flow control expression. Change to == or make the assignment just above.')
+			else if expr.op=='BANG_EQUALS'
+				.throwError('Cannot use an augmented assignment in a flow control expression. If you meant "does not equal" then use "<>". "a != b" means "a = a ! b" where "!" is an operator concerning nil.')
+			else if expr.op.endsWith('_EQUALS')
+				.throwError('Cannot use an augmented assignment in a flow control expression. Change to == or make the assignment just above.')
+
+	def bindVar(ve as NameExpr) as IVar
+		"""
+		Computes the _var from the _varExpr which is either IdentifierExpr or AsExpr.
+		May call `_error` and `inferredType` as needed.
+		Typical use: _var = .bindVar(_varExpr)
+		"""
+		# TODO: would prefer to do this as a mixin with two class vars:
+		# var _varExpr as NameExpr
+		# var _var as IVar?
+		varr as IVar?
+		if ve inherits IdentifierExpr
+			# find or infer
+			definition as INamedNode?
+			canBeUndottedMember = ve.name.canBeUndottedMemberName
+			usingExistingLocal = false
+			if canBeUndottedMember
+				assert .compiler.boxStack.count
+				definition = .compiler.symbolForName(ve.name, false) to passthrough
+				if definition is nil
+					ve.throwUnknownIdError
+			else
+				definition = .compiler.findLocal(ve.name)
+				# infer a local var
+				it = .inferredType
+				if it is nil
+					.throwError('Cannot infer the type for "[ve.name]" from the "for" loop.')				
+				if definition is nil
+					definition = LocalVar(ve.token, it).bindAll to INamedNode  # CC: axe cast after "as this"
+					.compiler.curCodeMember.addLocal(definition to LocalVar)
+				else
+					# using an existing local. that's fine as long as the types are the name
+					usingExistingLocal = true
+			if definition inherits IVar
+				varr = definition
+				if usingExistingLocal
+					ve.bindImp  # can't do this at the beginning of this method as it interferes with type inference. but here, it's an existing var so no "Unknown identifier" error will occur
+					assert definition.type
+					if definition.type is .compiler.passThroughType
+						varr.type = definition.type
+					else if not it.isAssignableTo(definition.type to !)
+						.throwError('Cannot redeclare "[ve.name]" as "[it.name]" because it was declared as "[definition.type.name]" earlier.') # TODO: would be nice to give the location of the other declaration				
+			else
+				.throwError('The definition of "[ve.name]" is not a variable which is what the "for" loop requires.')
+			ve.bindImp
+		else if ve inherits AsExpr
+			ve.bindImp
+			assert ve.definition
+			varr = ve.definition
+		else
+			throw FallThroughException(ve)
+		return varr to !
+
+	def inferredType as IType?
+		"""
+		Used by .bindVar so that the subclasses can implement their inferred type logic.
+		"""
+		return nil
+
+	var _canSetLine as bool
+
+	def bindImp as dynamic is override
+		# CC: and ensure result inherits Stmt
+		base.bindImp
+		assert .didBindImp, this
+		.postBindImp
+		return .bindImpResult
+
+	def postBindImp
+		.help
+		
+	def help
+		if not .hasError and .isHelpRequested
+			topic = .token.text + ' statement'
+			c = .compiler
+			hg = HelpGenerator(topic, this, c.curBoxMember, c.curBox)
+			hg.searchTerms.add(topic)
+			hg.generate
+			.compiler.warning(this, '@help at "[hg.path]".')
+
+	def _bindImp
+		base._bindImp
+		_canSetLine = .compiler.willTrackLocals
+		# note that the code member stack can be empty because of class vars (ex: var _foo = true)
+		# even the box stack can be empty because of assembly; has ...
+
+
+class AssertStmt
+	is partial
+	inherits Stmt
+
+	var _expr as Expr
+	var _info as Expr?
+
+	cue init(token as IToken, expr as Expr, info as Expr?)
+		base.init(token)
+		_expr = TruthExpr(expr)
+		_info = info
+
+	def addSubFields
+		base.addSubFields
+		.addField('expr', _expr)
+		.addField('info', _info)
+
+	get expr from var
+
+	get info from var
+
+	def _innerClone
+		base._innerClone
+		_expr = _expr.clone
+		if _info, _info = _info.clone
+
+	def _bindImp
+		base._bindImp
+		_expr.bindImp
+		e = _expr
+		if e.willChangeVar
+			if e inherits TruthExpr
+				e = e.expr
+			if e inherits AbstractAssignExpr
+				# TODO: should also cover any assignment expressions anywhere inside the expression
+				.throwError('Assert condition is an assignment. Since asserts may be suppressed these conditions should not have side effects. Perhaps you meant to do a comparison "==" instead of assignment "=".')
+			else
+				.throwError('Condition has a side effect. Since asserts may be suppressed at compile-time or run-time, their conditions cannot have side effects.')
+		# Augment any warning about non nilable expr evaluate to true
+		.compiler.augmentWarning(this, 'always evaluate to true because it is not nilable', _
+			'You can remove the expression', _
+			'This assertion is always true. You can remove the assertion or correct the condition')
+		if _info, _info.bindImp
+
+
+class CompileTimeTraceStmt inherits Stmt
+
+	# to-do: retire after @help is more mature
+
+	var _expr as Expr
+	
+	cue init(token as IToken, expr as Expr)
+		base.init(token)
+		_expr = expr
+
+	def addSubFields
+		base.addSubFields
+		.addField('expr', _expr)
+
+	get expr from var
+
+	def _innerClone
+		base._innerClone
+		_expr = _expr.clone
+
+	def _bindImp
+		base._bindImp
+		expr = _expr
+		# this output will likely need to be done as warning output so it works with IDEs
+		prefix = '    *'
+		print
+		print '* Compile-time trace at [.token.toTechString]'
+		print '[prefix] before bind imp on expression: [expr.toCobraSource] = [expr]'
+		expr.bindImp
+		print '[prefix] after bind imp on expression:  [expr.toCobraSource] = [expr]'
+		dexpr = expr to dynamic
+		try
+			defi = dexpr.definition
+			if defi, print '[prefix] definition = [defi]'
+		catch DynamicOperationException
+			print '[prefix] no definition'
+		try
+			type = dexpr.type
+			if type, print '[prefix] type = [type]'
+		catch DynamicOperationException
+			print '[prefix] no type'
+
+
+class BranchStmt inherits Stmt is partial
+
+	cue init(token as IToken, expr as Expr, onParts as List<of BranchOnPart>, elsePart as BlockStmt?)
+		base.init(token)
+		_expr = expr
+		_onParts = onParts
+		_elsePart = elsePart
+
+	def addSubFields
+		base.addSubFields
+		.addField('expr', .expr)
+		.addField('onParts', .onParts)
+		.addField('elsePart', .elsePart)
+
+	get expr from var as Expr
+	get onParts from var as List<of BranchOnPart>
+	get elsePart from var as BlockStmt?
+	
+	def _innerClone
+		base._innerClone
+		_expr = _expr.clone
+		_onParts = _onParts.toList
+		for i in .onParts.count, .onParts[i] = .onParts[i].clone
+		_elsePart = _elsePart.clone
+
+	def _bindImp
+		base._bindImp
+		_expr.bindImp
+		uniqueOnParts = Set<of String>()
+		for onPart in _onParts
+			onPart.bindImp
+			for expr in onPart.exprs
+				source = expr.toCobraSource
+				if source in uniqueOnParts, expr.recordError('Branch case "[source]" was already used.')
+				uniqueOnParts.add(source)
+		if _elsePart, _elsePart.bindImp
+
+
+class BranchOnPart inherits Node
+
+	var _exprs as List<of Expr>
+	var _block as BlockStmt
+
+	cue init(exprs as List<of Expr>, block as BlockStmt)
+		base.init
+		_exprs = exprs
+		_block = block
+
+	def addSubFields
+		base.addSubFields
+		.addField('exprs', _exprs)
+		.addField('block', _block)
+
+	get block from var
+
+	get exprs from var
+		has Subnodes
+
+	def _innerClone
+		base._innerClone
+		_exprs = _exprs.toList2
+		for i in _exprs.count, _exprs[i] = _exprs[i].clone
+		_block = _block.clone
+
+	def _bindImp
+		base._bindImp
+		for expr in _exprs, expr.bindImp
+		_block.bindImp
+
+
+class BlockStmt
+	is partial
+	inherits Stmt
+	"""
+	A BlockStmt holds a series of statements which are the target of complex statement such
+	if, while, etc. BlockStmts are *not* the target of a method or property.
+	"""
+
+	var _stmts as List<of Stmt>
+	var _ifInheritsVar as IVar?
+	var _ifInheritsType as IType?
+	var _curStmtIndex as int  # to implement .replaceChild
+
+	cue init(token as IToken)
+		.init(token, List<of Stmt>())
+
+	cue init(token as IToken, stmts as List<of Stmt>)
+		base.init(token)
+		_stmts = stmts
+
+	get endToken as IToken
+		return if(_stmts.count, _stmts[_stmts.count-1].endToken, base.endToken)
+
+	def addSubFields
+		base.addSubFields
+		.addField('stmts', _stmts)
+
+	def setIfInherits(varr as IVar, type as IType)
+		_ifInheritsVar = varr
+		_ifInheritsType = type
+
+	get stmts from var
+		has Subnodes
+
+	def replaceChild(find as INode, replace as INode) as bool
+		# using _curStmtIndex is faster and blocks can get potentially large
+		if _curStmtIndex < _stmts.count and _stmts[_curStmtIndex] is find
+			_stmts[_curStmtIndex] = replace to Stmt
+			return true
+		else
+			return base.replaceChild(find, replace)
+
+	def _innerClone
+		base._innerClone
+		_stmts = _stmts.toList2
+		for i in _stmts.count, _stmts[i] = _stmts[i].clone
+		# not expecting a clone after binding imp:
+		assert _ifInheritsVar is nil
+		assert _ifInheritsType is nil
+
+	def _bindImp
+		base._bindImp
+		_curStmtIndex = 0
+		for stmt in _stmts.toArray
+			stmt.parent = this
+			try
+				stmt.bindImp
+				stmt.afterStatementBindImp  # to let expressions know when they are used as statements
+			catch ne as NodeException
+				.compiler.recordError(ne)
+			_curStmtIndex += 1
+
+
+class BreakStmt
+	is partial
+	inherits Stmt
+
+	cue init(tok as IToken)
+		base.init(tok)
+
+
+class ContinueStmt
+	is partial
+	inherits Stmt
+
+	cue init(tok as IToken)
+		base.init(tok)
+
+
+class ExpectStmt inherits Stmt is partial
+
+	var _exceptionTypeNode as ITypeProxy
+	var _exceptionType as IType?
+	var _block as BlockStmt
+	var _varNumber as int
+	
+	get block from var
+
+	cue init(token as IToken, exceptionTypeNode as ITypeProxy, block as BlockStmt)
+		base.init(token)
+		_exceptionTypeNode = exceptionTypeNode
+		_block = block
+
+	get endToken as IToken is override
+		return _block.endToken
+
+	def addSubFields
+		base.addSubFields
+		.addField('exceptionTypeNode', _exceptionTypeNode)
+		.addField('exceptionType', _exceptionType)
+		.addField('block', _block)
+
+	def _innerClone
+		base._innerClone
+		_block = _block.clone
+
+	def _bindImp
+		base._bindImp
+		if _exceptionType is nil
+			_exceptionType = (_exceptionTypeNode.bindAll to ITypeProxy).realType  # CC: axe cast
+		assert _exceptionType, this
+		excClass = .compiler.exceptionType
+		if not _exceptionType.isDescendantOf(excClass)
+			.throwError('Can only use Exception and its descendants for "expect". "[_exceptionType.name]" does not inherit the Exception class.')
+		.compiler.curBox.makeNextPrivateSerialNumber  # the code gen typically uses two serial nums
+		_varNumber = .compiler.curBox.makeNextPrivateSerialNumber
+		_block.bindImp
+
+
+class ForStmt inherits Stmt is partial
+	"""
+	Abstract base class for ForNumericStmt and ForEnumerablebase.
+	"""
+
+	cue init(token as IToken, varr as NameExpr, block as BlockStmt)
+		base.init(token)
+		_varExpr = varr
+		_block = block
+
+	get varExpr from var as NameExpr
+	
+	get var from var as IVar?
+	
+	get block from var as BlockStmt
+	
+	get endToken as IToken is override
+		return _block.endToken
+
+	def addSubFields
+		base.addSubFields
+		.addField('varExpr', .varExpr)
+		.addField('var', .var)
+		.addField('block', .block)
+
+	def _innerClone
+		base._innerClone
+		_varExpr = _varExpr.clone
+		_block = _block.clone
+
+	def _bindImp
+		base._bindImp
+		_varExpr.bindImp
+		if _varExpr.definition
+			if _varExpr.definition inherits IVar
+				_var = _varExpr.definition
+			else
+				.throwError('Expecting a variable not a [_varExpr.definition.getType.name].')  # TODO: what's the best way to report what was found?
+		else
+			assert _varExpr.hasError
+		#if not var.isTracked  TODO disabled this to get tests\200-classes\804-test.cobra working.
+		if false
+			varr = .var
+			existingVar = .compiler.curCodeMember.findLocal(varr.name)
+			if existingVar
+				# that's fine as long as the types are the name
+				if varr.type is .compiler.passThroughType
+					varr.type = existingVar.type
+				else if existingVar.type is not varr.type
+					.throwError('Cannot redeclare "[varr.name]" as "[varr.type]" because it was declared as "[existingVar.type]" earlier.') # TODO: would be nice to give the location of the other declaration
+			
+# TODO: check for existing  variables
+#		if 1
+#			ns = .compiler.nameSpaceStack.peek
+#			existingVar = ns.findLocal(varr.name)
+#			if existingVar
+#				# that's fine as long as the types are the name
+#				if varr.type is .compiler.passThroughType
+#					varr.type = existingVar.type
+#				else if existingVar.type is not varr.type
+#					.error('Cannot redeclare "[varr.name]" as "[varr.type]" because it was declared as "[existingVar.type]" earlier.')
+#			else
+#				.compiler.nameStack.peek.pushName(varr)   # TODO should be pushSymbol() or pushVar()
+#		varr.bindAll  # CallExpr() wants its definition to have bound int, so here we call bindAll instead of bindImp
+		_block.bindImp
+		# TODO axe this
+		#if not varr.isTracked
+		#	.compiler.nameStack.peek.pop   # TODO should be popSymbol() or popVar()
+
+
+class OldForNumericStmt
+	is partial
+	inherits ForStmt
+
+	var _start as Expr
+	var _stop as Expr
+	var _dir as int
+	var _step as Expr?
+
+	cue init(token as IToken, varr as NameExpr, start as Expr, stopp as Expr, dir as int, stepp as Expr?, block as BlockStmt)
+		require
+			dir==-1 or dir==+1
+		body
+			base.init(token, varr, block)
+			_start = start
+			_stop = stopp
+			_dir = dir
+			_step = stepp
+
+	def addSubFields
+		base.addSubFields
+		.addField('start', _start)
+		.addField('stop', _stop)
+		.addField('dir', _dir)
+		.addField('step', _step)
+		.addField('block', _block)
+
+	def _innerClone
+		base._innerClone
+		_start = _start.clone
+		_stop = _stop.clone
+		if _step, _step = _step.clone
+
+	def _bindImp
+		_start.bindImp
+		_stop.bindImp
+		if _step
+			_step.bindImp
+		_var = .bindVar(_varExpr)
+		base._bindImp
+		_block.bindImp
+
+	def inferredType as IType? is override
+		return _start.type.greatestCommonDenominatorWith(_stop.type to !)
+
+
+class ForNumericStmt inherits ForStmt is partial
+
+	cue init(token as IToken, varr as NameExpr, start as Expr, stopp as Expr, dir as int, stepp as Expr?, block as BlockStmt)
+		require
+			dir in [-1, 0, +1]  # 0 is for current syntax. -1 and +1 are for old "for x = 0 .. n ++ 2" syntax
+		body
+			base.init(token, varr, block)
+			_start = start
+			_stop = stopp
+			_dir = dir
+			_step = stepp
+
+	def addSubFields
+		base.addSubFields
+		.addField('start', _start)
+		.addField('stop', _stop)
+		.addField('dir', _dir)
+		.addField('step', _step)
+		.addField('block', _block)
+
+	get start from var as Expr
+	
+	get stop from var as Expr
+	
+	get step from var as Expr?
+	
+	get dir from var as int
+	
+	def _innerClone
+		base._innerClone
+		_start = _start.clone
+		_stop = _stop.clone
+		if _step, _step = _step.clone
+
+	def _bindImp
+		_start.bindImp
+		_stop.bindImp
+		if _step, _step.bindImp
+		_var = .bindVar(_varExpr)
+		base._bindImp
+		_block.bindImp
+		if not _start.hasError and not _stop.hasError
+			startType, stopType = _start.type to !, _stop.type to !
+			if _checkCompatibleTypes(startType, stopType)
+				if _step and not _step.hasError
+					stepType = _step.type to !
+					if not _checkCompatibleTypes(startType, stepType)
+						.throwError('For loop start condition type "[startType.name]" is not compatible with step condition type "[stepType.name]".[_divHelper(_start)][_divHelper(_step)]')
+					else if not _checkCompatibleTypes(stopType, stepType)
+						.throwError('For loop stop condition type "[stopType.name]" is not compatible with step condition type "[stepType.name]".[_divHelper(_stop)][_divHelper(_step)]')
+			else
+				.throwError('For loop start condition type "[startType.name]" is not compatible with stop condition type "[stopType.name]".[_divHelper(_start)][_divHelper(_stop)]')
+		# optimization:
+		if _dir == 0  # the value for: for x in start : stop : step
+			if _step is nil
+				_dir = +1
+				_step = IntegerLit(.token.copy('INTEGER_LIT', '+1'), +1)
+				_step.bindImp
+			else if _step inherits IntegerLit
+				_dir = if(_step.valueAsInt < 0, -1, +1)
+
+	def inferredType as IType? is override
+		return _start.type.greatestCommonDenominatorWith(_stop.type to !)
+	
+	def _checkCompatibleTypes(type1 as IType, type2 as IType) as bool
+		if type1 == type2
+			return true
+		if type1.isDynamic or type2.isDynamic
+			return true
+		if type1.isDescendantOf(.compiler.anyIntType) and type2.isDescendantOf(.compiler.anyIntType)
+			return true
+		return false
+
+	def _divHelper(expr as Expr?) as String
+		if expr inherits BinaryMathExpr and expr.token.which == 'SLASH'
+			return ' Note that the "/" operator produces a decimal or floating point number. If you want integer division, use the "//" operator.'
+		return ''
+
+
+class ForEnumerableStmt inherits ForStmt is partial
+
+	cue init(token as IToken, varr as NameExpr, what as Expr, block as BlockStmt)
+		base.init(token, varr, block)
+		_what = what
+
+	cue init(token as IToken, varr as NameExpr, args as List<of NameExpr>, what as Expr, block as BlockStmt)
+		# multiArg assignment in for stmt
+		.init(token, varr, what, block)
+		_multiArgs = args
+		
+	def addSubFields
+		base.addSubFields
+		.addField('what', _what)
+		.addField('varNumber', _varNumber)
+		.addField('multiArgs', _multiArgs)
+
+	get what from var as Expr
+	
+	get varNumber from var as int
+	
+	get multiArgs from var as List<of NameExpr>?
+	
+	def _innerClone
+		base._innerClone
+		_what = _what.clone
+		if .multiArgs
+			_multiArgs = _multiArgs.toList
+			for i in .multiArgs.count, .multiArgs[i] = .multiArgs[i].clone
+
+	def _bindImp
+		_what.bindImp
+		if _what.type.isDynamic
+			_what.contextType = .compiler.enumerableType
+		if _what.type inherits AnyIntType
+			# 'for x in 10' is a numeric for loop
+			_transformTo(ForNumericStmt(.token, _varExpr, IntegerLit(.token.copy('INTEGER_LIT', '0'), 0), _what, 1, nil, _block).bindAll)
+			base._bindImp  # just to pass the assertion that base._bindImp was invoked
+		else
+			_var = .bindVar(_varExpr)
+			if _multiArgs, _unpackMultiArgStmts
+			base._bindImp
+			_varNumber = .compiler.curBox.makeNextPrivateSerialNumber
+			_block.bindImp
+	
+	def _unpackMultiArgStmts
+		"""
+		Handle expansion of statements for multiArg variables in for statements: 
+		for k, v in <dict>  # becomes
+			for varExpr_uniq in <dict>
+				k = varExpr_uniq.key
+				v = varExpr_uniq.value
+		and 
+		for a, b, c in <IEnumerable (of triplets in this case)> becomes
+			for varExpr_uniq in <IEnumerable>
+				a = varExpr_uniq[0]
+				b = varExpr_uniq[1]
+				c = varExpr_uniq[2]
+		with rest of block following				
+		"""
+		# TODO: make sure varName starts with _lh_
+		stmts = List<of Stmt>()
+		varName = _varExpr.name  # "[_varExpr.name]_[.serialNum]"
+		token = _token.copy
+		count = 0
+		isStreamOfKeyValue = .what.type.isDictionaryLike
+		if isStreamOfKeyValue, kvRHS = ['key', 'value']
+		if _var.type inherits Box
+			if not isStreamOfKeyValue
+				#isStreamOfKeyValue = (_var.type to Box).isIndirectConstructionOf(.compiler.libraryType('System.Collections.Generic.KeyValuePair<of,>') to Box)  # compiler.KeyValuePairOfType
+				isStreamOfKeyValue = (_var.type to Box).isIndirectConstructionOf(.compiler.keyValuePairOfType)
+				if isStreamOfKeyValue, kvRHS = ['key', 'value']
+			if not isStreamOfKeyValue
+				isStreamOfKeyValue = (_var.type to Box).isDescendantOf(.compiler.libraryType('Cobra.Core.BasePair') to Box)
+				if isStreamOfKeyValue, kvRHS = ['a', 'b']
+		if isStreamOfKeyValue
+			# This covers:
+			#    * dictionaries such as: [I]Dictionary<of TKey, TValue>
+			#    * streams such as: Pair<of T>*, Pair<of TA, TB>*, KeyValuePair<of TKey, TValue>*
+			#    * any user type that implements IEnumerable<of KeyValuePair<of TKey, TValue>>
+			
+			# assume enumerator will return KeyValue so can't have other than 2 multiargs
+			if _multiArgs.count <> 2
+				.throwError('Cannot have other than two variables in a for statement as assignment targets from a dictionary or key-value stream.')
+			for id in _multiArgs
+				forVar    = IdentifierExpr(token.copy('ID', varName), varName)
+				rhsToken  = token.copy('ID', kvRHS[count])
+				keyOrVal  = MemberExpr(rhsToken)
+				kvExpr    = BinaryOpExpr.make(token.copy('DOT', '.'), 'DOT', forVar, keyOrVal) # forVar.{key,value}
+				assignTok = token.copy('ASSIGN', '=')
+				# print id.toCobraSource, '=', kvExpr.toCobraSource
+				stmts.add(AssignExpr(assignTok, assignTok.which, id, kvExpr))  # id = forVar.{key,value}
+				count += 1
+		else  # enumeration, each item of which is matching count sequence
+			# TODO: ? Add check varName.count <> multArgs.count throw RTException
+			for id in _multiArgs
+				intToken = token.copy('INTEGER_LIT', '[count]')
+				intToken.value = count
+				countIntLit = IntegerLit(intToken)
+				exprs = List<of Expr>()
+				exprs.add(countIntLit)
+				forVar = IdentifierExpr(token.copy('ID', varName), varName)
+				idxExpr = IndexExpr(token.copy('LBRACKET', r'['), forVar, exprs)  # forVar[count]
+				assignTok = token.copy('ASSIGN', '=')
+				stmts.add(AssignExpr(assignTok, assignTok.which, id, idxExpr))  
+				count += 1
+		_block.stmts.insertRange(0, stmts)
+	
+	def inferredType as IType? is override
+		assert _what.type
+		return _what.type.innerType
+
+
+class IfStmt
+	is partial
+	inherits Stmt
+
+	var _cond as Expr
+	var _trueStmts as BlockStmt
+	var _falseStmts as BlockStmt?
+	var _doNotPopIfInheritsStack as bool
+	var _ifInheritsVar as IVar?
+
+	cue init(token as IToken, cond as Expr, trueStmts as BlockStmt, falseStmts as BlockStmt?)
+		base.init(token)
+		_cond = cond
+		_trueStmts  = trueStmts
+		_falseStmts = falseStmts
+
+	get cond from var
+
+	get ifInheritsVar from var
+
+	get trueStmts from var
+	
+	get falseStmts from var
+	
+	get endToken as IToken is override
+		if _falseStmts
+			return _falseStmts.endToken
+		else
+			return _trueStmts.endToken
+
+	def addSubFields
+		base.addSubFields
+		.addField('cond', _cond)
+		.addField('trueStmts', _trueStmts)
+		.addField('falseStmts', _falseStmts)
+		.addField('ifInheritsVar', _ifInheritsVar)
+
+	def _innerClone
+		assert not _ifInheritsVar  # should not have bound imp yet
+		base._innerClone
+		_cond = _cond.clone
+		_trueStmts = _trueStmts.clone
+		if _falseStmts, _falseStmts = _falseStmts.clone
+
+	def _bindImp
+		base._bindImp
+		try
+			_cond.bindImp
+		catch ne as NodeException
+			.compiler.recordError(ne)
+		success
+			_doNotPopIfInheritsStack = false
+			.noAssignmentAllowed(_cond)
+			if _cond.type is not .compiler.boolType
+				_cond = TruthExpr(_cond).bindImp to TruthExpr  # CC: axe cast when supporting 'as this'
+			cond = _cond
+			ifInherits = false
+			# TODO: handle the "x inherits Y" being part of a sequence of "and"ed exprs
+			# CC: combine some of the if statements below when "if inherits" can handle complex expressions
+			if cond inherits InheritsExpr
+				left = cond.left
+				if left inherits IdentifierExpr
+					leftVar = left.namedDefinition
+					ifInherits = _ivarIfInherits(cond, leftVar)
+				else if left inherits AssignExpr
+					if left.left inherits IdentifierExpr
+						leftVar = left.left.definition
+						ifInherits = _ivarIfInherits(cond, leftVar)
+			if not ifInherits
+				# check for an if-not-nil
+				if cond inherits TruthExpr
+					if cond.expr inherits IdentifierExpr
+						leftVar = cond.expr.definition
+						leftType = leftVar.typeForIdentifier
+						if leftType inherits NilableType or (leftType.isReference and leftType is not .compiler.objectType)
+							# if x ...
+							# Note: The check for .objectType just above is due to the fact that a type of Object can point to boxed values such as ints and bools which Cobra will treat properly at runtime.
+							notNil = true
+			# TODO: the checks about variables that are never nil (/always non-nil) need to happen at the *expression* level so they kick in for assert, require, etc.
+			if not ifInherits and not notNil
+				if cond inherits CompareExpr
+					if cond.op in ['ISNOT', 'NE'] and cond.left inherits IdentifierExpr and cond.right inherits NilLiteral
+						# if x is not nil ...
+						# if x <> nil ...
+						# TODO: also handle "if nil is not x"
+						# TODO? "if not x is nil"  "if nil is not x"
+						notNil = true
+						leftVar = cond.left.definition
+			if notNil
+				if leftVar inherits IVar
+					if leftVar.type inherits WrappedType
+						leftVar.ifInheritsStack.push((leftVar.type to WrappedType).theWrappedType)
+						ifInherits = true
+				else
+					throw FallThroughException(leftVar)
+			if ifInherits
+				if leftVar inherits IVar
+					_trueStmts.setIfInherits(leftVar, leftVar.ifInheritsStack.peek)
+				else
+					throw FallThroughException(leftVar)
+		if ifInherits
+			if leftVar inherits IVar
+				_ifInheritsVar = leftVar
+				stackCount = leftVar.ifInheritsStack.count
+			else
+				assert false, leftVar
+		_trueStmts.parent = this
+		_trueStmts.bindImp
+		if ifInherits
+			if not _doNotPopIfInheritsStack
+				(leftVar to IVar).ifInheritsStack.pop
+			assert (leftVar to IVar).ifInheritsStack.count == stackCount - 1
+			
+		if _falseStmts
+			_falseStmts.parent = this
+			_falseStmts.bindImp
+
+	def _ivarIfInherits(cond as InheritsExpr, leftVar as INamedNode?) as bool
+		ifInherits = false
+		if leftVar inherits IVar  # if-inherits smarts only work on variables
+			# if x inherits Y ...
+			if (right = cond.right) inherits IPotentialTypeExpr
+				assert right.potentialType
+				leftVar.ifInheritsStack.push(right.potentialType to !)
+			else
+				throw FallThroughException(right)
+			ifInherits = true
+			_trueStmts.setIfInherits(leftVar, leftVar.ifInheritsStack.peek)
+		return ifInherits	
+
+	def doNotPopIfInheritsStack
+		_doNotPopIfInheritsStack = true
+
+
+class ListenOrIgnoreStmt
+	is abstract, partial
+	inherits Stmt
+	
+	var _event as Expr?
+	var _target as Expr?
+
+	cue init(token as IToken, eventRef as Expr, target as Expr)
+		base.init(token)
+		_event = eventRef
+		_target = target
+
+	def addSubFields
+		base.addSubFields
+		.addField('event', _event)
+		.addField('target', _target)
+
+	get event from var
+	
+	get target from var
+
+	def _innerClone
+		base._innerClone
+		if _event, _event = _event.clone
+		if _target, _target = _target.clone
+
+	def _bindImp
+		base._bindImp
+
+		_event.bindImp
+		if not _event.definition inherits BoxEvent
+			if _event.definition
+				.throwError('The first parameter must be an event, not a [_event.definition.englishName].')
+			else
+				.throwError('The first parameter must be an event.')
+			# TODO: could suggest events with similar names
+
+		.compiler.refExprLevel += 1
+		# ^ to avoid errors such as ".foo requirements arguments"
+		#   the more accurate and informative error about requiring "ref" is detected further below
+		try
+			_target.bindImp
+		finally
+			.compiler.refExprLevel -= 1
+		if not _target inherits RefExpr and not _target inherits AnonymousMethodExpr and not _target.type.nonNil.isDescendantOf(.compiler.delegateType)
+			if _target.definition inherits AbstractMethod
+				sugg = ' Put "ref" before the method such as "ref [_target.toCobraSource]".'
+			else
+				sugg = ''
+			.throwError('The second parameter must be a reference to a method.[sugg]')
+		else
+			# TODO: check that _target is a normal method reference
+			pass
+
+
+class ListenStmt
+	is partial
+	inherits ListenOrIgnoreStmt
+
+	cue init(token as IToken, eventRef as Expr, target as Expr)
+		base.init(token, eventRef, target)
+
+
+class IgnoreStmt
+	is partial
+	inherits ListenOrIgnoreStmt
+
+	cue init(token as IToken, eventRef as Expr, target as Expr)
+		base.init(token, eventRef, target)
+
+
+class LockStmt inherits Stmt is partial
+
+	cue init(token as IToken, expr as Expr, block as BlockStmt)
+		base.init(token)
+		_expr, _block = expr, block
+
+	get expr from var as Expr
+	
+	get block from var as BlockStmt
+	
+	get endToken as IToken is override
+		return _block.endToken
+
+	def addSubFields
+		base.addSubFields
+		.addField('expr', .expr)
+		.addField('block', .block)
+
+	def _innerClone
+		base._innerClone
+		_expr = _expr.clone
+		_block = _block.clone
+
+	def _bindImp
+		base._bindImp
+		# TODO: the expression must be a reference type
+		_expr.bindImp
+		_block.bindImp
+
+
+class PassStmt
+	is partial
+	inherits Stmt
+	
+	cue init(token as IToken)
+		base.init(token)
+
+	def _bindImp
+		base._bindImp
+
+
+class AbstractPrintStmt inherits Stmt is abstract, partial
+
+	cue init(token as IToken, destination as Expr?)
+		base.init(token)
+		_destination = destination
+	
+	def addSubFields
+		base.addSubFields
+		.addField('destination', .destination)
+
+	get destination from var as Expr?
+	
+	def _innerClone
+		base._innerClone
+		if _destination, _destination = _destination.clone
+
+	def _bindImp
+		base._bindImp
+		if .destination
+			.destination.bindImp
+			t = .destination.type 
+			if not t.isDynamicOrPassThrough
+				.compiler.backEnd.validatePrintDestType(t to !, this) 
+
+
+class PrintStmt inherits AbstractPrintStmt is partial
+
+	cue init(token as IToken, destination as Expr?, args as List<of Expr>, stopp as bool)
+		base.init(token, destination)
+		_args, _stop = args, stopp
+
+	get args from var as List<of Expr>
+		has Subnodes
+
+	get stop from var as bool
+
+	def _innerClone
+		base._innerClone
+		_args = _args.toList2
+		for i in _args.count, _args[i] = _args[i].clone
+
+	def _bindImp
+		base._bindImp
+		for i, arg in .args.numbered
+			try
+				arg.bindImp
+			catch ne as NodeException
+				ne.prefixMessage('For "print" arg [i+1]: ')
+				.compiler.recordError(ne)
+			if arg.type and arg.type inherits VoidType
+				.recordError('For "print" arg [i+1]: Expression cannot be printed because it does not return a value.')
+
+	def addSubFields
+		base.addSubFields
+		.addField('stop', .stop)
+		.addField('args', .args)
+
+
+class PrintRedirectStmt inherits AbstractPrintStmt is partial
+
+	var _block as BlockStmt
+
+	cue init(token as IToken, destination as Expr, block as BlockStmt)
+		base.init(token, destination)
+		_block = block
+
+	get block from var
+
+	get endToken as IToken is override
+		return _block.endToken
+
+	def _innerClone
+		base._innerClone
+		_block = _block.clone
+
+	def _bindImp
+		base._bindImp
+		_destination.bindImp
+		_block.bindImp
+
+	def addSubFields
+		base.addSubFields
+		.addField('block', _block)
+
+
+class RaiseStmt inherits Stmt is partial
+	"""
+	Raise an event.
+	
+	TODO: test raising an inherited event, either from source or from binary
+	TODO: Test generic events.
+	"""
+
+	var _name = ''
+	var _exprs as List<of Expr>
+
+	# computed in _bindImp
+	var _definition as BoxEvent?
+	var _eventType as IType?
+	var _params as IList<of Param>?
+	var _args as List<of Expr>?
+
+	cue init(token as IToken, exprs as List<of Expr>)
+		require exprs.count > 0
+		base.init(token)
+		_exprs = exprs
+
+	def addSubFields
+		base.addSubFields
+		.addField('exprs', _exprs)
+
+	get name from var
+
+	get exprs from var
+
+	def _innerClone
+		base._innerClone
+		_exprs = _exprs.toList2
+		for i in _exprs.count, _exprs[i] = _exprs[i].clone
+
+	def _bindImp
+		base._bindImp
+		hasError = false
+		for expr in _exprs
+			try
+				expr.bindImp
+			catch ne as NodeException
+				.compiler.recordError(ne)
+				hasError = true
+		if hasError, return
+		expr = _exprs[0]
+		if expr inherits DotExpr
+			right = expr.dotRight
+			defi = right.definition
+			if defi inherits BoxEvent
+				if not expr.left inherits ThisLit
+					# C# disallows raising events for other classes (though I presume inheritance is okay)
+					# Currently, Cobra is a little stricter and does not allow it even on other instances.
+					.throwError('Cannot raise events for other objects.')
+				if right inherits CallExpr
+					.throwError('Cannot call events. The general form is "raise .<event>, \[<sender>], <arg1>, <arg2>, ...".')
+				_definition, _name, _eventType = defi, defi.name, defi.handlerType
+			else
+				.throwError('Expecting an event to raise.')
+		else if expr inherits IdentifierExpr  # ex: raise _eventName
+			_name = expr.name
+			_eventType = expr.potentialType
+			if not _eventType
+				hint = ''
+				if expr.type inherits MethodSig 
+					hint = ' Use "[_name](args)" to invoke the method reference (delegate).'
+				.throwError('The target of "raise" is not an event.[hint]')
+			if _eventType.isDescendantOf(.compiler.delegateType)
+				pass
+			else if _eventType.isDescendantOf(.compiler.exceptionType)
+				.throwError('Use "throw" instead of "raise" for the exception "[_eventType.name]".')
+			else
+				.throwError('Invalid expression for raising events. Use "raise .someEvent, args" or "throw SomeException(args)".')
+		else
+			.throwError('Invalid expression for raising events. Use "raise .someEvent, args" or "throw SomeException(args)".')
+		if _eventType inherits MethodSig
+			_params = _eventType.params
+		else
+			member = _eventType.memberForName('invoke')
+			if member inherits Method
+				_params = member.params
+			else
+				.throwError('Cannot find a single "invoke" method for "_eventType.name".')
+		# TODO: check type compatibility of exprs with params
+		args = _exprs[1:]
+		params = _params
+		unThis = 'Unnecessary "this" which is already implied by raising an event. You can remove it.'
+		if args.count == params.count
+			if args.count > 0 and args[0] inherits ThisLit
+				.compiler.warning(this, unThis)
+		else if args.count == params.count - 1
+			# off by one.
+			if args[0] inherits ThisLit
+				.compiler.warning(this, unThis)
+				# since we have 'this', try appending the args object
+				args.add(_postCallForType(params[params.count-1].type))
+			else
+				# since we don't have 'this', try prepending 'this'
+				args.insert(0, ThisLit(.token).bindImp)
+		else if args.count == 0 and params.count == 2
+			# missing both 'this' and event args
+			args.add(ThisLit(.token).bindImp)
+			args.add(_postCallForType(params[params.count-1].type))
+		else
+			.throwError('Event expects [params.count] arguments, but the "raise" statement is providing [args.count].')
+		_args = args
+
+	def _postCallForType(type as IType) as PostCallExpr		
+		init = type.memberForName('cue.init')
+		good = false
+		if init inherits Initializer
+			if init.params.count == 0
+				good = true
+		else if init inherits MemberOverload
+			for member in init.members
+				if member.params.count == 0
+					good = true
+					break
+		if good
+			token = .token.copy('ID', type.name)
+			return PostCallExpr(token, TypeExpr(token, type), List<of Expr>()).bindImp
+		else
+			.throwError('Missing argument for "raise" of type "[type.name]".')
+		throw FallThroughException() # suppress an error
+
+
+class ReturnStmt
+	is partial
+	inherits Stmt
+
+	var _expr as Expr?
+
+	cue init(token as IToken, expr as Expr?)
+		base.init(token)
+		_expr = expr
+
+	def addSubFields
+		base.addSubFields
+		.addField('expr', _expr)
+
+	get expr from var
+
+	def _innerClone
+		base._innerClone
+		if _expr, _expr = _expr.clone
+
+	def _bindImp
+		base._bindImp
+		expr = _expr
+		curCodeMember = .compiler.codeMemberStack.peek
+		if _expr
+			expr = _expr.bindImp
+			if not expr.canBeAssignedTo(curCodeMember.resultType)
+				suffix = if(curCodeMember.resultType is .compiler.voidType, 'not declared to return anything.', 'declared to return a [curCodeMember.resultType.name].')
+				.throwError('Cannot return [expr.type.name] because "[curCodeMember.name]" is [suffix]')
+			expr.contextType = curCodeMember.resultType
+		else
+			# TODO: the check for .passThroughType below is required only because lambdas are using it for their return value instead of setting it to the correct type. so improving lambdas (AnonExpr) will allow the removal of that check
+			if curCodeMember.resultType is not .compiler.voidType and curCodeMember.resultType is not .compiler.passThroughType
+				.throwError('Return statement must return a [curCodeMember.resultType.name], or [curCodeMember.name] must have its return type removed.')
+		curCodeMember.hasReturnStmt = true
+		_backEndResultVarName = curCodeMember.backEndResultVarName
+
+
+class TraceStmt
+	is abstract, partial
+	inherits Stmt
+
+	var _codePart as AbstractMethod
+
+	cue init(token as IToken, codePart as AbstractMethod)
+		base.init(token)
+		_codePart = codePart
+
+	get codePart from var
+
+	def includeTraces as bool	
+		return .compiler.options.boolValue('include-traces')
+
+
+class TraceLocationStmt
+	is partial
+	inherits TraceStmt
+
+	cue init(token as IToken, codePart as AbstractMethod)
+		base.init(token, codePart)
+
+
+class TraceAllStmt
+	is partial
+	inherits TraceStmt
+
+	cue init(token as IToken, codePart as AbstractMethod)
+		base.init(token, codePart)
+
+
+class TraceExprsStmt
+	is partial
+	inherits TraceStmt
+
+	var _exprs as List<of Expr>
+
+	cue init(token as IToken, codePart as AbstractMethod, exprs as List<of Expr>)
+		base.init(token, codePart)
+		_exprs = exprs
+
+	get exprs from var
+		has Subnodes
+
+	def _innerClone
+		base._innerClone
+		_exprs = _exprs.toList2
+		for i in _exprs.count, _exprs[i] = _exprs[i].clone
+
+	def _bindImp
+		base._bindImp
+		for expr in _exprs, expr.bindImp
+
+
+class TryStmt
+	is partial
+	inherits Stmt
+
+	var _tryBlock as BlockStmt
+	var _catchBlocks as List<of CatchBlock>
+	var _successBlock as BlockStmt?
+	var _finallyBlock as BlockStmt?
+	var _varNumber as int
+
+	cue init(token as IToken, tryBlock as BlockStmt, catchBlocks as List<of CatchBlock>, successBlock as BlockStmt?, finallyBlock as BlockStmt?)
+		base.init(token)
+		_tryBlock = tryBlock
+		_catchBlocks = catchBlocks
+		_successBlock = successBlock
+		_finallyBlock = finallyBlock
+
+	get endToken as IToken is override
+		if _finallyBlock, return _finallyBlock.endToken
+		if _successBlock, return _successBlock.endToken
+		if _catchBlocks.count, return _catchBlocks[_catchBlocks.count-1].endToken
+		return _tryBlock.endToken
+
+	def addSubFields
+		base.addSubFields
+		.addField('tryBlock', _tryBlock)
+		.addField('catchBlocks', _catchBlocks)
+		.addField('succesBlock', _successBlock)
+		.addField('finallyBlock', _finallyBlock)
+
+	get tryBlock from var
+	
+	get catchBlocks from var
+		has Subnodes
+
+	get successBlock from var
+	
+	get finallyBlock from var
+	
+	def _innerClone
+		base._innerClone
+		_tryBlock = _tryBlock.clone
+		_catchBlocks = _catchBlocks.toList
+		for i in _catchBlocks.count, _catchBlocks[i] = _catchBlocks[i].clone
+		if _successBlock, _successBlock = _successBlock.clone
+		if _finallyBlock, _finallyBlock = _finallyBlock.clone
+
+	def _bindImp
+		base._bindImp
+		_varNumber = .compiler.curBox.makeNextPrivateSerialNumber
+		_tryBlock.bindImp
+		for cb in _catchBlocks
+			cb.bindImp
+		if _successBlock
+			_successBlock.bindImp
+		if _finallyBlock
+			_finallyBlock.bindImp
+		# error check
+		if _catchBlocks.count
+			for stmt in _tryBlock.stmts
+				if stmt inherits YieldStmt
+					stmt.recordError('Cannot yield a value in the body of a try block with a catch clause.')
+		# error check
+		for cb in _catchBlocks
+			for stmt in cb.block.stmts
+				if stmt inherits YieldStmt
+					stmt.recordError('Cannot yield a value in the body of a catch clause.')
+		# error check
+		if _finallyBlock
+			for stmt in _finallyBlock.stmts
+				if stmt inherits YieldStmt
+					stmt.recordError('Cannot yield in the body of a finally clause.')
+
+
+class CatchBlock
+	is partial
+	inherits SyntaxNode
+
+	var _var as AbstractLocalVar?
+	var _typeNode as ITypeProxy?
+	var _type as IType?
+	var _block as BlockStmt
+	var _varName as String?
+
+	cue init(token as IToken, block as BlockStmt)
+		"""
+		This is for `success`, `finally` and typeless `catch` blocks.
+		"""
+		base.init(token)
+		_block = block
+
+	cue init(token as IToken, varr as AbstractLocalVar, block as BlockStmt)
+		"""
+		This is for `catch` blocks that specify a type and variable.
+		"""
+		base.init(token)
+		_var = varr
+		_varName = varr.name
+		_block = block
+
+	cue init(token as IToken, typeNode as ITypeProxy, block as BlockStmt)
+		"""
+		This is for `catch` blocks that specify a type, but no variable.
+		"""
+		base.init(token)
+		_typeNode = typeNode
+		_block = block
+
+	get block from var
+
+	get type from var
+
+	get varName from var
+
+	get endToken as IToken is override
+		return _block.endToken
+
+	def _innerClone
+		base._innerClone
+		assert _var is nil
+		_block = _block.clone
+
+	def _bindImp
+		base._bindImp
+		if _var
+			_var.bindImp
+			# TODO: should this be using .bindVar like others?
+			# TODO: wtf is isTracked again?
+			if not _var.isTracked
+				varr = _var to LocalVar  # CC: axe typecast
+				codePart = .compiler.codeMemberStack.peek
+				existingVar = codePart.findLocal(varr.name)
+				if existingVar
+					if existingVar.type is not varr.type
+						.throwError('Cannot redeclare "[varr.name]" as "[varr.type.name]" because it was declared as "[existingVar.type.name]" earlier.')
+				else
+					codePart.addLocal(varr)
+			if _type is nil
+				_type = _var.type
+				assert _type
+		else if _typeNode
+			_typeNode.bindImp
+			_type = _typeNode.realType  # CC: combine with above: _type = _typeNode.bindImp.realType
+		_sharpHelperName = '_lh_catch_[.compiler.curBox.makeNextPrivateSerialNumber]' # TODO rename to HelperName or beHelperName - common to both backends
+		_block.bindImp
+
+
+class ThrowStmt
+	is partial
+	inherits Stmt
+
+	var _expr as Expr?
+
+	cue init(token as IToken, expr as Expr?)
+		base.init(token)
+		_expr = expr
+
+	def addSubFields
+		base.addSubFields
+		.addField('expr', '_expr')
+
+	get expr from var
+
+	def _innerClone
+		base._innerClone
+		if _expr, _expr = _expr.clone
+
+	def _bindImp
+		base._bindImp
+		if _expr
+			_expr.bindImp
+			if not _expr.hasError
+				exceptionType = .compiler.exceptionType
+				typeType = .compiler.typeType
+				if _expr.canBeAssignedTo(exceptionType)
+					pass
+				else if _expr.canBeAssignedTo(typeType)
+					augment = ''
+/#
+					CC:
+					if _expr responds to (get definition)
+						defin = _expr.definition
+						if defin responds to (def isDescendantOf(t as IType))
+							augment = 'Try instantiating it with parentheses such as "[_expr.toCobraSource]()".'
+#/
+					defin = _expr.definition
+					if defin inherits IType and defin.isDescendantOf(exceptionType)
+						augment = 'Try instantiating it with parentheses such as "[_expr.toCobraSource]()".'
+					if augment == ''
+						augment = 'Also, this type does not inherit from Exception.'
+					.throwError('Cannot throw a type. [augment]')
+				else
+					if _expr.definition inherits BoxEvent
+						reason = 'it is an event, not an exception. Either throw an exception or use "raise" on the event instead of "throw"'
+					else
+						reason = 'it does not inherit from [exceptionType.name] (Exception)'
+					.throwError('Cannot throw "[_expr.type.name]" because [reason].')
+		.compiler.curCodeMember.hasThrowStmt = true
+
+
+class UsingStmt
+	is partial
+	inherits Stmt
+
+	var _varExpr as NameExpr
+	var _var as IVar?
+	var _initExpr as Expr
+	var _block as BlockStmt
+
+	cue init(token as IToken, varExpr as NameExpr, initExpr as Expr, block as BlockStmt)
+		base.init(token)
+		_varExpr = varExpr
+		_initExpr = initExpr
+		_block = block
+
+	get endToken as IToken is override
+		return _block.endToken
+		
+	get initExpr from var
+
+	get block from var
+
+	def _innerClone
+		assert _var is nil
+		base._innerClone
+		_varExpr = _varExpr.clone
+		_initExpr = _initExpr.clone
+		_block = _block.clone
+
+	def _bindImp
+		base._bindImp
+		_initExpr.bindImp
+		_var = .bindVar(_varExpr)
+		# TODO: add an error check that the var type and expr type are compatible
+		_block.bindImp
+
+	def inferredType as IType? is override
+		assert _initExpr.type
+		return _initExpr.type
+
+
+class AbstractWhileStmt inherits Stmt is partial
+
+	cue init(token as IToken, expr as Expr, block as BlockStmt)
+		base.init(token)
+		_expr, _block = expr, block
+
+	get endToken as IToken is override
+		return _block.endToken
+
+	get expr from var as Expr
+		
+	get block from var as BlockStmt
+
+	def addSubFields
+		base.addSubFields
+		.addField('expr', _expr)
+		.addField('block', _block)
+
+	def _innerClone
+		base._innerClone
+		_expr = _expr.clone
+		_block = _block.clone
+
+	def _bindExpr
+		try
+			_expr.bindImp
+		catch ne as NodeException
+			.compiler.recordError(ne)
+		success
+			.noAssignmentAllowed(_expr)
+			if _expr.type is not .compiler.boolType
+				_expr = TruthExpr(_expr).bindImp to TruthExpr  # CC: axe when I have "as this"
+
+
+class WhileStmt inherits AbstractWhileStmt is partial
+
+	cue init(token as IToken, expr as Expr, block as BlockStmt)
+		base.init(token, expr, block)
+
+	def _bindImp
+		base._bindImp
+		_bindExpr
+		_block.bindImp
+
+
+class PostWhileStmt inherits AbstractWhileStmt is partial
+
+	cue init(token as IToken, expr as Expr, block as BlockStmt)
+		base.init(token, expr, block)
+
+	def _bindImp
+		_block.bindImp
+		_bindExpr
+		base._bindImp
+
+
+class YieldStmt
+	is abstract, partial
+	inherits Stmt
+
+	# CC: axe when initializers are inherited
+	cue init(token as IToken)
+		base.init(token)
+
+	def _bindImp
+		base._bindImp
+		if .compiler.curCodeMember inherits Initializer
+			.throwError('Cannot use yield statements in initializers.')
+		# CC: should there be a check for property and indexer setters?
+		.compiler.curCodeMember.hasYieldStmt = true
+
+
+class YieldBreakStmt
+	is partial
+	inherits YieldStmt
+
+	# CC: axe when initializers are inherited
+	cue init(token as IToken)
+		base.init(token)
+
+	def _bindImp
+		base._bindImp
+
+
+class YieldReturnStmt
+	is partial
+	inherits YieldStmt
+
+	var _expr as Expr?
+
+	cue init(token as IToken, expr as Expr?)
+		base.init(token)
+		_expr = expr
+
+	get expr from var
+	
+	def addSubFields
+		base.addSubFields
+		.addField('expr', _expr)
+
+	def _innerClone
+		base._innerClone
+		if _expr, _expr = _expr.clone
+
+	def _bindImp
+		base._bindImp
+		expr = _expr
+		curCodeMember = .compiler.codeMemberStack.peek
+		if expr
+			_expr.bindImp
+			resultType = curCodeMember.resultType
+			if not resultType inherits StreamType and resultType <> .compiler.enumerableType and resultType <> .compiler.enumeratorType
+				bad = true
+				if resultType inherits Box
+					ienumerableOf = .compiler.enumerableOfType
+					ienumeratorOf = .compiler.enumeratorOfType
+					bad = resultType is not ienumerableOf and resultType is not ienumeratorOf and not resultType.isDirectConstructionOf(ienumerableOf) and not resultType.isDirectConstructionOf(ienumeratorOf)
+				if bad, .throwError('Cannot yield unless the return type is an iterator type. Try "[expr.type.name]*".')
+			if resultType inherits StreamType
+				elementType = resultType.innerType to !
+			else if resultType inherits Box and (resultType to Box).isGeneric
+				elementType = (resultType to Box).genericParams[0]
+			else
+				elementType = .compiler.objectType
+			if not expr.canBeAssignedTo(elementType)
+				suffix = if(elementType is .compiler.voidType, 'not declared to return anything.', 'declared to return a [elementType.name].')
+				.throwError('Cannot return [expr.type.name] because "[curCodeMember.name]" is [suffix]')
+			_expr.contextType = elementType
+		else
+			# TODO: can there just be "yield return"?
+			pass
+		curCodeMember.hasYieldStmt = true
+
+
+class MultiTargetAssignStatement inherits Stmt is partial
+	"""
+	Handle statements of form 
+		a, b, ... = <list-generating-expr>
+	or
+		a, b, ... = <expr>, <expr>, ...
+
+	Gets turned into various sequences of assignExpr.
+		tmp = <List-Generating-Expr>
+		a = tmp[0]
+		b = tmp[1]
+		...
+		a = <expr>
+		b = <expr>
+		...
+	TODO: support a, b[,...] = <Enumerable>  ... easy work around though:  a, b = enumerable.toList
+	"""
+
+	var _targets as List<of Expr>       # Lvalues
+	# exactly one of the following three should be non-nil
+	var _rightValues as List<of Expr>?  # list of source expressions
+	var _source as Expr?                # evaluate to IList/Array/String or otherwise indexable by int
+	var _rvals as List<of Expr>?        # list of source expressions
+	
+	var _block as BlockStmt?            # the rewritten/expanded code
+
+	cue init(opToken as IToken, args as List<of Expr>, source as Expr?, rvals as List<of Expr>?)
+		require
+			opToken.which == 'ASSIGN'
+			(source or rvals) and not (source and rvals) # either but not both
+		body
+			base.init(opToken)
+			_targets, _source, _rvals = args, source, rvals
+
+	def addSubFields
+		base.addSubFields
+		.addField('targets', _targets)
+		.addField('source', _source)
+		.addField('rvals', _rvals)
+		.addField('block', _block)
+
+	get targets from var
+
+	get source from var
+
+	get rvals from var
+
+	get block from var
+
+	def _innerClone
+		base._innerClone
+		_targets = _targets.toList2
+		for i in _targets.count, _targets[i] = _targets[i].clone
+		if _rightValues
+			_rightValues = _rightValues.toList
+			for i in _rightValues.count, _rightValues[i] = _rightValues[i].clone
+		if _source, _source = _source.clone
+		if _rvals
+			_rvals = _rvals.toList
+			for i in _rvals.count, _rvals[i] = _rvals[i].clone
+		if _block, _block.clone
+
+	def _bindImp
+		assert _source or _rvals
+		base._bindImp
+		for target in _targets
+			if not _isLValue(target)
+				.throwError('"[target.toCobraSource]" is not an assignable lvalue (identifier, var, property or indexer).')
+		if _rvals
+			if _targets.count <> _rvals.count
+				.throwError('The number of targets ([_targets.count]) must be the same as the number of expressions ([_rvals.count]) assigned to them')
+			#If rvals are all safe to assign (no rerefs) we can do the simplest thing and turn 
+			# them into a sequence of individual assignments. 	i.e a,b = 1,2  or a,b = c,d   cases
+			# If not, we need to turn the rvals list into a literal list, pinning the current values,
+			# and do the expansion on the list as a single item  i.e  a,b = b,a -> a,b = [b,a] 
+			if _isSafeToSimpleAssign()
+				_makeBlockForSimpleAssign
+			else
+				_makeBlockForSimpleAssign  # to get assignment exprs for error checking and code gen
+				# to signal to back-end to use RightValues approach:
+				_rightValues = _rvals
+				_rvals = nil			
+		if _source
+			_source.bindImp
+			#TODO: chk _source supports an int indexer  somehow...
+			#if not .can_be_indexed_by_int_indexer(_source) 
+			#	.throwError(r"rhs expression [_source.toCobraSource] must support being indexed by an integer offset (e.g rhs[0]")
+			_makeBlockForSource
+
+		if _block, _block.bindImp
+		
+	def _isLValue(id as Expr) as bool
+		# TODO: push to Expr.isLValue. probably require .didBindImp
+		# TODO: for DotExpr and IndexExpr check if there is a setter
+		# TODO: for MemberExpr check that its a setter property or visible var (not a method)
+		return id inherits IdentifierExpr or id inherits DotExpr or id inherits IndexExpr
+		
+	def _isSafeToSimpleAssign as bool
+		# conservatively we just presume its safe if the rvals list is all Literals
+		if all for e in _rvals get e inherits Literal
+			return true 
+		# or if identifiers in rvals are not also in target
+		if _disjointIdentifierLists() 
+			return true
+		# There are possibly others but above expected to be most common usage	
+		# TODO: expand this for more wide ranging simple assignment e.g MemberExprs non matching
+		return false
+
+	def _disjointIdentifierLists as bool
+		# Specifically all of targets list are IdentifierExprs and rvals are Literals, DotExprs, 
+		# MemberExprs or Indentifiers and any Identifiers are not also in target list
+		tnames = Set<of String>()
+		for t in _targets
+			if t inherits IdentifierExpr or t inherits AsExpr
+				tnames.add((t to NameExpr).name)
+			else
+				return false
+		if all for e in _rvals get e inherits Literal or e inherits DotExpr or e inherits MemberExpr or _
+			e inherits AbstractToExpr or _
+			(e inherits IdentifierExpr and (e to IdentifierExpr).name not in tnames) 
+			return true	
+		return false
+		
+	def _makeBlockForSimpleAssign
+		"""
+		Construct expanded assignment block for a multi target assignment from a list of expressions.
+		Assignment block contains
+			id0 = rvals[0] # id0 is contents of targets[0]
+			id1 = rvals[1] # id1 is contents of targets[1]
+				(... repeated for number of items in targets specifying ids (lvalues))
+		"""
+		assert _targets.count == _rvals.count
+		stmts = List<of Stmt>()
+		assignTok = .endToken  # the one we stored in .init
+		for i, id in _targets.numbered
+			expr = _rvals[i]
+			stmts.add(AssignExpr(assignTok, assignTok.which, id, expr))
+		_block = BlockStmt(.endToken.copy('INDENT', ''), stmts)
+		
+	def _makeBlockForSource
+		"""
+		Construct expanded assignment block for a multi target assignment from a single source expression.
+		if fewer targets than exprs in _source - extra exprs (silently) ignored
+		TODO: give error when rvalues are too many
+		if more targets than exprs in _source 	- will emit runtime exception
+			above differ fm python - both give errors
+		Unchecked assumptions; 
+			source is int indexable (x[n]) - c# compiler pick up currently
+		Assignment block contains
+			lh_mt_serialNum = <source>
+			id0 = lh_mt_serialNum[0] # id0 is contents of targets[0]
+			id1 = lh_mt_serialNum[1] # id1 is contents of targets[1]
+				(... repeated for number of items in targets specifying ids (lvalues))
+		"""		
+		assert _targets.count >= 2
+
+		stmts = List<of Stmt>()
+		assignTok = .endToken  # the one we stored in init
+		serialNum = .compiler.curBox.makeNextPrivateSerialNumber
+		sourceTmpName = 'lh_mt_[serialNum]'  # lh=local handler, mt = multiTarget
+		ttoken = .endToken.copy('XXX', 'xxx', nil)  # invalid template token for copying
+		sourceIdToken = ttoken.copy('ID', sourceTmpName)
+		
+		stmts.add(
+			AssignExpr(assignTok, assignTok.which, IdentifierExpr(sourceIdToken.copy), _source))
+
+		# check for a source that is a pair
+		if _source.type inherits Box
+			isPair = (_source.type to Box).isDescendantOf(.compiler.libraryType('Cobra.Core.BasePair') to Box)
+			if isPair
+				memberNames = ['a', 'b']
+			else if not isPair
+				isPair = (_source.type to Box).isIndirectConstructionOf(.compiler.keyValuePairOfType)
+				if isPair, memberNames = ['key', 'value']
+
+		if isPair
+			if _targets.count > 2, .throwError('Cannot have more than two variables to unpack a pair.')
+			for i, targetExpr in _targets.numbered
+				sourceIdExpr = IdentifierExpr(sourceIdToken.copy)
+				memberExpr = MemberExpr(ttoken.copy('ID', memberNames[i]))
+				dotMemberExpr = DotExpr(.token, 'DOT', sourceIdExpr, memberExpr)
+				stmts.add(AssignExpr(assignTok, assignTok.which, targetExpr, dotMemberExpr))
+		else
+			/#
+			begin code gen:
+				if source.count <> _targets.Count
+					throw Exception('Cannot unpack [source.count] source values into [_targets.count] targets.')
+			#/
+			countName = if(_source.type.memberForName('length'), 'length', 'count')
+			stmts.add(
+				IfStmt(ttoken.copy('IF', 'if'),
+					# condition
+					CompareExpr(ttoken.copy('NE', '<>'), 'NE',
+						# source count
+						DotExpr(ttoken.copy('DOT', '.'), 'DOT',
+							IdentifierExpr(sourceIdToken.copy),
+							MemberExpr(ttoken.copy('ID', countName))
+						),
+						# targets count
+						IntegerLit(ttoken.copy('INTEGER_LIT', _targets.count.toString, _targets.count))
+					),
+					# then
+					BlockStmt(ttoken.copy,
+						[
+						ThrowStmt(ttoken.copy('THROW', 'throw'),
+							PostCallExpr(ttoken.copy,
+								IdentifierExpr(ttoken.copy('ID', 'UnpackException'), 'UnpackException'),
+								[
+								IntegerLit(ttoken.copy('INTEGER_LIT', _targets.count.toString, _targets.count)),
+								DotExpr(ttoken.copy('DOT', '.'), 'DOT',
+									IdentifierExpr(sourceIdToken.copy),
+									MemberExpr(ttoken.copy('ID', countName))
+								) to Expr
+								]								
+							)
+						) to Stmt
+						]
+					),
+					# else
+					nil
+				)
+			)
+			# end last code gen
+			for i, targetExpr in _targets.numbered
+				intToken = ttoken.copy('INTEGER_LIT', i.toString)
+				intToken.value = i
+				indexLit = IntegerLit(intToken)
+				sourceIdExpr = IdentifierExpr(ttoken.copy('ID', sourceTmpName))
+				indexExpr = IndexExpr(ttoken.copy('LBRACKET', r'['), sourceIdExpr, [indexLit to Expr])
+				stmts.add(AssignExpr(assignTok, assignTok.which, targetExpr, indexExpr))
+
+		_block = BlockStmt(ttoken.copy('INDENT', ''), stmts)

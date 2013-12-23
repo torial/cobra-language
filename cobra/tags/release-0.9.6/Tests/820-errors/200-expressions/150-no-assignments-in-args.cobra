@@ -1,0 +1,10 @@
+class Test
+
+	def main is shared
+		Test().foo(x = 2)  # .error. no parameter named "x".
+
+	cue init
+		base.init
+
+	def foo(i as int)
+		pass

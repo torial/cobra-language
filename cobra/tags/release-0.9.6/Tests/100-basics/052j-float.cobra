@@ -1,0 +1,43 @@
+#.require. jvm
+namespace Test
+	
+	class Test
+		
+		def main
+			is shared
+			
+			f as float = 1.0f
+			assert f
+			assert f==1.0f
+			assert f==1
+	
+			sum as float = 0.1f+0.1f+0.1f+0.1f+0.1f+0.1f+0.1f+0.1f+0.1f+0.1f
+			assert sum<>1.0f
+			assert sum<>0.1f*10
+
+			ff = Float(1.0f)
+			assert ff inherits Float  # .warning. is always
+			ii = Integer(1)
+			#assert not (ii inherits Float)  # . warning. is never
+				# above also throws compiler error
+			o as Object = ii
+			assert not (o inherits Float)  
+
+			g as float = 2f
+			assert g
+			assert g == 2.0f
+			assert g == 2.00f
+			assert g == 2
+			assert g == f + f
+
+			# small numbers
+			a = 0.00001f
+			b = 0.000001f
+			assert a > b
+
+			# can assign ints to floats
+			f = 7
+
+			# can compare ints and floats
+			assert f > 0
+			assert 0 < f

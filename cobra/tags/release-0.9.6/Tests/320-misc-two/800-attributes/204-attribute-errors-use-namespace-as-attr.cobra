@@ -1,0 +1,11 @@
+namespace Na
+
+	class A
+		pass
+
+
+class B
+	has Na  # .error. Cannot instantiate the namespace "Na".
+	
+	def main is shared
+		pass

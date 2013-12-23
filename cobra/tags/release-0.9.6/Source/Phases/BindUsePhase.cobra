@@ -1,0 +1,126 @@
+class BindUsePhase inherits Phase
+	"""
+	Bind the `use` directive nodes to their respective namespace nodes.
+	Also, automatically reference libraries given in `use` statements, but not already referenced.
+	"""
+
+	cue init(c as Compiler)
+		base.init(c)
+
+	get description as String is override
+		return 'Binding use directives'
+
+	def innerRun is override
+		c = .compiler
+		i = 0
+		while i < c.modules.count  # new modules can be added, say by the UseDirective
+			c.curModule = c.modules[i]
+			try
+				c.curModule.bindUse
+			catch ce as SourceException
+				c.recordError(ce)
+			i += 1
+
+
+class Module is partial
+
+	def bindUse
+		pass
+
+
+class AssemblyModule is partial
+
+	def bindUse
+		base.bindUse
+		.topNameSpace.bindUse
+
+
+class CobraModule is partial
+
+	def bindUse
+		base.bindUse
+		_topNameSpace = .topNameSpace.adoptDefaultNameSpace
+		.topNameSpace.bindUse
+
+
+class NameSpace is partial
+
+	get didBindUse from var as bool
+
+	def bindUse
+		if _didBindUse, return
+		.compiler.nameSpaceStack.push(this)
+		try
+			for ud in _useDirectives, ud.bindUse
+			for ns in _subNameSpacesList, ns.bindUse
+		finally
+			.compiler.nameSpaceStack.pop		
+		_didBindUse = true
+
+
+class UseDirective is partial
+
+	get didBindUse from var as bool
+
+	def bindUse
+		_bindUse(false)
+
+	def _bindUse(didAutoLoad as bool)
+		ignoreError = false
+		curNS = .compiler.globalNS to ?
+		for name in _nameParts
+			curNS = curNS.subNameSpaceForName(name)
+			if curNS is nil, break
+		if _explicitUses
+			# since this was an explicit uses directive, we need to make
+			# extra sure that we try to load a reference for it
+			_explicitUses = false # do not want to take this path again for this UseDirective
+			if curNS is not nil
+				# errors can be ignored because this namespace has already been loaded
+				ignoreError = true
+			# 2009-08 CE: Cannot "force reference attempt" as shown below. This causes problems
+			# regarding System.Net which on .NET 2.0 is a namespace in System.dll and in .NET 3.5
+			# is a namespace in System.Net.dll in the GAC. Cobra running on .NET 2.0 ends up
+			# finding the .NET 3.5 DLL but then C# chokes hard with:
+			# "Metadata file "System.Net.dll" could not be found".
+			# Since no such thing really exists for .NET 2.0. Ug.
+			# curNS = nil # force reference attempt
+		if curNS is nil and not didAutoLoad
+			if _fileName <> ''
+				if .compiler.loadReference(_fileName, true) is nil
+					_bindUse(true)
+					if .boundNameSpace is nil
+						.throwError('Cannot find namespace "[_fullName]" in library "[_fileName]".')
+					return
+				else
+					if ignoreError
+						_bindUse(true)
+						return
+					.throwError('Cannot find library file "[_fileName]".')
+			else
+				if _fullName.endsWith('.dll') or _fullName.endsWith('.jar') 
+					.throwError('Do not end a namespace name in a "use" directive with an extension (like ".dll" or ".jar").')
+				if .compiler.loadReference(_fullName, true) is nil
+					_bindUse(true)
+					if .boundNameSpace is nil
+						.throwError('Cannot find namespace "[_fullName]" in loaded library "[_fullName]".')
+					return
+				else
+					if ignoreError
+						_bindUse(true)
+						return
+					# compute how far is valid, but only here where it's needed for the error message
+					partialName = ''
+					curNS = .compiler.globalNS to ?
+					for name in _nameParts
+						curNS = curNS.subNameSpaceForName(name)
+						if curNS is nil, break
+						partialName += '.' + name
+					if partialName == ''
+						.throwError('Cannot find namespace "[_fullName]".')
+					else
+						.throwError('Cannot find namespace "[name]" in "[partialName[1:]]".')
+		if not didAutoLoad
+			assert curNS, 'last name=[name]; [_nameParts]; [_fullName]; [_fileName]'
+		_boundNameSpace = curNS
+		_didBindUse = true

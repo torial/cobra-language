@@ -1,0 +1,4 @@
+#!/bin/bash
+cd "`dirname "$0"`" ; cd ..
+rm -rf *.cobra.cs Cobra.*.tmp test-*.cs r r-* *.exe *.pdb
+ls -lF

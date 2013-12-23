@@ -1,0 +1,14 @@
+use System.Diagnostics
+
+class Test
+
+	def main is shared
+		Test().run
+
+	def run
+		args = '-editor:""'
+		r = CobraCommand.find.run('[args] 100-find-cobra.cobra')
+		assert r.exitCode == 0
+
+		r = CobraCommand.find.run('[args] 202-skip-has-errors.cobra')
+		assert r.exitCode == 1

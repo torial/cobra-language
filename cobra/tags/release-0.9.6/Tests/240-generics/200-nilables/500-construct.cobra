@@ -1,0 +1,11 @@
+# this tests the runtime checking of non-nil args.
+# this test will need fixing when compile time checking of nil args is performed
+class Test
+
+	cue init(s as String)
+		base.init
+
+	shared
+		def main
+			expect ArgumentNullException
+				Test(nil)

@@ -1,0 +1,185 @@
+enum CurlyLineNumberTreatment
+	None
+	PoundLine
+	Comment
+
+
+
+class CurlyWriter is abstract implements IDisposable
+
+	var _sb as StringBuilder
+
+	var _cobraLineNum as int
+	var _curlyLineNum as int
+	var _curlyToCobraLineNum as Dictionary<of int, int>
+	var _hideLineNumbers as int
+
+	shared
+	
+		var _initialBufferSize as int?
+
+	cue init
+		base.init
+		if _initialBufferSize is nil
+			s = Environment.getEnvironmentVariable('COBRA_INTERNAL_GENCODEINITIALBUFFERSIZE')
+			if s is nil or s.trim == '', _initialBufferSize = 128 * 1024
+			else, _initialBufferSize = int.parse(s to !)
+		_sb = StringBuilder(_initialBufferSize to !)
+		_cobraLineNum = _curlyLineNum = 1
+		_curlyToCobraLineNum = {1 : 1}
+
+	get curlyToCobraLineNum from var
+
+	def hideLineNumbers
+		_hideLineNumbers += 1
+
+	def unhideLineNumbers
+		_hideLineNumbers -= 1
+		assert _hideLineNumbers >= 0
+
+	def node(node as SyntaxNode)
+		"""
+		As C# code is generated, each of the nodes should invoke this method so that the
+		CurlyWriter can manage line numbers.
+		"""
+		lineNum = node.token.lineNum
+		if lineNum > 0 and _hideLineNumbers < 1
+			# assert lineNum >= _cobraLineNum, '[lineNum], [_cobraLineNum]'
+			# ^ Can't assert that because of post while statements, helper methods, etc.
+			_cobraLineNum = lineNum
+
+	def start(fileName as String) is abstract
+
+	def _writeLineNum is abstract
+
+	def bumpLineNum
+		_cobraLineNum += 1
+
+
+	## Indentation
+	
+	var _indentLevel = 0
+	var _totalIndentString = ''
+	const _maxTotalIndentStrings = 32
+	var _totalIndentStrings = String[](_maxTotalIndentStrings)  # CC: String?[]
+	var _atBOL = true
+
+	def indent
+		_indentLevel += 1
+		_computeTotalIndentString
+
+	def dedent
+		_indentLevel -= 1
+		_computeTotalIndentString
+
+	def _computeTotalIndentString
+		if _indentLevel < _maxTotalIndentStrings
+			if sharp'_totalIndentStrings[_indentLevel] == null'  # _totalIndentStrings[_indentLevel] is nil
+				_totalIndentStrings[_indentLevel] = String(_indentChar, _indentLevel)
+			_totalIndentString = _totalIndentStrings[_indentLevel]
+		else
+			_totalIndentString = String(_indentChar, _indentLevel)
+
+	pro indentChar from var = c'\t'
+		"""
+		Returns the string used for one level of indentation.
+		Default value is "\t".
+		"""
+
+	def indentAndWrite(s as String)
+		.indent
+		.write(s)
+
+	def writeAndIndent(s as String)
+		.write(s)
+		.indent
+
+	def dedentAndWrite(s as String)
+		.dedent
+		.write(s)
+
+
+	## Being a TextWriter
+
+	def write(value as char)
+		.write(value.toString)
+
+	def write(s as String?)
+		# performance sensitive code
+		if s is nil, return
+		start = 0
+		length = s.length
+		for i in length
+			if s[i] == c'\n'
+				if i > start
+					if _atBOL
+						_writeLineNum
+						_sb.append(_totalIndentString)
+					_sb.append(s.substring(start, i-start))
+				_sb.append(c'\n')
+				_atBOL = true
+				start = i + 1
+		if start < length
+			if _atBOL
+				_writeLineNum
+				_sb.append(_totalIndentString)
+			_sb.append(s.substring(start, length-start))
+			_atBOL = false
+
+	def write(obj as Object?)
+		if obj, .write(obj.toString)
+
+	def writeLine(s as String?)
+		.write(s)
+		_sb.append(c'\n')
+		_atBOL = true
+
+	def writeLine
+		_sb.append(c'\n')
+		_atBOL = true
+	
+	def output as String
+		return _sb.toString
+	
+	def dispose
+		pass
+		
+
+
+class CodePoundLineWriter inherits CurlyWriter
+
+	var _fileName as String?
+
+	def start(fileName as String) is override
+		_sb.append('#line 1 "[fileName]"')
+		_sb.append(c'\n')
+		_fileName = fileName
+
+	def hideLineNumbers
+		base.hideLineNumbers
+		_sb.append('#line hidden')
+		_sb.append(c'\n')
+
+	def unhideLineNumbers
+		base.unhideLineNumbers
+		_sb.append('#line default')
+		_sb.append(c'\n')
+		if _fileName
+			_sb.append('#line [_cobraLineNum] "[_fileName]"')
+			_sb.append(c'\n')
+
+	def _writeLineNum is override
+		if not _hideLineNumbers
+			_sb.append('#line ' + _cobraLineNum.toString)
+			_sb.append(c'\n')
+		
+
+class CodeCommentLineWriter inherits CurlyWriter
+
+	def start(fileName as String) is override
+		_sb.append('// #line 1 "[fileName]"')
+		_sb.append(c'\n')
+
+	def _writeLineNum is override
+		_sb.append('// #line [_cobraLineNum]')
+		_sb.append(c'\n')

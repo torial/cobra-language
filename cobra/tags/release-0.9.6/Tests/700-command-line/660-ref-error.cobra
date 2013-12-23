@@ -1,0 +1,6 @@
+# .args. -ref:c:\badref 
+# .error. Cannot load reference "c:\badref.dll" due to: Could not find file.
+
+class Ticket119 
+	def main is shared 
+		pass

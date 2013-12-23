@@ -1,0 +1,98 @@
+"""
+Test that the current Cobra compiler can build itself.
+"""
+
+use System.Reflection
+
+
+class TestCompilerBuild
+
+	var compilerLibFileNames = 'Test.Cobra.Compiler.dll Test.Cobra.Compiler.dll.xdb'.split to !
+	var helloProgramFileNames = 'hello.cobra hello.exe hello.pdb hello.exe.mdb'.split to !
+
+	def main
+		# choose the correct debugging symbols extension for the platform
+		ext = if(CobraCore.isRunningOnMono, '.dll.mdb', '.pdb')
+		for i, fileName in .compilerLibFileNames.numbered
+			.compilerLibFileNames[i] = .compilerLibFileNames[i].replace('.dll.xdb', ext)
+		
+		testDir = Environment.currentDirectory
+		
+		sep = Path.directorySeparatorChar
+		cobraPath = CompileTimeInfo.cobraPath
+		assert File.exists(cobraPath)
+		assert cobraPath.endsWith('Source[sep]cobra.exe')
+		
+		cobraDir = Path.getDirectoryName(cobraPath)
+		Environment.currentDirectory = cobraDir to !
+		
+		.removeFiles(.compilerLibFileNames)
+		.removeFiles(.helloProgramFileNames)
+
+		p = System.Diagnostics.Process()
+		p.startInfo.fileName = cobraPath
+		args = [
+			'-c',
+			'-debug',
+			'-turbo',
+			'-t:lib',
+			'-ert:yes',
+			'-files:files-to-compile.text',
+			'-namespace:Cobra.Compiler',
+			'-out:Test.Cobra.Compiler.dll',
+			'cobra.cobra',
+		]
+		p.startInfo.arguments = args.join(' ')
+		output = p.runAndCaptureAllOutput.trim
+		assert 'Compilation succeeded' in output
+		assert File.exists('Test.Cobra.Compiler.dll')
+
+		# Note that .NET/Windows requires a full path to the DLL
+		# whereas Mono will load from the current directory
+		fullPath = Path.combine(Environment.currentDirectory, 'Test.Cobra.Compiler.dll')
+		assert File.exists(fullPath)
+		# keeps ref to file in CLR so file delete below fails
+		# assembly = Assembly.loadFrom(fullPath)
+		# use byte load instead
+		# see http://social.msdn.microsoft.com/forums/en-US/clr/thread/999cca57-bd8b-4c5f-ba9e-bc5463c2aa94
+		assembly = Assembly.load(File.readAllBytes(fullPath))
+
+		assert assembly
+		assert assembly.getName.name == 'Test.Cobra.Compiler'
+		cmdLineClass = assembly.getType('Cobra.Compiler.CommandLine') to ?
+		assert cmdLineClass
+		cl = cmdLineClass()
+		assert cl.versionString.length
+		assert cl.versionString.startsWith('svn:')		
+
+		# compile hello.cobra
+		if not File.exists('hello.cobra')
+			File.copy('Misc[sep]hello.cobra', 'hello.cobra', true)  # true = can overwrite
+		cl = cmdLineClass()
+		cl.run(['-c', 'hello.cobra'])
+
+		# compile hello.cobra -ert
+		if false
+			# to-do: the compiler's ert takes the path from the entry executable which is the .exe
+			# which is not the .dll. it needs to use the path from the .dll
+			File.copy('Misc[sep]hello.cobra', 'hello.cobra', true)
+			cl = cmdLineClass()
+			cl.run(['-c', '-ert:yes', 'hello.cobra'])
+
+		# move the resulting compiler lib over
+		for fileName in .compilerLibFileNames
+			target = Path.combine(testDir, fileName)
+			if File.exists(target), File.delete(target)
+			File.move(fileName, target)
+				
+		# remove src files copied into cwd and built artifacts
+		.removeFiles(.helloProgramFileNames)		
+		.removeFiles(.compilerLibFileNames)
+		
+	def removeFiles(fileNames as String*)
+		for fileName in fileNames
+			try
+				File.delete(fileName)
+			catch UnauthorizedAccessException
+				# .NET/Windows locks the .dll when it is loaded
+				pass

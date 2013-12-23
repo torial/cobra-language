@@ -1,0 +1,527 @@
+interface ITypeProxy inherits ISyntaxNode
+	"""
+	An ITypeProxy is a node that represents/stands-in for a type.
+	Its .realType property returns that type, often by locating it among symbols.
+	Implemented by CobraType, AbstractTypeIdentifier, NilableTypeProxy and the backEnd TypeProxies.
+	"""
+
+	# TODO: See above NOTE and consider adding name below. Also see _bindBase in Boxes.cobra which would benefit from .name
+#	get name as String
+#		"""
+#		Return the name of the type.
+#		"""
+
+	get realType as IType
+		"""
+		Returns the type that this node represents or .throwError if the type cannot be located.
+		"""
+
+
+class AbstractTypeProxy
+	is abstract
+	inherits Node
+	implements ITypeProxy
+
+	get realType as IType is abstract
+
+	## ISyntaxNode
+
+	pro isHelpRequested from var as bool
+
+	get token as IToken
+		return Token.empty
+
+	get endToken as IToken
+		return Token.empty
+
+
+class TypeProxy
+	inherits AbstractTypeProxy
+	"""
+	Once in awhile you might need to pass or use an ITypeProxy even though you already know the type (probably because it is a builtin type such as `int` or `dynamic`.
+	In that case, you can use TypeProxy(someType)
+	"""
+
+	var _type as IType
+
+	cue init(type as IType)
+		base.init
+		_type = type
+
+	get realType as IType is override
+		return _type
+
+
+class LibraryTypeProxy
+	inherits AbstractTypeProxy
+	"""
+	Relies on .compiler.libraryType(qualifiedName) to locate the Cobra type.
+	Useful for the primitive types that need a reference to, for example, System.Char.
+	"""
+
+	var _qualifiedName as String
+	
+	cue init(qualifiedName as String)
+		base.init
+		_qualifiedName = qualifiedName
+
+	get qualifiedName from var
+	
+	get realType as IType is override
+		return .typeProvider.libraryType(_qualifiedName)
+
+
+class NilableTypeProxy
+	inherits AbstractTypeProxy
+	"""
+	Returns the type proxy it is given wrapped in a NilableType.
+	Used when scanning, for example, method arguments in DLLs. See _scan* in Box.
+	"""
+
+	var _innerType as ITypeProxy
+
+	cue init(innerType as ITypeProxy)
+		base.init
+		_innerType = innerType
+
+	get innerTypeProxy as ITypeProxy  # TODO: should probably rename to nonNil
+		return _innerType
+
+	def addMinFields
+		base.addMinFields
+		.addField('innerTypeProxy', .innerTypeProxy)
+
+	get realType as IType is override
+		return .typeProvider.nilableType(_innerType.realType)
+
+
+class VariTypeProxy
+	inherits AbstractTypeProxy
+	"""
+	Returns the type proxy it is given wrapped in a VariType.
+	Used when scanning, for example, method arguments in DLLs. See _scan* in Box.
+	"""
+
+	var _innerType as ITypeProxy
+
+	cue init(innerType as ITypeProxy)
+		base.init
+		_innerType = innerType
+
+	get innerTypeProxy as ITypeProxy
+		return _innerType
+
+	def addMinFields
+		base.addMinFields
+		.addField('innerTypeProxy', .innerTypeProxy)
+
+	get realType as IType is override
+		return VariType(_innerType.realType)
+
+
+class NativeTypeProxy inherits AbstractTypeProxy is abstract
+	"""
+	TypeProxy specifically for a BackEnd provided Type otherwise same as an AbstractTypeProxy
+		Specific implementation will be provided by the backend e.g. {Clr,Jvm}TypeProxy
+	"""
+
+##
+## Type Identifiers
+##
+
+class AbstractTypeIdentifier
+	is abstract
+	inherits SyntaxNode
+	implements ITypeProxy
+	"""
+	The ancestor class for specific kinds of type identifiers including TypeIdentifier, GenericTypeIdentifier, WrappedTypeIdentifier and more.
+	"""
+
+	var _name as String
+	var _actualType as IType? is private
+	var _didResolveType as bool is private
+
+	cue init(token as IToken, name as String)
+		base.init(token)
+		_name = name
+
+	cue init(token as IToken, name as String, type as IType)
+		.init(token, name)
+		_actualType = type
+		_didResolveType = true
+
+	def addMinFields is override
+		base.addMinFields
+		.addField('name', _name)
+		.addField('didResolveType', _didResolveType)
+
+	def addRefFields is override
+		base.addSubFields
+		.addField('actualType', _actualType)
+
+	get name from var
+
+	get actualType from var
+
+	get didResolveType from var
+
+	get realType as IType
+		ensure .actualType
+		if not .didResolveType
+			_actualType = _resolveType()
+			assert .actualType
+			_didResolveType = true
+			_recommendBuiltInType
+		assert _actualType
+		return _actualType to !
+
+	def _recommendBuiltInType
+		n = .backEnd.getRecommendedBuiltInType(_actualType.parentNameSpace, _actualType.name)
+		if n, .compiler.warning(this, 'Use the builtin type "[n]" instead of the struct "[_actualType.name]".')
+						
+	def equals(other as Object?) as bool is override
+		if other is nil
+			return false
+		if this is other
+			return true
+		if other inherits AbstractTypeIdentifier
+			if _actualType and other._actualType
+				return _actualType.equals(other._actualType)
+			else
+				return _name.equals(other._name)
+		return false
+
+	def getHashCode as int is override
+		return _name.getHashCode
+
+	def memberFrom(container as IContainer) as IMember?
+		"""
+		Used to get the real member represented by this type identifier in container.
+		Used for qualified types such as:
+			System.Windows.Forms.Control
+			System.Collections.Generic.List<of String>
+		The default implementation is:
+			return container.memberForName(.name)
+		Generics have to do more work, though.
+		So do types with funky names.
+		"""
+		return container.memberForName(.name)
+
+	def _resolveType as IType is abstract
+		"""
+		Invoked by .realType only when needed.
+		Subclasses must override to compute and return the actual type that this identifier represents (or invoke `.throwError('...')`).
+		Subclasses should not bother with other operations such as checking or setting _actualType or _didResolveType to true.
+		Subclasses need not invoke `base`.
+		"""
+
+	def _symbolForName(name as String) as IMember
+		"""
+		Returns the symbol for this node's name or .throwError.
+		Also, implements -correct-source:case or suggests it if it is off, but would have resolved.
+		"""
+		# don't need to check "basic types" like int, bool, etc. here. the parser does those.
+		if name.isCapitalized
+			symbol = .compiler.symbolForName(name, false)  # nested enum and class types are capitalized and can be members of the current class
+		else  # examples: wx.NET, libtcodWrapper.Console
+			symbol = .compiler.symbolForName(name, false, true)
+		if symbol is nil
+			correctCase = 'case' in .compiler.options.setValue('correct-source')
+			if correctCase
+				if not name.isCapitalized
+					# not very sophisticated, but catches 'string', 'object', etc.
+					name = name.capitalized
+					symbol = .compiler.symbolForName(name, false)
+					if symbol is not nil
+						if '<' in name  # handle generics
+							# 'dictionary<of ' vs. 'Dictionary<of,>'
+							name = name[:name.indexOf('<')] + .token.text[.token.text.indexOf('<'):]
+							assert name.length == .token.text.length
+						.compiler.correctSource(.token, name)
+			if symbol is nil
+				sugg = Compiler.suggestionFor(name) ? ''
+				if sugg == '' and not name.isCapitalized
+					other = .compiler.symbolForName(name.capitalized, false)
+					if other, sugg = name.capitalized
+				if sugg <> '', sugg = ' Try "[sugg]". Also, consider the -correct-source option (see cobra -h for details).'
+				.throwError('Cannot find type for "[_name]".[sugg]')
+		return symbol to !
+
+
+class WrappedTypeIdentifier
+	is abstract
+	inherits AbstractTypeIdentifier
+
+	var _typeId as AbstractTypeIdentifier
+
+	cue init(token as IToken, typeId as AbstractTypeIdentifier)
+		require
+			token.text.length
+		ensure
+			.name.length
+		body
+			base.init(token, token.text)
+			_typeId = typeId
+
+	def addMinFields
+		base.addMinFields
+		.addField('typeId', _typeId)
+
+	get theWrappedTypeIdentifier from _typeId
+
+	def _bindInt is override
+		_typeId.bindInt
+		base._bindInt
+
+	def _bindImp is override
+		_typeId.bindImp
+		base._bindImp
+
+
+class ArrayTypeIdentifier inherits WrappedTypeIdentifier
+
+	cue init(token as IToken, typeId as AbstractTypeIdentifier)
+		base.init(token, typeId)
+
+	def memberFrom(container as IContainer) as IMember? is override
+		return container.memberForName(.theWrappedTypeIdentifier.name)
+
+	def _resolveType as IType is override
+		return .typeProvider.arrayType(_typeId.realType)
+
+
+class NilableTypeIdentifier
+	inherits WrappedTypeIdentifier
+	"""
+	Foo?
+	"""
+
+	cue init(token as IToken, typeId as AbstractTypeIdentifier)
+		base.init(token, typeId)
+
+	def _resolveType as IType is override
+		return .typeProvider.nilableType(_typeId.realType)
+
+	get name as String is override
+		return _typeId.name + '?'
+
+	def memberFrom(container as IContainer) as IMember? is override
+		m = container.memberForName(.name[:-1])
+		if m inherits IType
+			return .typeProvider.nilableType(m)
+		else
+			return m
+
+
+class StreamTypeIdentifier
+	inherits WrappedTypeIdentifier
+	"""
+	Foo*
+	"""
+
+	cue init(token as IToken, typeId as AbstractTypeIdentifier)
+		base.init(token, typeId)
+	
+	def _resolveType as IType is override
+		t = StreamType(_typeId.realType)
+		t.bindInh
+		t.bindInt
+		return t
+
+	get name as String is override
+		return _typeId.name + '*'
+
+
+class VariTypeIdentifier
+	inherits WrappedTypeIdentifier
+
+	cue init(token as IToken, typeId as AbstractTypeIdentifier)
+		base.init(token, typeId)
+
+	def _resolveType as IType is override
+		t = VariType(_typeId.realType)
+		t.bindInh
+		t.bindInt
+		return t
+
+
+class TypeIdentifier
+	inherits AbstractTypeIdentifier
+	"""
+	Created by CobraParser.type for identifiers found where types are
+	expected.
+
+	Cobra allows forward references so even though types are expected in
+	places like the return type of a method, they cannot be turned into
+	actual types until the bindInt phase (or bindImp for expressions).
+	"""
+
+	cue init(token as IToken)
+		require
+			token.which=='ID'
+			token.text.length
+		ensure
+			.name.length
+		body
+			base.init(token, token.text)
+
+	cue init(token as IToken, type as IType)
+		require
+			token.text.length
+		ensure
+			.name.length
+		body
+			base.init(token, token.text, type)
+
+	cue init(token as IToken, name as String, type as IType)
+		"""
+		Use this to dictate a name other than what is specified by the token.
+		Used for QualifiedTypes, for example, that are created from multiple tokens.
+		"""
+		require
+			name.length
+		ensure
+			.name.length
+		body
+			base.init(token, name, type)
+			assert name == token.text
+
+	def _resolveType as IType is override
+		symbol = _symbolForName(.name) to dynamic
+		if symbol inherits ITypeProxy
+			return symbol.realType
+		else
+			throw FallThroughException(symbol)
+
+
+class GenericTypeIdentifier inherits AbstractTypeIdentifier
+	"""
+	The parser produces these when it encounters "List<of String>", for example.
+	"""
+
+	var _rootName as String    # ex: 'List'
+	var _fullName as String    # ex: 'List<of String>'
+	var _typeRefName as String # ex: 'List<of>' 'IDictionary<of,>' -- matches the actual box
+
+	var _numArgs as int
+	var _typeNodes as List<of ITypeProxy>?
+
+	cue init(token as IToken, rootName as String, fullName as String, typeNodes as List<of ITypeProxy>)
+		require
+			token.which == 'OPEN_GENERIC'
+			rootName.length and '<of' not in rootName
+			fullName.length and '<of' in fullName
+			typeNodes.count
+		body
+			.init(token, rootName, fullName, typeNodes, 0)
+
+	cue init(token as IToken, rootName as String, fullName as String, numArgs as int)
+		require
+			token.which=='OPEN_GENERIC'
+			rootName.length and '<of' not in rootName
+			fullName.length and '<of' in fullName
+			numArgs > 0
+		body
+			.init(token, rootName, fullName, nil, numArgs)
+
+	cue init(token as IToken, rootName as String, fullName as String, typeNodes as List<of ITypeProxy>?, numArgs as int) is protected
+		require typeNodes or numArgs > 0
+		base.init(token, fullName)
+		_rootName, _fullName = rootName, fullName
+		if typeNodes
+			_typeNodes = typeNodes
+			_typeRefName = _rootName + '<of'
+			# TODO: String(c',', _typeNodes.count-1) ?
+			for i in _typeNodes.count-1, _typeRefName += ','
+			_typeRefName += '>'
+			_numArgs = _typeNodes.count
+		else
+			_typeRefName = fullName
+			_numArgs = numArgs
+		_name = fullName
+
+	get numArgs from var
+
+	get typeNodes from var
+
+	def memberFrom(container as IContainer) as IMember? is override
+		# happens for a qualified generic. See ../Tests/160-qualified/200-qual-generic.cobra
+		genericType = container.memberForName(_typeRefName)
+		assert genericType
+		return _locateType(genericType to !)
+
+	def _resolveType as IType is override
+		symbol = _symbolForName(_typeRefName)
+		return _locateType(symbol)
+
+	def _locateType(genericType as IMember) as IType
+		if genericType inherits Box
+			if not genericType.isGeneric
+				.throwError('"[_rootName]" is not a generic type.')
+			if _typeNodes
+				types = List<of IType>()
+				for tn in _typeNodes
+					# types.add(tn.realType)
+					# to-do: remove this when NameSpace is no longer an IType
+					realType = tn.realType
+					if realType inherits NameSpace
+						.throwError('"[tn.token.text]" cannot be used as a generic parameter because it is a namespace.')
+					types.add(realType)
+				if genericType.genericParams.count <> types.count
+					.throwError('The generic type "[_rootName]" expects [genericType.genericParams.count] type arguments, not [types.count].')
+				t = genericType.constructedTypeFor(types)
+				assert t.genericParams == types
+				assert t.isGeneric and not t.isGenericDef
+			else
+				t = genericType
+				assert t.isGeneric and t.isGenericDef
+			return t
+		else if genericType inherits IType
+			.throwError('"[_rootName]" is not a generic type.')
+			return nil to passthrough
+		else
+			assert false, 'When does this happen?'
+			.throwError('The definition for "[_fullName]" is not a type.')
+			return nil to passthrough
+
+
+class QualifiedTypeIdentifier
+	inherits AbstractTypeIdentifier
+
+	var _typeNodes as List<of AbstractTypeIdentifier>
+
+	cue init(typeNodes as List<of AbstractTypeIdentifier>)
+		require typeNodes.count > 1
+		base.init(typeNodes[0].token, '(uninitialized name)')
+		_typeNodes = typeNodes
+		sb = StringBuilder()
+		sep = ''
+		for t in typeNodes
+			sb.append(sep)
+			sb.append(t.name)
+			sep = '.'
+		_name = sb.toString
+		# TODO: would it be useful to set the _token.text to the name? Maybe it would help with syntax highlighting
+
+	get typeNodes from var
+
+	def _resolveType as IType is override
+		member = _symbolForName(_typeNodes[0].name) to ?
+		i = 1
+		while i < _typeNodes.count and member <> nil
+			if member inherits IContainer
+				m = _typeNodes[i].memberFrom(member)
+				if m
+					member = m
+				else
+					.throwError('Cannot find "[_typeNodes[i].name]" at component [i+1] of qualified type.')
+				i += 1
+			else
+				.throwError('"[member]" cannot contain additional members.')
+		if member inherits NameSpace  # TODO: remove when NameSpace is no longer an IType
+			.throwError('The definition for "[_name]" is a namespace, not a type.')
+		if member inherits IType
+			return member
+		else
+			.throwError('The definition for "[_name]" is not a type.')
+			throw Exception('') # CC: axe when 'always throws' for methods is available

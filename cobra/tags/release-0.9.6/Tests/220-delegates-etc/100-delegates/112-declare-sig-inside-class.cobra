@@ -1,0 +1,76 @@
+class Computer
+
+	sig BinaryOp(a as int, b as int) as int
+
+	var _op as BinaryOp?
+	var _a as int
+	var _b as int
+
+	cue init(a as int, b as int)
+		base.init
+		_a = a
+		_b = b
+
+	pro op from var
+
+	def setOp(op as BinaryOp)
+		# just to test passing the delegate as a parameter
+		_op = op
+
+	def eval1 as int
+		if _op
+			return _op.invoke(_a, _b)
+		else
+			return 0
+
+	def eval2 as int
+		if _op
+			return _op(_a, _b)
+		else
+			return 0
+
+
+class Program
+
+	def main is shared
+		Program().run
+	
+	def run
+		c = Computer(3, 2)
+
+		c.op = ref .add
+		assert c.eval1 == 5
+		assert c.eval2 == 5
+
+		c.op = ref .mul
+		assert c.eval1 == 6
+		assert c.eval2 == 6
+
+		c.op = Computer.BinaryOp(ref .sub)  # explicit instantiation
+		assert c.eval1 == 1
+		assert c.eval2 == 1
+
+		c.setOp(ref .mul)  # pass as arg to method
+		assert c.eval1 == 6
+
+		bo = Computer.BinaryOp(ref .add)  # explicit instantiation assigned to a local var
+		c.op = bo
+		c.setOp(bo)
+		assert c.eval1 == 5
+
+		# test accessing members of Delegate and SystemDelegate
+		assert c.op.method.name == 'Add'
+		assert c.op.target == this
+		assert c.op.getInvocationList.length == 1
+		for d in c.op.getInvocationList
+			assert d.method.name == 'Add'
+			assert d.target is this
+
+	def add(a as int, b as int) as int
+		return a + b
+	
+	def sub(a as int, b as int) as int
+		return a - b
+
+	def mul(a as int, b as int) as int
+		return a * b

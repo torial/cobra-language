@@ -1,0 +1,33 @@
+class Top
+	pass
+	
+class A
+	inherits Top	
+	pass
+	
+class B
+	inherits Top
+	pass
+
+
+class Test
+
+	def main
+		is shared
+
+		x as int = 5
+		y as int = 4
+
+		z as int = if(x<y, x, y)
+		assert z==y
+
+		assert x==if(x>y, x, y)
+
+		assert if(CobraCore.findCobraExe, 'not nil', 'nil')=='not nil'
+
+		# a common base type
+		x = 5
+		y = 6
+		c as Top = if(x < y, A(), B())
+		assert c inherits A
+		c = Top()

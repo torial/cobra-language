@@ -1,0 +1,178 @@
+use System.Diagnostics
+
+class ObjcBackEnd inherits BackEnd
+
+	cue init(compiler as Compiler)
+		base.init(compiler)
+		_name = 'objc'	
+		_runTimeLibFileName = 'Cobra.Core.dll'
+		_runTimeLibNativeSourceFileName = 'Native.m'  # back-end source file containing native code support for Cobra.Core
+
+		_tagToTypeName = { 	# to-do
+			'Object': '',
+			'Type'	: '',
+			}
+
+	def makePhases(phases as IList<of Phase>) is override
+		phases.add(GenerateObjcCodePhase(.compiler))
+		phases.add(CompileObjcCodePhase(.compiler))
+
+	def getRecommendedBuiltInType(parentNameSpace as NameSpace?, name as String) as String? is override
+		n = nil to String?
+		if parentNameSpace and parentNameSpace.fullName == '???'
+			branch name
+				on '???', n = 'bool'
+				on '?? SByte',   n = 'int8'
+				on '?? Byte',    n = 'uint8'
+				on '?? Int16',   n = 'int16'
+				on '?? UInt16',  n = 'uint16'
+				on '?? Int32',   n = 'int32'
+				on '?? UInt32',  n = 'uint32'
+				on '?? Int64',   n = 'int64'
+				on '?? UInt64',  n = 'uint64'
+				on '?? Char',    n = 'char'
+				on '?? Single',  n = 'float32'
+				on '?? Double',  n = 'float'
+				on '?? Decimal', n = 'decimal'
+		return n
+
+	def computeOutName as String is override
+		return .compiler.computeOutNameObjc
+		
+	def genNativeModule(file as FileSpec, verbosity as int) as Module? is override
+		m as Module?
+		if file.path and file.path.endsWith('.objc') # ??
+			if verbosity, print 'Noting  [file.path] as ObjCModule'  # extra space to line up with 'Parsing [filename]'
+			assert false, 'Need code for an ObjCModule'	
+			#m = ObjCModule(filename, verbosity)
+		return m
+
+	get baseExeName as String is override
+		"""Resulting executable file name for compiled file(s) sans extension."""
+		return .compiler.clrBaseExeFileName 	
+	
+	get fullExeName as String is override
+		"""Resulting full executable file name (pathname+extn) for compiled file(s)."""
+		return .compiler.clrFullExeFileName
+
+	def setupRunProcess(baseExe as String, fullExe as String) as Process is override
+		p = Process()
+		p.startInfo.fileName = fullExe
+		return p
+		
+	def setDefaultUseDirectives(ns as NameSpace) is override
+		useToken = Token('(implicit)', 1, 1, 1, 'USE', 'use', nil)
+		# these arent correct for ObjC but are here as a placeholder/reminder
+		ns.addUseDirective(UseDirective(useToken, ['System']))
+		ns.addUseDirective(UseDirective(useToken, ['System', 'Collections', 'Generic']))
+		ns.addUseDirective(UseDirective(useToken, ['System', 'IO']))
+		ns.addUseDirective(UseDirective(useToken, ['System', 'Text']))
+		ns.addUseDirective(UseDirective(useToken, ['Cobra', 'Core']))
+	
+	def fixLibExtension(libRef as String) as String is override
+		"""
+		Augment given lib reference string with .dll backend extension if not already have one
+		"""
+		or require libRef.length
+		and ensure result.endsWith('.dll')
+		if not libRef.endsWith('.dll'), libRef += '.dll'
+		return libRef
+	
+	def loadLibReference(reference as String) as String? is override
+		return nil	# TODO
+	
+	def readSystemTypes is override
+		pass
+	
+	def fixMemberSigs is override
+		pass
+
+	def installNativeMethods(box as Box, nativeType as NativeType) is override
+		pass
+
+	def cobraNameForNativeBoxName(nativeBoxName as String) as String is override
+		return nativeBoxName # TODO
+		
+	def isRunnableFile(fullExeFileName as String) as bool is override
+		return true # may need extending
+
+	# Types
+	get objectTypeProxy as AbstractTypeProxy  is override
+		"""Type proxy for BE root of Object hierarchy."""
+		return ClrTypeProxy(Object)  # Tmp pending ObjcTypeProxy
+			
+	get typeTypeProxy  as AbstractTypeProxy  is override
+		"""Type proxy for BE notion of a class describing a Type."""
+		return ClrTypeProxy(Type)  # Tmp pending ObjcTypeProxy
+		
+	def nativeTypeProxy(type as NativeType) as NativeTypeProxy  is override
+		assert false, 'ObjcBackEnd ObjcNativeTypeProxy NYI'
+		return ClrTypeProxy(type)  # Tmp pending ObjcTypeProxy
+	
+	def nativeType(type as dynamic) as NativeType  is override
+		assert false, 'ObjcBackEnd ObjcNativeType NYI'
+		return ClrNativeType(type) # Tmp pending ObjcNativeType
+	
+	def nativeTypeByName(qualifiedName as String) as NativeType is override
+		assert false, 'ObjcBackEnd ObjcNativeType and objcTypeByName NYI'
+		return ClrNativeType(.compiler.clrTypeByName(qualifiedName))
+	
+	def prepSystemObjectClass(box as Box)  is override
+		pass 	#box.prepSystemObjectClassObjc
+		
+	def scanGenericArgs(box as Box)	 is override
+		pass 	# box.scanGenericArgsObjc
+		
+	def scanNativeType(box as Box)	 is override
+		pass 	# box.scanNativeTypeObjc
+
+	def scanNativeType(edcl as EnumDecl)	 is override
+		pass 	# edcl.scanNativeTypeObjc
+		
+	def setUnderlyingType(edcl as EnumDecl)	 is override
+		pass # edecl.setUnderlyingTypeObjc
+
+	# implement these if need override
+	#def determineExtnNativeType(extn as Extension, nativeType as NativeType) as NativeType
+	#	return extn.objcExtnNativeType(nativeType)
+
+	#def handleNameSpaceNameCollision(ns as NameSpace, token as IToken, name as String) as NameSpace is override
+
+	def getEnumeratorMember(box as Box) as IMember? is override
+		""" Find iterator method member in given Box."""
+		return nil 	#box.getIteratorMemberObjc
+		
+	def getEnumeratorMemberType(box as Box, rt as IType) as IType? is override
+		"""Return type from lookup of iterator 'next' field in given Box."""
+		return nil #	box.getIteratorNextTypeObjc(rt)
+	
+	def validatePrintDestType(t as IType, s as Stmt) is override
+		"""Validate that the given Type is a valid destination for a print statement redirection."""
+		pass
+		
+		
+class GenerateObjcCodePhase inherits Phase
+
+	cue init(c as Compiler)
+		base.init(c)
+
+	get description as String is override
+		return 'Generating Objective-C code'
+
+	def innerRun is override
+		c = .compiler
+		c.writeObjc  # extension method
+		if c.willWriteTestInvocation
+			c.writeObjcTestInvocation
+
+
+class CompileObjcCodePhase inherits Phase
+
+	cue init(c as Compiler)
+		base.init(c)
+
+	get description as String is override
+		return 'Compiling Objective-C code'
+
+	def innerRun is override
+		.compiler.compileObjc
