@@ -1,0 +1,5 @@
+c:\fresh\cobra-language\cobra\trunk\Source\Cobra.MSBuild\TestProjects\ExampleSolution\HelloWorld\bin\Debug\HelloWorld.exe
+c:\fresh\cobra-language\cobra\trunk\Source\Cobra.MSBuild\TestProjects\ExampleSolution\HelloWorld\bin\Debug\HelloWorld.pdb
+c:\fresh\cobra-language\cobra\trunk\Source\Cobra.MSBuild\TestProjects\ExampleSolution\HelloWorld\obj\x86\Debug\HelloWorld.cobraprojResolveAssemblyReference.cache
+c:\fresh\cobra-language\cobra\trunk\Source\Cobra.MSBuild\TestProjects\ExampleSolution\HelloWorld\obj\x86\Debug\HelloWorld.exe
+c:\fresh\cobra-language\cobra\trunk\Source\Cobra.MSBuild\TestProjects\ExampleSolution\HelloWorld\obj\x86\Debug\HelloWorld.pdb

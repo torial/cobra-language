@@ -158,9 +158,9 @@ class InstallFromWorkspace
 		.locateSnapshotCompiler
 		.buildCobraCompiler
 		.getBaseVersion
+		.locateBuildTool
 		if not _skipStdLib
 			.locateGacUtil
-			.locateBuildTool
 			for lib in .libs
 				# keys: name, flags
 				libName = lib['name']
@@ -576,6 +576,10 @@ class InstallFromWorkspace
 
 			# The .NET team cannot decide on a location for gacutil.exe
 			dirs = [
+				r'\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.8 Tools\x64',
+				r'\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.8 Tools',
+				r'\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.7.2 Tools\x64',
+				r'\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.7.2 Tools',
 				# Windows 8.1 SDK
 				r'\Program Files (x86)\Microsoft SDKs\Windows\v8.1A\bin\NETFX 4.5.1 Tools\x64',
 				r'\Program Files (x86)\Microsoft SDKs\Windows\v8.1A\bin\NETFX 4.5.1 Tools',
@@ -711,6 +715,7 @@ class InstallFromWorkspace
 		# It's called "base version" because it doesn't include any text after the numbers
 		# "0.8.0 post release" --> "0.8.0"
 		output = .runSourceCobra('-version')
+		print "Got Base Version: [output]"
 		reMatch = Regex.match(output, r'svn:(\d+)')
 		if reMatch.success
 			assert reMatch.value
@@ -722,7 +727,7 @@ class InstallFromWorkspace
 				_baseVersion = reMatch.value
 			else
 				.error('Could not extract base version number.')
-			_baseVersion += '-post'
+			#_baseVersion += '-post'
 		# check for an informal release
 		parent = Path.getFullPath('..')
 		if File.exists('[parent][.slash]InformalRelease.text')
@@ -810,6 +815,7 @@ class InstallFromWorkspace
 			print '[libName].dll has been successfully installed to the GAC.'
 		else
 			msg = 'After installing the library "[libName]", it cannot be loaded.'
+			msg += '\nLooked for "[arch]" and "[ver]"'
 			if required, .error(msg)
 			else, .warning(msg)
 				
@@ -859,7 +865,7 @@ class InstallFromWorkspace
 		.startStage('Verify newly built Cobra compiler')
 		.runSourceCobra('-about')
 		msg = 'Cannot run hello.cobra with new compiler.'
-		if not _skipStdLib
+		if true # not _skipStdLib
 			if File.exists('hello.exe'), File.delete('hello.exe')  # fresh start
 			File.copy('Misc[.slash]hello.cobra', 'hello.cobra', true)
 			hello = 'hello.cobra'

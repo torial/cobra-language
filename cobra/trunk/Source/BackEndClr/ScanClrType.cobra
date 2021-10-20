@@ -1129,7 +1129,8 @@ class EnumDecl is partial
 				try
 					intValue = int.parse((value to int64).toString)
 				catch OverflowException
-					intValue = 999  # CC: omg. but probably doesn't affect anything. we're reading the DLL here, not creating one
+					#intValue = 999  # CC: omg. but probably doesn't affect anything. we're reading the DLL here, not creating one
+					intValue = 2147483647 
 			else if isU32
 				try
 					intValue = int.parse((value to uint32).toString)
