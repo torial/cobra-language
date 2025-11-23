@@ -1,3 +1,20 @@
+Port to Zig Backend Notes
+-------------------------------------------------------------------------------
+.Net has changed much since .Net 4.0, and I had originally explored looking at
+porting to a later version of .Net.  There were enough things broken with this approach
+in my attempt, coupled with my decreased usage of .Net over the years have let
+me to consider other back-ends.
+
+I have been looking at Zig in part because it has a quality focused mindset, and
+this was also inherent in the Cobra language.  Even some of the concepts like
+explicit nillable, or automated testing are already part of the language design of Zig.
+Additionally, Zig targets many environments, and has a bootstrapping mindset,
+which I find is friendly to the idea of making a Zig-backend replacing the .Net one.
+
+Why even bother?  I find that Cobra has been my favorite programming language,
+even after years of not using it, I find myself wishing to code again in it.  It has
+been my favorite language, and while I like Python, it doesn't have much of the
+improvements that were part of the Cobra language.
 
 ------------------ ORIGINAL README --------------------------------------
 
