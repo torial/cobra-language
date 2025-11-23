@@ -143,8 +143,3 @@ namespace Cobra.Core
 
 			def testGenMethod4<of T>(t as T) as T
 				return t
-
-	class EnumeratorInternalToString
-
-		def create as String* is shared
-			yield ['a', 'b', 'c'].join('')
