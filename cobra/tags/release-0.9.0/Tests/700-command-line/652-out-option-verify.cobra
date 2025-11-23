@@ -1,9 +1,0 @@
-class OutOptionVerify
-
-	def main is shared
-		name = 'outoption.exe'
-		p = System.Diagnostics.Process()
-		p.startInfo.fileName = name
-		output = p.runAndCaptureAllOutput
-		print output
-		

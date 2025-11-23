@@ -1,6 +1,0 @@
-class Test
-
-	def main is shared
-		path = CobraCore.findCobraExe
-		assert 'cobra' in path
-		assert File.exists(path)

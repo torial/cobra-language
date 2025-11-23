@@ -1,8 +1,0 @@
-class Foo
-
-	def bar(aaa as int, Bbb as int)  # .error.  lowercase
-		pass
-
-	def main
-		is shared
-		pass

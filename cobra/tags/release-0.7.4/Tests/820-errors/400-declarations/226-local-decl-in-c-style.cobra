@@ -1,8 +1,0 @@
-# .skip.
-# .error. correct local variable syntax
-
-class Test
-
-	def main is shared
-		List<of int> numbers = [5]
-

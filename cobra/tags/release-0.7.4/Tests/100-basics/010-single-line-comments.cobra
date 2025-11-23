@@ -1,8 +1,0 @@
-namespace Test
-# a comment
-	class Test
-	# a comment
-		def main
-			is shared
-			return # a comment
-

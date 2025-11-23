@@ -1,5 +1,0 @@
-class Program
-
-	def main
-		error =
-		print 'Hello, world!'

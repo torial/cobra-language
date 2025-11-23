@@ -1,9 +1,0 @@
-# .error. x & y & a & b
-
-class Test
-
-	def main is shared
-		while x
-			print y
-		post while a
-			print b

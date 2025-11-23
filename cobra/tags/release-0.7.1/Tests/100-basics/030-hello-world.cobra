@@ -1,6 +1,0 @@
-namespace Test
-	class Test
-		def main
-			is shared
-			Console.writeLine('Hello, world.')
-			

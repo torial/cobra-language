@@ -1,7 +1,0 @@
-# there are more extensive unit tests in the actual ExtendFoo.cobra files
-class X
-
-	def main
-		t = [1, 2, 3]
-		t.swap(0, 1)
-		assert t == [2, 1, 3]

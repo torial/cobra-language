@@ -1,7 +1,0 @@
-# This program used to cause an internal error
-
-class Test
-
-	def main is shared
-		t = [BadName]  # .error. Cannot find
-		print t

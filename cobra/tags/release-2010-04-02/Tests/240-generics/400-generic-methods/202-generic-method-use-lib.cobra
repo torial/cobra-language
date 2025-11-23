@@ -1,7 +1,0 @@
-@args -ref:200-generic-method-lib
-
-class Program
-
-	def main
-		a = A<of Program>()
-		CobraCore.noOp(a)

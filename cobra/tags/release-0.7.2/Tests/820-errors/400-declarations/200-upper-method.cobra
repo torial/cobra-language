@@ -1,9 +1,0 @@
-# .error.  lowercase
-class Point
-
-	def Foo
-		pass
-
-	def main
-		is shared
-		pass

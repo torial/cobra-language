@@ -1,7 +1,0 @@
-class Test
-
-	var _i = 2 + 2
-
-	def main
-		is shared
-		pass

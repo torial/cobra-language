@@ -1,5 +1,0 @@
-class Test
-
-	def main is shared
-			print 'x'  # .error. extra indentation
-		print 'y'

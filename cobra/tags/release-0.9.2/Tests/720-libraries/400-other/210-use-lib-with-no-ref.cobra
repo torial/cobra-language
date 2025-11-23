@@ -1,8 +1,0 @@
-# test using a library without a corresponding -ref argument on the command line
-
-use Foo.Bar
-
-class X
-
-	def main is shared
-		Baz()

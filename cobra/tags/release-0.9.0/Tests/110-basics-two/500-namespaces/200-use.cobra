@@ -1,6 +1,0 @@
-use System.Net
-
-class Program
-
-	def main is shared
-		pass

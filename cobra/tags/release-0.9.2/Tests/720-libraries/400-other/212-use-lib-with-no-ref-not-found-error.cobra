@@ -1,7 +1,0 @@
-
-use Foo.NotFound  # .error. Cannot find namespace "Foo.NotFound".
-
-class X
-
-	def main is shared
-		Baz()

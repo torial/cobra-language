@@ -1,8 +1,0 @@
-# .error. Unexpected end of file
-
-class Program
-
-    def main
-		variable as int
-		streamReader = StreamReader("Something.txt")
-		streamReader.getType(variable,

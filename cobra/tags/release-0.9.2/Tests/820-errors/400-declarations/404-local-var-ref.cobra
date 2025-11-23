@@ -1,6 +1,0 @@
-class Foo
-
-	var _x = y  # .error. Cannot find "y"
-
-	def main is shared
-		pass

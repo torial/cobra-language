@@ -1,6 +1,0 @@
-# .error. Unexpected end of file
-
-class A
-
-	def main
-		b =

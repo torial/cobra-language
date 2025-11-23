@@ -1,5 +1,0 @@
-class Test
-
-	def main
-		i = true
-		if i, 'foo [i]'  # .error. Only assignment, call and new object expressions can be used as a statement.

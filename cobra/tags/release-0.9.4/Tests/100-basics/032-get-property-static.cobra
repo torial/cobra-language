@@ -1,7 +1,0 @@
-#.require. clr
-namespace Test
-	class Test
-		def main
-			is shared
-			nl as String = Environment.newLine
-			CobraCore.noOp(nl)

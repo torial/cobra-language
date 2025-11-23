@@ -1,6 +1,0 @@
-@platform any
-
-class Plaf
-
-	def main is shared
-		print 'Hello'

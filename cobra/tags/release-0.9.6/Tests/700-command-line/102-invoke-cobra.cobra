@@ -1,8 +1,0 @@
-class Test
-
-	def main is shared
-		r = CobraCommand.find.run('-help')
-		assert 'Cobra' in r.output
-		assert 'options' in r.output
-		assert 'Unhandled Exception' not in r.output
-		assert r.exitCode == 0

@@ -1,6 +1,0 @@
-class Test
-
-	var _words = 'aoeu aoeu'.split(c' ')
-
-	def main is shared
-		pass

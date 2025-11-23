@@ -1,8 +1,0 @@
-# .error. Unexpected end of file
-
-class InternalError
-
-	def main
-		.unfinishedMethod('hello!')
-		
-	def unfinishedMethod(msg

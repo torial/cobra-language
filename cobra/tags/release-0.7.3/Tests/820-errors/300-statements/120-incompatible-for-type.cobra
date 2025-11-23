@@ -1,9 +1,0 @@
-# .error. cannot redeclare & cannot redeclare
-class Test
-
-	def main is shared
-		x = 'aoeu'
-		for x in [1, 2, 3]
-			print x
-		for x = 0 .. 3
-			print x

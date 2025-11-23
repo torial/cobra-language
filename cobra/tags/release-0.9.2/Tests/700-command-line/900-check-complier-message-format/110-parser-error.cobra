@@ -1,4 +1,0 @@
-class ParserError
-
-	def main
-		x = _ y  # .error. unexpected line continuation character

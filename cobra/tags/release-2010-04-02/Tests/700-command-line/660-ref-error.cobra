@@ -1,5 +1,0 @@
-# .args. -ref:c:\badref 
-# .error. Cannot locate assembly reference "c:\badref.dll" 
-class Ticket119 
-	def main is shared 
-		pass

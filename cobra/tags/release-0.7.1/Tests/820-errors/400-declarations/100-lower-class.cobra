@@ -1,6 +1,0 @@
-# .error.  uppercase
-class point
-
-	def main
-		is shared
-		pass

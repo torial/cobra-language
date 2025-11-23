@@ -1,8 +1,0 @@
-# .multipart.
-
-namespace Bar
-
-class B is partial
-
-	def m1
-		A()  # Cannot find A because it is namespace Foo which is not used in this file

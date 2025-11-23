@@ -1,9 +1,0 @@
-# .error. Cannot return
-class Test
-
-	get foo as String
-		return nil
-
-	shared
-		def main
-			pass

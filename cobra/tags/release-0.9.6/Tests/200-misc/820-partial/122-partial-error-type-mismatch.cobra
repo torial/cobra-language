@@ -1,9 +1,0 @@
-class X is partial
-	
-	def foo
-		pass
-
-struct X is partial  # .error. other partial declaration
-	
-	def bar
-		pass

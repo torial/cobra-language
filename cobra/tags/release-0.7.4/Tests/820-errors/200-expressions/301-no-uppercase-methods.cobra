@@ -1,5 +1,0 @@
-class Test
-
-	def main
-		is shared
-		Console.WriteLine("Hello")  # .error. Cannot find a definition for "WriteLine" in "Console". There are members with similar names

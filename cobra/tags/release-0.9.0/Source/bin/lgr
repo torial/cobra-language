@@ -1,4 +1,0 @@
-#!/bin/bash
-# local grep
-cd "`dirname "$0"`" ; cd ..
-grep -rniH --color --include=*.cobra --include=*.text "$@" .

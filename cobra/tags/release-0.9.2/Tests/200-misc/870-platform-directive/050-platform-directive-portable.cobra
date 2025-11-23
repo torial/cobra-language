@@ -1,6 +1,0 @@
-@platform portable
-
-class Plaf
-
-	def main is shared
-		print 'Hello'

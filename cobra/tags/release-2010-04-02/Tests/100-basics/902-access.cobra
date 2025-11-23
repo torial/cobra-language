@@ -1,9 +1,0 @@
-# access System
-class Test
-
-	def main
-		is shared
-		
-		s as System.Object = 'aoeu'
-		s = 'qwerty'
-		CobraCore.noOp(s)

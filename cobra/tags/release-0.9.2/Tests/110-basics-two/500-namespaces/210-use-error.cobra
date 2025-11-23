@@ -1,8 +1,0 @@
-
-use Atnoheunoeuth  # .error.  Cannot find namespace "Atnoheunoeuth".
-
-
-class P
-
-	def main is shared
-		pass

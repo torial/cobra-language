@@ -1,6 +1,0 @@
-class A
-	def init(count as int)
-		pass
-class Program
-	def main
-		A.(10)  # .error. Syntax error after "."

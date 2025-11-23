@@ -1,7 +1,0 @@
-# .error. Use the "inherits" operator
-
-class Test
-
-	def main is shared
-		t as Object = Test()
-		assert t implements Test

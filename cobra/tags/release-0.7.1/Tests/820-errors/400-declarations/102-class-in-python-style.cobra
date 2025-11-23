@@ -1,5 +1,0 @@
-# .error. The syntax for inheritance
-
-class Foo(Bar):
-
-	pass

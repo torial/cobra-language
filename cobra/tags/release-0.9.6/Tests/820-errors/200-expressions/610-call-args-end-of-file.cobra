@@ -1,4 +1,0 @@
-# .error. expecting
-class Simple
-	def main is shared
-		print int.parse("1"

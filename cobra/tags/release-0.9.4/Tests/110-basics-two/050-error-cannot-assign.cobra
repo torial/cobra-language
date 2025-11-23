@@ -1,8 +1,0 @@
-# .error. cannot assign
-
-class Test
-
-	def main is shared
-		i as int = 1
-		c as char = c'x'
-		i = c

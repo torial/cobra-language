@@ -1,4 +1,0 @@
-class P
-
-	def foo=bar  # .error. syntax
-		pass

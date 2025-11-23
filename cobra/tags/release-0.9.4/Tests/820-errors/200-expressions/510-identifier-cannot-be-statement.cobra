@@ -1,7 +1,0 @@
-class Test
-
-	var _x as int
-	
-	def main
-		if not _x
-			_x  # .error. Only assignment, call and new object expressions can be used as a statement.

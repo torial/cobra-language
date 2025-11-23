@@ -1,4 +1,0 @@
-class TokenizerError
-	
-   def main  #.error. Space-based indentation must be a multiple of 4
-		pass

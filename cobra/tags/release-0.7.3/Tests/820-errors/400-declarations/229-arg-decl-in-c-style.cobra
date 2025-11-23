@@ -1,9 +1,0 @@
-# .error. correct parameter syntax
-
-class Foo
-
-	def bar(List<of int> numbers)
-		pass
-
-	def main is shared
-		pass

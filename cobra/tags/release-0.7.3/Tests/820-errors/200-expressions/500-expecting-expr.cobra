@@ -1,8 +1,0 @@
-# .error. Expecting an expression
-
-class Foo
-
-	def bar
-
-		x = branch
-

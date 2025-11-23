@@ -1,7 +1,0 @@
-
-use Foo.Qux from class  # .error. expecting a file name
-
-class X
-
-	def main is shared
-		Zyp()

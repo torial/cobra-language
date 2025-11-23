@@ -1,9 +1,0 @@
-# .error. type
-
-class Test
-
-	def main is shared
-		pass
-
-	get name as string
-		return 'Cobra'

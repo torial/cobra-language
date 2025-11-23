@@ -1,8 +1,0 @@
-#.require. clr
-#.error. platform specific to "jvm"
-@platform jvm 
-
-class Plaf
-
-	def main is shared
-		System.out.println('Hello')

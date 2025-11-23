@@ -1,8 +1,0 @@
-# .error. Use "inherits"
-
-class Bar
-	pass
-
-class Foo
-	implements Bar
-	pass

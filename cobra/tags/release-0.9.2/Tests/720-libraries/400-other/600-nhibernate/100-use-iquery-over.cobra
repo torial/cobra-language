@@ -1,8 +1,0 @@
-use NHibernate
-
-class C
-
-	def main
-		x as IQueryOver<of int, int>? = nil
-		CobraCore.noOp(x)
-

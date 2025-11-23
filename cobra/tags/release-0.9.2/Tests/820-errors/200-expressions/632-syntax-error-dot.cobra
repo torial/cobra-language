@@ -1,4 +1,0 @@
-class P
-	def main
-		print "a" . "b"  # .error. for string concatenation
-

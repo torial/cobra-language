@@ -1,5 +1,0 @@
-#!/bin/bash
-cd "`dirname "$0"`" ; cd ..
-echo ''
-echo 'Compiling installation program...'
-Snapshot/cobra -debug -ert:yes InstallFromWorkspace.cobra SubversionUtils.cobra -- "$@"

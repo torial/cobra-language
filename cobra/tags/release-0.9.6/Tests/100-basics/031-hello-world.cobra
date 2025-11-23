@@ -1,8 +1,0 @@
-namespace Test
-	class Test
-		def main
-			is shared
-			print 'Hello, world.'
-			print 'Hello,', ' world.'
-			print 'Hello,' stop
-			print ' world.'

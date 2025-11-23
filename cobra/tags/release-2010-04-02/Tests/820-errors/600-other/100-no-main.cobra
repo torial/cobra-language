@@ -1,8 +1,0 @@
-# .error. main
-
-# when the missing Main is detected by Cobra instead of C# then this test can be restored
-
-class Test
-
-	cue init
-		base.init

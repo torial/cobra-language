@@ -1,6 +1,0 @@
-class Test
-
-	def foo(other as Object)
-		d = {badname: 1}  # .error. cannot find
-		assert (other to UnknownClass).foo    # .error. cannot find
-		CobraCore.noOp(d)
