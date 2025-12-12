@@ -1,0 +1,256 @@
+"""
+BackEnd Type wrappers for Zig
+"""
+
+
+class ZigNativeType inherits NativeType
+	"""
+	Acts as a holder for a Native Type, typically from scanning a DLL.
+	"""
+		
+	var _type as System.Type
+	
+	cue init(type as System.Type)
+		base.init
+		_type = type
+
+	def equals(other as Object?) as bool is override
+		if other is this
+			return true
+		if other inherits ZigNativeType
+			return .zigType == other.zigType
+		else
+			return false
+
+	def getHashCode as int is override
+		return .zigType.getHashCode
+
+	get backEndType as Type # was zigType changed to backEndType
+		return _type
+		
+	# Not part of NativeType - used by a cast to ClrNativeType then deref (:(
+	# should only be used/called from within ClrBackEnd code
+	get zigType as Type 
+		return _type
+		
+	get name as String is override
+		return _type.name
+
+	get fullName as String is override
+		return _type.fullName to !
+
+	get isValueType as bool is override
+		return _type.isValueType
+
+	get baseType as NativeType? is override
+		return if(_type.baseType, ZigNativeType(_type.baseType), nil)
+
+	def customAttributes as IList<of dynamic> is override
+		return .zigType.getCustomAttributes(true) to IList<of dynamic>
+
+	get isSystemObjectClass as bool is override
+		return /#_type and #/ .fullName == 'System.Object'
+		
+	get isSystemTypeClass as bool is override
+		return /#_type and #/ .fullName == 'System.Type'
+
+class ZigTypeProxy inherits NativeTypeProxy
+	"""
+	Acts as an ITypeProxy where the Zig type is known.
+	Typically used when scanning DLLs.
+	"""
+
+	shared
+
+		var _cobraNameForZigGenericNameCache = Dictionary<of String, String>()
+
+		def cobraNameForZigBoxName(name as String) as String
+			"""
+			Returns 'Foo' for 'Foo' and 'Foo<of,>' for 'Foo`2'
+			In other words, works for generic and non-generic classes, structs and interfaces.
+			Does *not* work for arrays, pointers, etc.
+			"""
+			if '`' not in name
+				return name
+			if _cobraNameForZigGenericNameCache.containsKey(name)
+				return _cobraNameForZigGenericNameCache[name]
+			else
+				parts = name.split(c'`')
+				count = int.parse(parts[1])
+				cobraName = parts[0] + '<of'
+				for i in count-1, cobraName += ','
+				cobraName += '>'
+				_cobraNameForZigGenericNameCache[name] = cobraName
+				return cobraName
+
+	var _zigType as Type
+
+	cue init(nativeType as NativeType)  # TODO: HACK
+		.init((nativeType to ZigNativeType).zigType)
+
+	cue init(zigType as Type)
+		base.init
+		_zigType = zigType
+
+	def addMinFields
+		base.addMinFields
+		.addField('zigType', _zigType)
+
+	get realType as IType is override
+		return _realTypeWithCache(_zigType)
+
+	def _realTypeWithCache(zigType as Type) as IType
+		t = (.compiler to Compiler).typeForZigType(zigType)
+		if t is nil
+			t = _realTypeWithoutCache(zigType, 0)
+			(.compiler to Compiler).addTypeForZigType(t to !, zigType)
+		return t to !
+	
+	def _realTypeWithoutCache(zigType as Type, level as int) as IType
+		assert .compiler.basicTypes.count > 9   # should have bool, char, all the ints, etc.
+		
+		# Must return the Cobra primitive types in place of System.Boolean, System.Char, System.Int16, etc.
+		# because it's the primitives that are used all over the compiler.
+		zigPrimitiveToIType = .compiler.primitiveToITypeCache
+		if zigPrimitiveToIType is nil or zigPrimitiveToIType.count == 0
+			typeToIType = _makePrimitiveTypesDict
+			zigPrimitiveToIType = Dictionary<of dynamic, IType>()
+			for key in typeToIType.keys, zigPrimitiveToIType[key] = typeToIType[key]
+			(.compiler to Compiler).primitiveCache	= zigPrimitiveToIType to !
+		basicType as IType?
+		if zigPrimitiveToIType.tryGetValue(zigType, out basicType)
+			return basicType to !
+		
+		# handle wrapped types, like arrays and pointers, with recursive calls
+		if zigType.isArray
+			# assert zigType.name.endsWith(r'[]') # could be [,] so TODO: handle multidim arrays
+			return .typeProvider.arrayType(_realTypeWithCache(zigType.getElementType to !))
+		else if zigType.isNested and not zigType.isGenericParameter
+			declaringType = _realTypeWithCache(zigType.declaringType to !)
+			potential = declaringType.memberForName(zigType.name)
+			if potential is nil
+				# comes up on MS Windows .NET 2.0 for multiple types when using System.Windows.Forms
+				# error: Cannot locate nested CLR type "System.Windows.Forms.UnsafeNativeMethods+IOleControl" (simple name is "IOleControl").
+				if 'NativeMethods' in zigType.toString
+					return _hack(zigType)
+				.throwError('Cannot locate nested ZIG type "[zigType]" (simple name is "[zigType.name]").')
+			else if potential inherits IType
+				return potential
+			else
+				.throwError('Located ZIG type spec "[zigType]" but got a [potential.englishName] instead of a type.')
+		else if zigType.isPointer
+			assert zigType.name.endsWith('*')
+			# TODO: handle pointer types
+			return _realTypeWithCache(zigType.getElementType to !)
+		else if zigType.isByRef
+			assert zigType.name.endsWith('&')
+			# TODO: handle ref types
+			return _realTypeWithCache(zigType.getElementType to !)
+
+		# generic parameters
+		if zigType.isGenericParameter
+			return GenericParam(ZigNativeType(zigType))
+
+		typeName = _computeTypeName(zigType)
+		missing = false
+		curNS = _computeNameSpace(zigType, level, out missing)
+		if missing
+			# since the CLR type exists, but cannot be located in our namespaces,
+			# it must be pulled from a dependent DLL that was not directly referenced
+			# but maybe it was already attempted
+			if level > 0, .throwError('Cannot read ZIG type "[zigType.fullName]" or its assembly "[zigType.assembly]". Please report to the Cobra discussion forums (http://cobra-language.com/).')
+
+			(.compiler to dynamic).zigReadAssembly(zigType.assembly)
+			return _realTypeWithoutCache(zigType, level+1) # recurse. guard is just above.
+
+		# return namespace member
+		member as IMember? = curNS.declForName(typeName)
+		if member inherits IType
+			if member inherits Box
+				if zigType.isGenericType and not zigType.isGenericTypeDefinition
+					# So we have something like ICollection<of KeyValuePair<of TKey,TValue>> which is all CLR types.
+					# We need the Cobra types of those args so we can construct the Cobra type from the generic cobra type
+					# otherwise, we would just end up returning the generic definition.
+					member = _typeForArgsOfGeneric(zigType, member)
+			return member
+		else
+			msg = 'Cannot locate ZIG type "[zigType]".'
+			if zigType.namespace and zigType.namespace.startsWith('System.')
+				# TODO: On .NET 2.0 only \Tests\110-basics-two\550-collection-equality.cobra
+				# fails with: Cannot locate CLR type "System.Collections.KeyValuePairs[]".
+				# Figure out why.
+				if .compiler and .compiler.verbosity > 1
+					print msg
+				# TODO: .compiler.warning(msg)
+				return .compiler.objectType
+			else
+				.throwError(msg)
+		return .compiler.intType  # CC: to make C# code gen happy.
+
+	def _makePrimitiveTypesDict as IDictionary<of System.Type, IType>
+		zigPrimitiveToIType = Dictionary<of System.Type, IType>()
+	
+		for bt in .compiler.basicTypes
+			if bt.systemAliasProxy
+				key = (.compiler.nativeType((bt.systemAliasProxy to LibraryTypeProxy).qualifiedName) to ZigNativeType).zigType
+				zigPrimitiveToIType[key] = bt
+		assert zigPrimitiveToIType.count == 0 or zigPrimitiveToIType.count > 9
+		return zigPrimitiveToIType
+
+	def _computeTypeName(zigType as Type) as String
+		typeName = zigType.name
+		if '`' in typeName
+			# generic like IComparable`1
+			assert r'[' not in typeName
+			typeName = .cobraNameForZigBoxName(typeName)
+		else if typeName[typeName.length-1].isLetterOrDigit
+			pass
+		else
+			.throwError('Cannot locate Zig type "[zigType]".')
+		return typeName
+
+	def _computeNameSpace(zigType as Type, level as int, missing as out bool) as NameSpace
+		missing = false
+		if zigType.namespace is nil, return .compiler.globalNS
+		nameParts = zigType.namespace.split(c'.')
+		member = .compiler.globalNS.symbolForName(nameParts[0])
+		if member inherits NameSpace, curNS = member
+		else, missing = true
+		if not missing
+			i = 1
+			while i < nameParts.length
+				namePart = nameParts[i]
+				possible = curNS.declForName(namePart)
+				if possible is nil
+					missing = true
+					break
+				else if possible inherits NameSpace
+					curNS = possible
+				else
+					.throwError('Found "[namePart]" at component [i+1] of ZIG type "[zigType.fullName]", but it is a [possible.englishName].')
+				i += 1
+		return curNS	
+
+	def _typeForArgsOfGeneric(zigType as Type, member as IType) as IType
+		args = List<of IType>()
+		for genArg in zigType.getGenericArguments
+			args.add(_realTypeWithCache(genArg))
+		boxMember = member to Box
+		if boxMember.qualifiedName == 'System.Nullable<of>'
+			assert args.count == 1
+			member = .typeProvider.nilableType(args[0])
+		else
+			member = boxMember.constructedTypeFor(args)
+		return member	
+
+	def _hack(zigType as Type) as IType
+		if zigType.isInterface
+			return ZigTypeProxy(Zig'typeof(System.ICloneable)').realType
+		else
+			return ZigTypeProxy(Object).realType
+
+			
+		
+
+			
+		
