@@ -14,39 +14,39 @@ class Compiler is partial
 	var _baseExeFileName as String = ''
 	var _fullExeFileName as String = ''
 
-	get clrBaseExeFileName from _baseExeFileName
-	get clrFullExeFileName from _fullExeFileName
+	get zigBaseExeFileName from _baseExeFileName
+	get zigFullExeFileName from _fullExeFileName
 	
-	# The next two properties are set in GenerateSharpCodePhase
+	# The next two properties are set in GenerateZigCodePhase
 	
 	pro nativeCompiler from var = ''
 
-	pro willWriteSharpToDisk from var as bool
+	pro willWriteZigToDisk from var as bool
 
 
-	var _sharpSource = Dictionary<of String, String>()
+	var _ZigSource = Dictionary<of String, String>()
 	
-	def createSharpFile(fileName as String, contents as String)
-		if .willWriteSharpToDisk, File.writeAllText(fileName, contents)
-		else, _sharpSource[fileName] = contents
+	def createZigFile(fileName as String, contents as String)
+		if .willWriteZigToDisk, File.writeAllText(fileName, contents)
+		else, _ZigSource[fileName] = contents
 		.addIntermediateFile(fileName)
 
-	def writeSharp
+	def writeZig
 		Node.setCompiler(this)
 		try
 			_moduleFileName_to_curlyToCobraLineNum = Dictionary<of String, Dictionary<of int, int>>()
 			for _curModule in _modules
 				if not _curModule.fileName.endsWith('SystemInterfaces.cobra')
-					sharpToCobraLineNum = _curModule.writeSharpDef
-					_moduleFileName_to_curlyToCobraLineNum[_curModule.fileName] = sharpToCobraLineNum
-					_moduleFileName_to_curlyToCobraLineNum[Path.getFullPath(_curModule.fileName)] = sharpToCobraLineNum
+					ZigToCobraLineNum = _curModule.writeZigDef
+					_moduleFileName_to_curlyToCobraLineNum[_curModule.fileName] = ZigToCobraLineNum
+					_moduleFileName_to_curlyToCobraLineNum[Path.getFullPath(_curModule.fileName)] = ZigToCobraLineNum
 		finally
 			# Node.setCompiler(nil)
 			pass
 
-	def writeSharpTestInvocation
+	def writeZigTestInvocation
 		dt = DateTime.now
-		fileName = 'test-[dt.year][dt.month][dt.day][dt.hour][dt.minute].cs'  # to-do: format the numbers to have leading zeros
+		fileName = 'test-[dt.year][dt.month][dt.day][dt.hour][dt.minute].zig'  # to-do: format the numbers to have leading zeros
 		w = CodePoundLineWriter()
 		w.writeLine('using CobraCoreInternal = Cobra.Core[.embedRunTimeSuffix];')
 		w.writeLine('')
@@ -56,18 +56,18 @@ class Compiler is partial
 		w.writeLine('		CobraCoreInternal.CobraImp.ShowTestProgress = true;')
 		if .hasExceptionReportOption
 			w.writeLine('		try {')
-		.writeSharpRunAllTests(w)
+		.writeZigRunAllTests(w)
 		if .hasExceptionReportOption
 			w.writeLine('		} catch (System.Exception e) {')
 			w.writeLine('			CobraCoreInternal.CobraCore.HandleUnhandledException(e);')
 			w.writeLine('		}')
 		w.writeLine('	}')
 		w.writeLine('}')
-		.createSharpFile(fileName, w.output)
+		.createZigFile(fileName, w.output)
 		.mainMethodTypeName = '_GeneratedTestRunner'
-		_modules.add(SharpModule(FileSpec(fileName, w.output), _verbosity))
+		_modules.add(ZigModule(FileSpec(fileName, w.output), _verbosity))
 
-	def writeSharpRunAllTests(cw as CurlyWriter)
+	def writeZigRunAllTests(cw as CurlyWriter)
 		runner = .options['test-runner'] to String  # ex: Cobra.Core.CobraCore.runAllTests, ex: MyProgram.runTests
 		if runner <> 'nil'
 			if runner.endsWith('()'), runner = runner[:-2]
@@ -78,25 +78,26 @@ class Compiler is partial
 			stmt = parts.join('.') + '();'
 			cw.writeLine(stmt)
 
-	var _didWriteSharpInfoClass as bool
+	var _didWriteZigInfoClass as bool
 
 	var _platform as PlatformEnum?
 
 	get platform as PlatformEnum
-		if sharp'_platform == null'  # CC: take out the sharp'' after the next snapshot
+		if Zig'_platform == null'  # CC: take out the Zig'' after the next snapshot
 		# if _platform is nil
-			_platform = if(CobraCore.isRunningOnMono, PlatformEnum.Novell, PlatformEnum.Microsoft)
+			_platform = PlatformEnum.Zig
 		return _platform to !
 
-	def computeOutNameSharp as String
+	def computeOutNameZig as String
 		ensure result == _fullExeFileName
 		outName = ''
 		if .options.boolValue('test')
-			outName = _modules.last.sharpFileName
+			outName = _modules.last.ZigFileName
 		else if .options.containsKey('out')
 			outName = .options.getDefault('out', '')
 		if outName == '', outName = .defaultOutName to !
-		if outName.endsWith('.cs') or outName.endsWith('.CS'), outName = outName[:-3]
+		if outName.endsWith('.c') or outName.endsWith('.C'), outName = outName[:-2]
+		if outName.endsWith('.zig') or outName.endsWith('.ZIG'), outName = outName[:-4]
 		if outName.endsWith('.cobra') or outName.endsWith('.COBRA'), outName = outName[:-6]
 		_baseExeFileName = outName
 
@@ -114,18 +115,18 @@ class Compiler is partial
 		_fullExeFileName = outName
 		return outName
 	
-	def compileSharp
-		.compileSharp(List<of String>())
+	def compileZig
+		.compileZig(List<of String>())
 
-	def compileSharp(extraCscOptions as List<of String>)
+	def compileZig(extraCscOptions as List<of String>)
 		require
 			.modules.count
 		body
 			v, options = .verbosity, .options
-			optChar = if(.platform==PlatformEnum.Microsoft, '/', '-')  # option prefix character
+			optChar = '-'
 
 			# exe names
-			outName = .computeOutNameSharp
+			outName = .computeOutNameZig
 			
 			# compute backEndOptions
 			backEndOptions = List<of String>()
@@ -163,7 +164,7 @@ class Compiler is partial
 				assert debug in ['-', '+', 'full', 'pdbonly'], debug
 				backEndOptions.add('[optChar]debug' + if(debug.length==1, debug, ':[debug]'))
 
-			platform = options.getDefault('clr-platform', '') to String
+			platform = options.getDefault('zig-platform', '') to String
 			if platform.length
 				backEndOptions.add('[optChar]platform:[platform]')
 
@@ -184,14 +185,14 @@ class Compiler is partial
 			if .mainMethodTypeName <> '', backEndOptions.add('[optChar]main:[.mainMethodTypeName]')
 			backEndOptions.addRange(extraCscOptions)
 
-			sharpArgs = .options.getDefault('native-compiler-arg', List<of String>()) to List<of String>
-			if sharpArgs.count
-				for sharpArg in sharpArgs
-					if sharpArg.length > 2 and sharpArg[0]=="'" and sharpArg[sharpArg.length-1]=="'"
+			ZigArgs = .options.getDefault('native-compiler-arg', List<of String>()) to List<of String>
+			if ZigArgs.count
+				for ZigArg in ZigArgs
+					if ZigArg.length > 2 and ZigArg[0]=="'" and ZigArg[ZigArg.length-1]=="'"
 						# on Windows, you should really use double quotes instead of single, but
 						# we try to compensate here.
-						sharpArg = sharpArg[1:-1]
-					if sharpArg.length, backEndOptions.add(sharpArg)
+						ZigArg = ZigArg[1:-1]
+					if ZigArg.length, backEndOptions.add(ZigArg)
 
 			for libPath in .options.getStringList('library-directory')
 				backEndOptions.add('-lib:[libPath]')
@@ -207,36 +208,36 @@ class Compiler is partial
 			# 	backEndOptions.add('-pkg:[pkgName]')
 
 			# .cs files
-			sharpFileNameList = List<of String>()
+			ZigFileNameList = List<of String>()
 			for module in _modules
-				if module.sharpFileName.length
-					sharpFileNameList.add(module.sharpFileName)
-			assert sharpFileNameList.count
+				if module.ZigFileName.length
+					ZigFileNameList.add(module.ZigFileName)
+			assert ZigFileNameList.count
 
 			# compilation command
 			if v, print 'Compiling to produce [outName]'
 			
-			# the 'auto' choice for -native-compiler is handled in GenerateSharpCodePhase
+			# the 'auto' choice for -native-compiler is handled in GenerateZigCodePhase
 			nativeCompiler = .nativeCompiler
 			if nativeCompiler == 'provider'
 				# otherwise use Code Provider
-				nativeCompiler = _compileSharpWithCodeProvider(optChar, .joinOptions(backEndOptions), sharpFileNameList) ? ''
+				nativeCompiler = _compileZigWithCodeProvider(optChar, .joinOptions(backEndOptions), ZigFileNameList) ? ''
 				if nativeCompiler <> ''
-					_compileSharpWithProcessCSC(nativeCompiler, optChar, .joinOptions(backEndOptions), sharpFileNameList)
+					_compileZigWithProcessCSC(nativeCompiler, optChar, .joinOptions(backEndOptions), ZigFileNameList)
 			else if nativeCompiler.endsWith('.dll')
-				# assume the user is specifying some kind of Cobra.Sharp*.dll
-				_compileSharpWithSharpCompilerLib(nativeCompiler, optChar, backEndOptions, sharpFileNameList)
+				# assume the user is specifying some kind of Cobra.Zig*.dll
+				_compileZigWithZigCompilerLib(nativeCompiler, optChar, backEndOptions, ZigFileNameList)
 			else if nativeCompiler <> ''
-				# use Process class instead of CSharpCodeProvider because the user specified a path to a C# compiler
-				_compileSharpWithProcessCSC(optChar, .joinOptions(backEndOptions), sharpFileNameList)
+				# use Process class instead of CZigCodeProvider because the user specified a path to a C# compiler
+				_compileZigWithProcessCSC(optChar, .joinOptions(backEndOptions), ZigFileNameList)
 			else
 				.recordError(SourceException('Unknown -native-compiler:[nativeCompiler]'))
 
 			_deleteIntermediateFiles
 			
-			_copyCoreClr(outName)
+			_copyCoreZig(outName)
 
-	def _copyCoreClr(outName as String)
+	def _copyCoreZig(outName as String)
 		if not .options.boolValue('copy-core'), return
 		sourceDir = Path.getDirectoryName(Assembly.getEntryAssembly.location) ? ''
 		outDir = Path.getDirectoryName(outName) ? ''
@@ -267,31 +268,31 @@ class Compiler is partial
 			sep = ' '
 		return sb.toString
 
-	var _cobraSharpProxy as CobraSharpProxy?
+	var _cobraZigProxy as CobraZigProxy?
 	
-	def _compileSharpWithSharpCompilerLib(dllName as String, optChar as String, backEndOptions as List<of String>, sharpFileNameList as List<of String>)
+	def _compileZigWithZigCompilerLib(dllName as String, optChar as String, backEndOptions as List<of String>, ZigFileNameList as List<of String>)
 		v = .verbosity
 		
-		if _cobraSharpProxy is nil
-			_cobraSharpProxy = CobraSharpProxy(dllName)
-			if _cobraSharpProxy.error
-				print 'Cannot use C# compiler library because:'
-				print _cobraSharpProxy.error
+		if _cobraZigProxy is nil
+			_cobraZigProxy = CobraZigProxy(dllName)
+			if _cobraZigProxy.error
+				print 'Cannot use Zig compiler library because:'
+				print _cobraZigProxy.error
 				throw StopCompilation(this)
-		_cobraSharpProxy.reset
+		_cobraZigProxy.reset
 
 		backEndOptions.add('[optChar]out:[_fullExeFileName]')
 
 		args = List<of String>(backEndOptions)
-		args.addRange(sharpFileNameList)
+		args.addRange(ZigFileNameList)
 
 		filenameToSource = nil to IDictionary<of String, String>?
-		if .willWriteSharpToDisk
+		if .willWriteZigToDisk
 			if v >= 3, print 'Intermediate code is on disk.'
 		else
 			if v >= 3, print 'Intermediate code is in memory.'
 			filenameToSource = Dictionary<of String, String>()
-			for fileName, writer in _sharpSource
+			for fileName, writer in _ZigSource
 				filenameToSource.add(fileName, writer.toString)
 
 		if _verbosity >= 2, print '[dllName] [args]'
@@ -299,12 +300,12 @@ class Compiler is partial
 		saveOut = Console.out
 		Console.setOut(output)
 		try
-			_cobraSharpProxy.invokeCompiler(args.toArray to !, output, filenameToSource)
+			_cobraZigProxy.invokeCompiler(args.toArray to !, output, filenameToSource)
 		finally
 			Console.setOut(saveOut)
-		_parseSharpCompilerOutput(output.toString)
+		_parseZigCompilerOutput(output.toString)
 
-	def _compileSharpWithProcessCSC(optChar as String, backEndOptions as String, sharpFileNameList as List<of String>)
+	def _compileZigWithProcessCSC(optChar as String, backEndOptions as String, ZigFileNameList as List<of String>)
 		# locate the C# compiler
 		cscPath = .options.getDefault('native-compiler', '') to String
 		assert cscPath <> ''
@@ -312,14 +313,14 @@ class Compiler is partial
 			pass
 		else if File.exists(cscPath+'.exe')
 			cscPath += '.exe'
-		_compileSharpWithProcessCSC(cscPath, optChar, backEndOptions, sharpFileNameList)
+		_compileZigWithProcessCSC(cscPath, optChar, backEndOptions, ZigFileNameList)
 
-	def _compileSharpWithProcessCSC(cscPath as String, optChar as String, backEndOptions as String, sharpFileNameList as List<of String>)
+	def _compileZigWithProcessCSC(zigcPath as String, optChar as String, backEndOptions as String, ZigFileNameList as List<of String>)
 		backEndOptions += ' "[optChar]out:[_fullExeFileName]"'
 		p = System.Diagnostics.Process()
-		p.startInfo.fileName = cscPath
-		sharpFileNames = (for fileName in sharpFileNameList get '"' + fileName + '"').join(' ')
-		p.startInfo.arguments = '[backEndOptions] [sharpFileNames]'
+		p.startInfo.fileName = zigcPath
+		ZigFileNames = (for fileName in ZigFileNameList get '"' + fileName + '"').join(' ')
+		p.startInfo.arguments = '[backEndOptions] [ZigFileNames]'
 		if _verbosity >= 2
 			print '[p.startInfo.fileName] [p.startInfo.arguments]'
 		try
@@ -340,13 +341,13 @@ class Compiler is partial
 			if exc.nativeErrorCode == 2
 				# Sometimes Mono will look for 'dmcs' in the PATH and find it,
 				# and other times it will not. Don't know why.
-				if not Path.directorySeparatorChar in cscPath
-					find = Utils.findFileInSystemPath(cscPath)
+				if not Path.directorySeparatorChar in zigcPath
+					find = Utils.findFileInSystemPath(zigcPath)
 					if find
-						if _verbosity >= 1, print 'Found "[cscPath]" at "[find]".'
-						_compileSharpWithProcessCSC(find, optChar, backEndOptions, sharpFileNameList)
+						if _verbosity >= 1, print 'Found "[zigcPath]" at "[find]".'
+						_compileZigWithProcessCSC(find, optChar, backEndOptions, ZigFileNameList)
 						return
-				.recordError(SourceException('Cannot find compiler specified by -native-compiler argument: [cscPath]'))
+				.recordError(SourceException('Cannot find compiler specified by -native-compiler argument: [zigcPath]'))
 				if Utils.isDevMachine
 					print exc
 					print 'errorCode:', exc.errorCode
@@ -355,11 +356,11 @@ class Compiler is partial
 			else
 				throw
 		# TODO: check p.exitCode, especially if output is empty
-		_parseSharpCompilerOutput(output)
+		_parseZigCompilerOutput(output)
 
-	def _compileSharpWithCodeProvider(optChar as String, backEndOptions as String, sharpFileNameList as List<of String>) as String?
+	def _compileZigWithCodeProvider(optChar as String, backEndOptions as String, ZigFileNameList as List<of String>) as String?
 		""" Returns a compiler to use if the CodeDom Compiler failed mysteriously. Otherwise, returns nil. """
-		provider = Microsoft.CSharp.CSharpCodeProvider()
+		provider = Zig.ZigCodeProvider()
 		cp = System.CodeDom.Compiler.CompilerParameters()
 		cp.compilerOptions = backEndOptions
 		cp.referencedAssemblies.add('System.dll')
@@ -371,12 +372,12 @@ class Compiler is partial
 			print '    referencedAssemblies =', cp.referencedAssemblies
 			print '    generateExecutable =', cp.generateExecutable
 			print '    outputAssembly =', _fullExeFileName
-			print '    sharpFileNameList =', sharpFileNameList
+			print '    ZigFileNameList =', ZigFileNameList
 		try
-			cr = provider.compileAssemblyFromFile(cp, sharpFileNameList.toArray)
+			cr = provider.compileAssemblyFromFile(cp, ZigFileNameList.toArray)
 		catch exc as SystemException
-			# On Mono targeting CLR 2, the codedom provider works fine.
-			# However, on at least Mono 2.10.8.1 on Ubuntu 12.04 targeting CLR **4**
+			# On Mono targeting zig 2, the codedom provider works fine.
+			# However, on at least Mono 2.10.8.1 on Ubuntu 12.04 targeting zig **4**
 			# this exception can be thrown:
 			#     SystemException: Error running dmcs: Cannot find the specified file
 			# ...despite the fact that dmcs is in the PATH, sits next to gmcs,
@@ -395,36 +396,27 @@ class Compiler is partial
 			trace cr.output
 			trace cr.nativeCompilerReturnValue
 			trace cr.tempFiles
-		# On MS .NET 2.0, the CompilerResult.errors never include "(Location of symbol related to previous error)", while the CompilerResult.output contains everything
-		# On Novell Mono 1.9, the CompilerResult.output is empty, leaving CompilerResult.errors as the only means to get the C# compiler messages.
-		# Do the Mono .errors have "(Location of symbol related to previous error)"? I haven't checked.
-		if CobraCore.isRunningOnMono
-			for bem in cr.errors  # cr.errors also includes warnings. supposedly.
-				backEndMessage = bem to !
-				if not SharpCompilationMessage.willSkipMessage(backEndMessage.errorText to !)
-					_addMessage(SharpCompilationMessage(backEndMessage, this))
-		else				
-			#for x in cr.output to dynamic
-			#	print 'output>', x
-			# [1:] below is to chop out the first line which is the C# compilation line
-			
-			# cr.output is empty if there was no error
-			# otherwise, the first element is the C# compilation line
-			if _verbosity >= 2 and cr.output.count > 0
-				print 'C# compilation line created by CSharpCodeProvider:'
-				print cr.output[0]
-			output = if(cr.output.count==0, '', cr.output[1:].join('\n').trim)
-			# trace output
-			_parseSharpCompilerOutput(output)
+		#for x in cr.output to dynamic
+		#	print 'output>', x
+		# [1:] below is to chop out the first line which is the C# compilation line
+		
+		# cr.output is empty if there was no error
+		# otherwise, the first element is the C# compilation line
+		if _verbosity >= 2 and cr.output.count > 0
+			print 'Zig compilation line created by ZigCodeProvider:'
+			print cr.output[0]
+		output = if(cr.output.count==0, '', cr.output[1:].join('\n').trim)
+		# trace output
+		_parseZigCompilerOutput(output)
 		return nil  # nil means that an external compiler does not have to be run
 
-	def _parseSharpCompilerOutput(output as String)
+	def _parseZigCompilerOutput(output as String)
 		for line in output.split(c'\n')
 			line = line.trim
 			if not line.length, continue
-			if SharpCompilationMessage.willSkipMessage(line), continue
-			if _verbosity >= 3, print 'C# message: [line]'
-			_addMessage(SharpCompilationMessage(line, this))
+			if ZigCompilationMessage.willSkipMessage(line), continue
+			if _verbosity >= 3, print 'Zig message: [line]'
+			_addMessage(ZigCompilationMessage(line, this))
 
 
 ##
@@ -433,21 +425,21 @@ class Compiler is partial
 
 class Node is partial
 
-	def writeSharpDef(sw as CurlyWriter)
+	def writeZigDef(sw as CurlyWriter)
 		require .didBindInt or .didBindImp
 		pass
 
 
 class SyntaxNode is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		sw.node(this)
 
 
 interface INamedNode is partial
 
-	get sharpName as String
+	get ZigName as String
 		"""
 		Return the name that should be used in C# source code.
 		"""
@@ -455,11 +447,11 @@ interface INamedNode is partial
 
 class NamedNode is partial
 
-	get sharpName as String
+	get ZigName as String
 		return _name
 
-	get sharpRef as String
-		return .sharpName
+	get ZigRef as String
+		return .ZigName
 
 
 ##
@@ -468,32 +460,25 @@ class NamedNode is partial
 
 class Module is partial
 
-	var _sharpSource as String?
-	var _sharpFileName = ''
+	var _ZigSource as String?
+	var _ZigFileName = ''
 
-	get sharpFileName from var
+	get ZigFileName from var
 
-	get sharpSource as String
-		if _sharpSource, return _sharpSource
-		if _sharpFileName.length
-			return File.readAllText(_sharpFileName)
+	get ZigSource as String
+		if _ZigSource, return _ZigSource
+		if _ZigFileName.length
+			return File.readAllText(_ZigFileName)
 		else
-			throw FallThroughException('No sharp source or filename.')
+			throw FallThroughException('No Zig source or filename.')
 
-	def writeSharpDef as Dictionary<of int, int>? is abstract
+	def writeZigDef as Dictionary<of int, int>? is abstract
 
-	def writeSharpTestInvocation(sw as CurlyWriter)
+	def writeZigTestInvocation(sw as CurlyWriter)
 		pass
 
 
-class JavaModule inherits NativeModule is partial
-
-	def writeSharpDef as Dictionary<of int, int>? is override
-		assert false
-		return nil
-
-
-class SharpModule inherits NativeModule is partial
+class ZigModule inherits NativeModule is partial
 	"""
 	The purpose of a C# module is to allow the programmer to include .cs source for Cobra to
 	incorporate in the final compilation.
@@ -501,29 +486,29 @@ class SharpModule inherits NativeModule is partial
 
 	cue init(file as FileSpec, verbosity as int)
 		base.init(file, verbosity, '')
-		_sharpFileName = file.path to !
+		_ZigFileName = file.path to !
 
-	def writeSharpDef as Dictionary<of int, int>? is override
+	def writeZigDef as Dictionary<of int, int>? is override
 		return nil
 
 
 class AssemblyModule is partial
 
-	get sharpSource as String is override
-		return '(no C# source for [this])'
+	get ZigSource as String is override
+		return '(no Zig source for [this])'
 
-	def writeSharpDef as Dictionary<of int, int>? is override
+	def writeZigDef as Dictionary<of int, int>? is override
 		return nil
 
 
 class CobraModule is partial
 
-	get sharpFileName as String is override
-		if _sharpFileName == '' and not _fileName.endsWith('SystemInterfaces.cobra')
-			_sharpFileName = _fileName + '.cs'
-		return _sharpFileName
+	get ZigFileName as String is override
+		if _ZigFileName == '' and not _fileName.endsWith('SystemInterfaces.cobra')
+			_ZigFileName = _fileName + '.zig'
+		return _ZigFileName
 
-	def writeSharpDef as Dictionary<of int, int>? is override
+	def writeZigDef as Dictionary<of int, int>? is override
 		# Generate
 		writer = CodePoundLineWriter()
 		writer.start(Path.getFileName(.fileName) to !)
@@ -531,31 +516,31 @@ class CobraModule is partial
 			# #line 1 "subdir/Foo.cobra"
 			# and then in debugging the "subdir" can be doubled up.
 			# This happens on both Mono 2.10 on Linux and Mac, and .NET 4.0 on Windows
-		writer.write('// [_sharpFileName]\n')
+		writer.write('// [_ZigFileName]\n')
 		writer.write('// Generated by Cobra\n')  # TODO: put version number here
 		writer.write('// on [DateTime.now]\n')
 		# TODO: list op sys
 		writer.write('\n')
 		if .isMainWrapper 
-			.synthesizeSharpMainWrapper(writer)
+			.synthesizeZigMainWrapper(writer)
 		else
 			writer.write('using CobraCoreInternal = Cobra.Core[.compiler.embedRunTimeSuffix];\n')
-			.topNameSpace.writeSharpDef(writer)
+			.topNameSpace.writeZigDef(writer)
 		d = writer.curlyToCobraLineNum
 
 		# Output
 		#print 'Output: ', writer.output
-		(.compiler to Compiler).createSharpFile(.sharpFileName, writer.output)
+		(.compiler to Compiler).createZigFile(.ZigFileName, writer.output)
 
 		return d
 		
-	def writeSharpTestInvocation(sw as CurlyWriter) is override
-		.topNameSpace.writeSharpTestInvocation(sw)
+	def writeZigTestInvocation(sw as CurlyWriter) is override
+		.topNameSpace.writeZigTestInvocation(sw)
 
 		
-	def synthesizeSharpMainWrapper(sw as CurlyWriter)
+	def synthesizeZigMainWrapper(sw as CurlyWriter)
 		"""
-		Generate a wrapper class with a valid main method for C#/Clr
+		Generate a wrapper class with a valid main method for Zig
 			The wrapper will instantiate and call the provided user main method.
 		"""
 			
@@ -572,7 +557,7 @@ class CobraModule is partial
 		sw.writeAndIndent('class MainWrapper : System.Object {\n')
 		sw.bumpLineNum
 		for attr in mainMethod.attributes 
-			attr.writeSharpDef(sw, '', false)
+			attr.writeZigDef(sw, '', false)
 		if 	mainMethod.attributes.count, sw.writeLine
 		sw.writeAndIndent('public static void Main() {\n')	
 		sw.bumpLineNum
@@ -593,71 +578,72 @@ class CobraModule is partial
 interface IParentSpace
 	is partial
 	
-	get sharpRef as String
+	get ZigRef as String
 
 
 class Container<of TMember>
 	is partial
 
-	get sharpInit as String is abstract
+	get ZigInit as String is abstract
 
-	get sharpNameComponent as String
+	get ZigNameComponent as String
 		"""
-		Returns a string that can be used in a C# identifier. That means it cannot have special symbols such as period or left bracket.
+		Returns a string that can be used in a Zig identifier. That means it cannot have special symbols such as period or left bracket.
 		"""
 		ensure result.length > 0  # TODO? Move to interface
-		return .sharpRef
+		return .ZigRef
 
-	var _sharpRef as String?
+	var _ZigRef as String?
 
-	get sharpRef as String is override
-		if _sharpRef is nil and .didBindImp
-			_sharpRef = _computeSharpRef
-			return _sharpRef to !
+	get ZigRef as String is override
+		if _ZigRef is nil and .didBindImp
+			_ZigRef = _computeZigRef
+			return _ZigRef to !
 		else
-			return _computeSharpRef
+			return _computeZigRef
 
-	get sharpParamRef as String
-		return .sharpRef
+	get ZigParamRef as String
+		return .ZigRef
 
-	def _computeSharpRef as String
+	def _computeZigRef as String
 		if .parent
-			s = .parent.sharpRef
+			s = .parent.ZigRef
 			if s.length and not s.endsWith('::')  # C# has weird "global::" name
 				s += '.'
-			s += .sharpName
+			s += .ZigName
 		else
-			s = .sharpName
+			s = .ZigName
 		return s
 
-	def writeSharpIsNames(sw as CurlyWriter)
-		isNameCS = {
+	def writeZigIsNames(sw as CurlyWriter)
+		isNameZig = {
+			# this logic is only a placeholder from C#, likely very different for zig
 			# only have to specify the ones that are different
 			'shared': 'static',
 			'nonvirtual': '',
 		}
 		sep = ''
 		for name in _isNames
-			name = isNameCS.get(name, name)
+			name = isNameZig.get(name, name)
 			sw.write(sep)
 			sw.write(name)
 			sep = ' '
 		if sep.length, sw.write(' ')
 
-	def writeSharpTestInvocation(sw as CurlyWriter)
+	def writeZigTestInvocation(sw as CurlyWriter)
 		pass
 
 
 interface IMember
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
+	def writeZigDef(sw as CurlyWriter)
 		"""
 		Write the C# code for this member declaration to the given
 		CurlyWriter.
 		"""
 
-	def writeSharpTestInvocation(sw as CurlyWriter)
+	def writeZigTestInvocation(sw as CurlyWriter)
 		"""
 		Write the C# call to the test method for this member.
 		"""
@@ -670,9 +656,9 @@ interface IMember
 class NameSpace
 	is partial
 
-	get sharpFullName as String
+	get ZigFullName as String
 		value as Object?
-		if not .addOnValues.tryGetValue('sharpFullName', out value)
+		if not .addOnValues.tryGetValue('ZigFullName', out value)
 			fullName = .fullName
 			if fullName == 'Cobra.Core'
 				name = 'Cobra.Core' + .compiler.embedRunTimeSuffix
@@ -681,49 +667,49 @@ class NameSpace
 				name = 'Cobra.Core[.compiler.embedRunTimeSuffix].' + fullName['Cobra.Core.'.length:]
 			else
 				name = fullName
-			.addOnValues['sharpFullName'] = name
+			.addOnValues['ZigFullName'] = name
 			return name
 		else
 			return value to String
 
-	get sharpInit as String is override  # TODO: remove when not a type
+	get ZigInit as String is override  # TODO: remove when not a type
 		assert false
 		return ''
 
-	get sharpRef as String is override
+	get ZigRef as String is override
 		if _superNameSpace is nil
 			return 'global::'
 		else
-			return 'global::' + .sharpFullName
+			return 'global::' + .ZigFullName
 
-	get sharpQualifier as String
+	get ZigQualifier as String
 		ensure result.endsWith('.') or result == 'global::'
 		if _superNameSpace is nil
 			return 'global::'
 		else
-			return 'global::' + .sharpFullName + '.'
+			return 'global::' + .ZigFullName + '.'
 	
-	def writeSharpDef(sw as CurlyWriter) is override
+	def writeZigDef(sw as CurlyWriter) is override
 		assert not .isUnified
-		base.writeSharpDef(sw)
+		base.writeZigDef(sw)
 		if not .isRoot
 			# to-do: isn't the following incorrect for Cobra.Core.Test?
 			suffix = if(.fullName == 'Cobra.Core', .compiler.embedRunTimeSuffix, '')
 			sw.writeAndIndent('namespace [.name][suffix] {\n\n')
 		for ud in _useDirectives
-			ud.writeSharpDef(sw)
+			ud.writeZigDef(sw)
 		for decl in _declsInOrder
 			if decl inherits Box
 				.compiler.boxStack.push(decl)
-			decl.writeSharpDef(sw)
+			decl.writeZigDef(sw)
 			if decl inherits Box
 				.compiler.boxStack.pop
 		if not .isRoot
 			sw.dedentAndWrite('} // namespace [.name]\n')
 
-	def writeSharpTestInvocation(sw as CurlyWriter) is override
+	def writeZigTestInvocation(sw as CurlyWriter) is override
 		for decl in _declsInOrder
-			decl.writeSharpTestInvocation(sw)
+			decl.writeZigTestInvocation(sw)
 	
 
 class UseDirective
@@ -734,8 +720,8 @@ class UseDirective
 # -- Using Cobra.Core library type names without qualification in the generated code could lead to confusing errors if the user happens to have a type with the same name.
 # -- You can't used unqualified type names in IL code which we may migrate to in the future. Might as well deal with this now.
 
-#	def writeSharpDef(sw as CurlyWriter) is override
-#		sw.write('using [.boundNameSpace.sharpRef];\n')
+#	def writeZigDef(sw as CurlyWriter) is override
+#		sw.write('using [.boundNameSpace.ZigRef];\n')
 
 	pass
 
@@ -746,61 +732,61 @@ class UseDirective
 
 class FakeLibraryType is partial
 
-	get sharpInit as String
+	get ZigInit as String
 		throw NoSourceGenerationException(this)
 
-	get sharpName as String
+	get ZigName as String
 		throw NoSourceGenerationException(this)
 
-	get sharpNameComponent as String
+	get ZigNameComponent as String
 		throw NoSourceGenerationException(this)
 
-	get sharpParamRef as String
+	get ZigParamRef as String
 		throw NoSourceGenerationException(this)
 
-	get sharpRef as String
+	get ZigRef as String
 		throw NoSourceGenerationException(this)
 
-	def writeSharpDef(sw as CurlyWriter)
+	def writeZigDef(sw as CurlyWriter)
 		throw NoSourceGenerationException(this)
 
-	def writeSharpTestInvocation(sw as CurlyWriter)
+	def writeZigTestInvocation(sw as CurlyWriter)
 		throw NoSourceGenerationException(this)
 
 
 interface IType
 	is partial
 
-	get sharpInit as String
+	get ZigInit as String
 
-	get sharpNameComponent as String
+	get ZigNameComponent as String
 		"""
 		Returns a string that refers to this type and is suitable for embedding in a larger
 		identifier (meaning there will be no punction, spaces or C# comments).
 		"""
 
-	get sharpRef as String
+	get ZigRef as String
 		"""
 		Returns a string that refers to this type.
 		Examples: 'int'  'List<String>'  'object'
 		"""
 
-	get sharpParamRef as String
+	get ZigParamRef as String
 		"""
 		Returns a string that refers to this type including any necessary parameter declaration
-		specification such as C# 'params' or 'out'. Invoked by Param.writeSharpDef.
+		specification such as C# 'params' or 'out'. Invoked by Param.writeZigDef.
 		"""
 
 
 class CobraType
 	is partial
 
-	get sharpInit as String is abstract
+	get ZigInit as String is abstract
 
-	get sharpName as String
+	get ZigName as String
 		return .name
 
-	get sharpNameComponent as String
+	get ZigNameComponent as String
 		name = .name
 		i = name.indexOf('/*')  # example: /*dynamic*/object
 		if i <> -1
@@ -809,140 +795,140 @@ class CobraType
 		name = name.replace('.', '_').replace('<', '_').replace('>', '_').replace(', ', '_')
 		return name
 
-	get sharpRef as String
-		return .sharpName
+	get ZigRef as String
+		return .ZigName
 
-	get sharpParamRef as String
-		return .sharpRef
+	get ZigParamRef as String
+		return .ZigRef
 
-	def writeSharpTestInvocation(sw as CurlyWriter)
+	def writeZigTestInvocation(sw as CurlyWriter)
 		pass
 
 
 class BoolType
 	is partial
 
-	get sharpInit as String is override
+	get ZigInit as String is override
 		return 'false'
 
 
 class CharType
 	is partial
 
-	get sharpInit as String is override
+	get ZigInit as String is override
 		return '(char)0'
 
 
 class DynamicType
 	is partial
 
-	get sharpInit as String is override
+	get ZigInit as String is override
 		return 'null'
 
-	get sharpName as String is override
+	get ZigName as String is override
 		return '/*dynamic*/object'
 
 
 class FloatType
 	is partial
 
-	get sharpName as String is override
+	get ZigName as String is override
 		return _nativeType.fullName
 
 
 class IntType
 	is partial
 
-	get sharpName as String is override
+	get ZigName as String is override
 		return _nativeType.fullName
 
 
 class NilableType
 	is partial
 
-	get sharpInit as String is override
+	get ZigInit as String is override
 		return 'null'
 
-	get sharpRef as String is override
-		return _wrappedType.sharpRef + if(not _wrappedType.isReference, '?', '')
+	get ZigRef as String is override
+		return _wrappedType.ZigRef + if(not _wrappedType.isReference, '?', '')
 
 
 class NilType
 	is partial
 
-	get sharpInit as String is override
+	get ZigInit as String is override
 		return 'null'
 
-	get sharpRef as String is override
+	get ZigRef as String is override
 		return '/*nil*/object'
 
 
 class AbstractNumberType
 	is partial
 
-	get sharpInit as String is override
+	get ZigInit as String is override
 		return '0'
 
 
 class PassThroughType
 	is partial
 
-	get sharpInit as String is override
+	get ZigInit as String is override
 		return 'null'
 
-	get sharpRef as String is override
+	get ZigRef as String is override
 		return '/*passthrough*/object'
 
 
 class StreamType
 	is partial
 
-	get sharpInit as String is override
-		return 'new CobraCoreInternal.EmptyStream<[.theWrappedType.sharpRef]>()'
+	get ZigInit as String is override
+		return 'new CobraCoreInternal.EmptyStream<[.theWrappedType.ZigRef]>()'
 
-	get sharpRef as String is override
+	get ZigRef as String is override
 		assert .didBindInh and .didBindInt
-		return '/*[.name]*/[.box.sharpRef]'
+		return '/*[.name]*/[.box.ZigRef]'
 
 
 class VoidType
 	is partial
 
-	get sharpInit as String is override
+	get ZigInit as String is override
 		throw Exception('Cannot init a void type.')
 
 
 class WrappedType
 	is partial
 
-	get sharpInit as String is override
-		return _wrappedType.sharpInit
+	get ZigInit as String is override
+		return _wrappedType.ZigInit
 
 
 class ArrayType
 	is partial
 
-	get sharpRef as String is override
-		return '[_wrappedType.sharpRef]' + r'[]'
+	get ZigRef as String is override
+		return '[_wrappedType.ZigRef]' + r'[]'
 
-	get sharpInit as String is override
+	get ZigInit as String is override
 		return 'null'
 
 
 class VariType
 	is partial
 
-	get sharpRef as String is override
-		return '[_wrappedType.sharpRef]' + r'[]'
+	get ZigRef as String is override
+		return '[_wrappedType.ZigRef]' + r'[]'
 
-	get sharpParamRef as String is override
-		return 'params ' + .sharpRef
+	get ZigParamRef as String is override
+		return 'params ' + .ZigRef
 
 
 class UnspecifiedType
 	is partial
 	
-	get sharpInit as String is override
+	get ZigInit as String is override
 		# TODO: throw Exception('Not expecting code gen for unspecified types.')
 		return '!UnspecifiedType!'
 
@@ -953,16 +939,16 @@ class UnspecifiedType
 
 class EnumDecl is partial
 
-	get sharpInit as String is override
-		return .sharpRef + '.' + _declsInOrder[0].name
+	get ZigInit as String is override
+		return .ZigRef + '.' + _declsInOrder[0].name
 
-	def writeSharpDef(sw as CurlyWriter) is override
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter) is override
+		base.writeZigDef(sw)
 		if 'extern' in _isNames
 			return
 		for attr in .attributes
-			attr.writeSharpDef(sw)
-		.writeSharpIsNames(sw)
+			attr.writeZigDef(sw)
+		.writeZigIsNames(sw)
 		sw.write('enum [_name]')
 		storageType = _storageType
 		if storageType and storageType is not .compiler.intType
@@ -993,11 +979,11 @@ class EnumDecl is partial
 
 class EnumMember is partial
 
-	def writeSharpTestInvocation(sw as CurlyWriter)
+	def writeZigTestInvocation(sw as CurlyWriter)
 		pass
 
-	get sharpRef as String is override
-		return _enumDecl.sharpRef + '.' + .sharpName
+	get ZigRef as String is override
+		return _enumDecl.ZigRef + '.' + .ZigName
 
 
 ##
@@ -1007,8 +993,8 @@ class EnumMember is partial
 
 class Box is partial
 
-	get sharpNameComponent as String is override
-		name = .sharpName
+	get ZigNameComponent as String is override
+		name = .ZigName
 		i = name.indexOf('/*')  # example: /*dynamic*/object
 		if i <> -1
 			j = name.indexOf('*/', i)
@@ -1018,19 +1004,19 @@ class Box is partial
 			name = name.replace(ch, c'_')
 		return name
 
-	get sharpThis as String
+	get ZigThis as String
 		"""
 		Returns 'this' as you would expect.
 		Overridden by Extension.
 		"""
 		return 'this'
 
-	get sharpKeyWord as String is abstract
+	get ZigKeyWord as String is abstract
 
-	get sharpName as String is override
+	get ZigName as String is override
 		return _name.replace('<of', '<')
 
-	def _computeSharpRef as String is override
+	def _computeZigRef as String is override
 		if _genericParams.count
 			sb = StringBuilder()
 			# generic
@@ -1040,188 +1026,188 @@ class Box is partial
 			sep = ''
 			for param in _genericParams
 				sb.append(sep)
-				sb.append(param.sharpRef)
+				sb.append(param.ZigRef)
 				sep = ', '
 			sb.append('>')
-			sharp = sb.toString
+			Zig = sb.toString
 		else
-			sharp = .sharpName
+			Zig = .ZigName
 		if .parentNameSpace
 			if .parentNameSpace.isRoot
-				sharp = 'global::' + sharp
+				Zig = 'global::' + Zig
 			else
-				sharp = .parentNameSpace.sharpQualifier + sharp
+				Zig = .parentNameSpace.ZigQualifier + Zig
 		else if .parentBox
-			sharp = .parentBox.sharpRef + '.' + sharp
-		return sharp
+			Zig = .parentBox.ZigRef + '.' + Zig
+		return Zig
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		if .isExtern, return
 		.compiler.boxStack.push(this)
 		try
 			assert not .isConstructed
-			.writeSharpAttribs(sw)
-			.writeSharpIsNames(sw)
-			sw.write('[.sharpKeyWord] ')
-			.writeSharpDefName(sw)
-			.writeSharpInheritance(sw)
+			.writeZigAttribs(sw)
+			.writeZigIsNames(sw)
+			sw.write('[.ZigKeyWord] ')
+			.writeZigDefName(sw)
+			.writeZigInheritance(sw)
 	
 			sep = ''
 			for inter in _baseInterfaces
 				sw.write(sep)
-				sw.write(inter.sharpRef)
+				sw.write(inter.ZigRef)
 				sep = ', '
 	
 			if _genericParams.count
 				sw.indent
 				for param in _genericParams
 					if param inherits GenericParam
-						param.writeSharpConstraint(sw)
+						param.writeZigConstraint(sw)
 				sw.dedent
 	
 			sw.writeAndIndent('{\n')
-			.writeSharpInvariantMethod(sw)
+			.writeZigInvariantMethod(sw)
 			if not .isGenericDef
 				for tm in _testMethods
 					.compiler.boxMemberStack.push(tm)
-					try,     tm.writeSharpDef(sw)
+					try,     tm.writeZigDef(sw)
 					finally, .compiler.boxMemberStack.pop
 			for decl in _declsInOrder
-				if not .willWriteDeclSharpDef(decl), continue
+				if not .willWriteDeclZigDef(decl), continue
 				.compiler.boxMemberStack.push(decl)
 				try
-					decl.writeSharpDef(sw)
+					decl.writeZigDef(sw)
 				finally
 					.compiler.boxMemberStack.pop
-			if .compiler.includeTests and not .isGenericDef, .writeSharpTest(sw)
-			sw.dedentAndWrite('} // [.sharpKeyWord] [.name]\n')
+			if .compiler.includeTests and not .isGenericDef, .writeZigTest(sw)
+			sw.dedentAndWrite('} // [.ZigKeyWord] [.name]\n')
 			sw.write('\n')
 		finally
 			.compiler.boxStack.pop
-		if .compiler.includeTests and .isGenericDef, .writeSharpTestsForGeneric(sw)
+		if .compiler.includeTests and .isGenericDef, .writeZigTestsForGeneric(sw)
 
-	def writeSharpTestsForGeneric(sw as CurlyWriter)
-		sw.write('public class [.sharpNameComponent]_Tests_[.serialNum] {\n')
+	def writeZigTestsForGeneric(sw as CurlyWriter)
+		sw.write('public class [.ZigNameComponent]_Tests_[.serialNum] {\n')
 		sw.write('// tests for: [.name]\n')
 
 		for tm in _testMethods
 			.compiler.boxMemberStack.push(tm)
-			try,     tm.writeSharpDef(sw)
+			try,     tm.writeZigDef(sw)
 			finally, .compiler.boxMemberStack.pop
-		.writeSharpTest(sw)
+		.writeZigTest(sw)
 
 		for decl in _declsInOrder
-			if not .willWriteDeclSharpDef(decl), continue
+			if not .willWriteDeclZigDef(decl), continue
 			.compiler.boxMemberStack.push(decl)
 			try
-				# decl.writeSharpDef(sw)
-				(decl to BoxMember).writeSharpTest(sw)
+				# decl.writeZigDef(sw)
+				(decl to BoxMember).writeZigTest(sw)
 			finally
 				.compiler.boxMemberStack.pop
 
 		sw.write('}\n\n')
 
-	def willWriteDeclSharpDef(decl) as bool
+	def willWriteDeclZigDef(decl) as bool
 		return true
 
-	def writeSharpAttribs(sw as CurlyWriter)
+	def writeZigAttribs(sw as CurlyWriter)
 		for attrib in _attribs
-			attrib.writeSharpDef(sw)
+			attrib.writeZigDef(sw)
 
-	def writeSharpDefName(sw as CurlyWriter)
+	def writeZigDefName(sw as CurlyWriter)
 		sw.write('[.rootName]')
 		if _genericParams.count
 			sw.write('<')
 			sep = ''
 			for param in _genericParams
 				sw.write(sep)
-				param.writeSharpDef(sw)
+				param.writeZigDef(sw)
 				sep = ', '
 			sw.write('>')
 
-	def writeSharpInheritance(sw as CurlyWriter)
+	def writeZigInheritance(sw as CurlyWriter)
 		"""
 		Class uses this to write its base class declaration.
 		No box uses this to write interface implementation--that's handled in the Box class.
 		"""
 		pass
 
-	get sharpInvariantVisibility as String is abstract
+	get ZigInvariantVisibility as String is abstract
 
-	def writeSharpInvariantMethod(sw as CurlyWriter)
+	def writeZigInvariantMethod(sw as CurlyWriter)
 		if .compiler.options['contracts'] <> 'none'
 			sw.write('\nint _ih_invariantGuard;\n\n')
 		if .compiler.options['contracts'] <> 'methods'
 			return
-		sw.write('\n[.sharpInvariantVisibility] void invariant_[.rootName]() {\n')
+		sw.write('\n[.ZigInvariantVisibility] void invariant_[.rootName]() {\n')
 		sw.indent
 		if _baseClass and (not _baseClass.isFromBinaryLibrary or _baseClass.declForName('invariant_[_baseClass.rootName]'))
 			sw.write('invariant_[_baseClass.rootName]();\n')
-		.writeSharpInvariantChecks(sw)
+		.writeZigInvariantChecks(sw)
 		sw.dedent
 		sw.write('}\n\n')
 
-	def writeAllSharpInvariantChecks(sw as CurlyWriter)
+	def writeAllZigInvariantChecks(sw as CurlyWriter)
 		"""
 		Writes all C# invariant checks including inherited. In support of -contracts:inline
 		"""
-		_writeAllSharpInvariantChecks(sw, this)
+		_writeAllZigInvariantChecks(sw, this)
 
-	def _writeAllSharpInvariantChecks(sw as CurlyWriter, box as Box)
+	def _writeAllZigInvariantChecks(sw as CurlyWriter, box as Box)
 		if box.baseClass and not box.baseClass.isFromBinaryLibrary
-			_writeAllSharpInvariantChecks(sw, box.baseClass to !)
-		box.writeSharpInvariantChecks(sw)
+			_writeAllZigInvariantChecks(sw, box.baseClass to !)
+		box.writeZigInvariantChecks(sw)
 		
-	def writeSharpInvariantChecks(sw as CurlyWriter)
+	def writeZigInvariantChecks(sw as CurlyWriter)
 		"""
 		Writes the C# invariant checks just for this class.
 		"""
 		for expr in _invariants
-			sharpThis = 'typeof([.sharpRef])'
+			ZigThis = 'typeof([.ZigRef])'
 			sw.write('if (!')
-			expr.writeSharpDef(sw)
+			expr.writeZigDef(sw)
 			sw.write(')\n')
 			sw.indent
-			sw.write('throw new CobraCoreInternal.InvariantException([expr.sharpSourceSite(.name, "invariant", sharpThis)], ')
-			expr.writeSharpBreakdown(sw)
-			sw.write('[sharpThis], null);\n')
+			sw.write('throw new CobraCoreInternal.InvariantException([expr.ZigSourceSite(.name, "invariant", ZigThis)], ')
+			expr.writeZigBreakdown(sw)
+			sw.write('[ZigThis], null);\n')
 			sw.dedent
 
-	def writeSharpTest(sw as CurlyWriter)
+	def writeZigTest(sw as CurlyWriter)
 		pass
 
-	def writeSharpTestInvocation(sw as CurlyWriter) is override
+	def writeZigTestInvocation(sw as CurlyWriter) is override
 		pass
 
-	get newForSharpTest as String
+	get newForZigTest as String
 		return ''
 
 
 class ClassOrStruct is partial
 
-	get sharpRef as String
+	get ZigRef as String
 		if .isGeneric and .isGenericDef
 			return .qualifiedRootName + '<' + String(c',',.genericParams.count-1) + '>'
 		else
-			return base.sharpRef
+			return base.ZigRef
 
 
 class Class is partial
 
-	get sharpInit as String is override
+	get ZigInit as String is override
 		return 'null'
 
-	get sharpInvariantVisibility as String is override
+	get ZigInvariantVisibility as String is override
 		return 'protected'
 
-	get sharpKeyWord as String is override
+	get ZigKeyWord as String is override
 		return 'class'
 
-	def writeSharpInheritance(sw as CurlyWriter) is override
+	def writeZigInheritance(sw as CurlyWriter) is override
 		sw.write(' : ')
 		if _baseClass
-			sw.write(_baseClass.sharpRef)
+			sw.write(_baseClass.ZigRef)
 			didWrite = true
 		if didWrite
 			if _baseInterfaces.count
@@ -1229,54 +1215,54 @@ class Class is partial
 			else
 				sw.write(' ')
 
-	get newForSharpTest as String is override
+	get newForZigTest as String is override
 		return if(not _baseClass.isExtern, ' new', '')
 
 
 class Interface is partial
 
-	get sharpInit as String is override
+	get ZigInit as String is override
 		return 'null'
 
-	get sharpInvariantVisibility as String is override
+	get ZigInvariantVisibility as String is override
 		throw ShouldNotCallException(.getType)
 
-	get sharpKeyWord as String is override
+	get ZigKeyWord as String is override
 		return 'interface'
 
-	def writeSharpInheritance(sw as CurlyWriter) is override
+	def writeZigInheritance(sw as CurlyWriter) is override
 		if _baseInterfaces.count
 			sw.write(' : ')
 
-	def writeSharpInvariantMethod(sw as CurlyWriter) is override
+	def writeZigInvariantMethod(sw as CurlyWriter) is override
 		# Even when invariants are inherited by the classes and structs that implement them,
 		# the code gen for the interface invariant does not go "here", inside the C# interface definition.
 		pass
 
-	def writeSharpTest(sw as CurlyWriter) is override
+	def writeZigTest(sw as CurlyWriter) is override
 		# Static methods can't be put in interfaces. However, at some point Cobra should support
 		# tests for interfaces which could then be run against the classes that implement them.
 		# Just requires more code gen smarts.
 		pass
 
-	def writeSharpTestInvocation(sw as CurlyWriter) is override
+	def writeZigTestInvocation(sw as CurlyWriter) is override
 		pass
 
 
 class Mixin is partial
 
-	get sharpName as String
-		name = base.sharpName
+	get ZigName as String
+		name = base.ZigName
 		# to-do: if .canHaveStatements, name += 'Mixin'
 		return name
 		
-	get sharpKeyWord as String is override
+	get ZigKeyWord as String is override
 		return if(.canHaveStatements, 'class', 'interface')
 
 	shared
 		var _nonPublicVisibility = ['protected', 'internal', 'protected internal', 'private']
 
-	def willWriteDeclSharpDef(decl) as bool is override
+	def willWriteDeclZigDef(decl) as bool is override
 		# this is for writing the interface
 		if decl inherits BoxVar, return false
 		for viz in _nonPublicVisibility
@@ -1284,84 +1270,84 @@ class Mixin is partial
 				if name == viz, return false
 		return true 
 
-	def writeSharpDef(sw as CurlyWriter)
+	def writeZigDef(sw as CurlyWriter)
 		# write the interface
 		_canHaveStatements = false
-		base.writeSharpDef(sw)
+		base.writeZigDef(sw)
 /#
 		# write the class
-		_sharpRef = nil
+		_ZigRef = nil
 		_canHaveStatements = true
-		base.writeSharpDef(sw)
+		base.writeZigDef(sw)
 #/
 
 
 class Struct is partial
 
-	get sharpInit as String is override
+	get ZigInit as String is override
 		# all structs have a valid parameterless constructor
-		return 'new [.sharpRef]()'
+		return 'new [.ZigRef]()'
 
-	get sharpInvariantVisibility as String is override
+	get ZigInvariantVisibility as String is override
 		return 'private'
 
-	get sharpKeyWord as String is override
+	get ZigKeyWord as String is override
 		return 'struct'
 
-	def writeSharpInheritance(sw as CurlyWriter) is override
+	def writeZigInheritance(sw as CurlyWriter) is override
 		if _baseInterfaces.count, sw.write(' : ')
 
-	def willWriteDeclSharpDef(decl) as bool is override
+	def willWriteDeclZigDef(decl) as bool is override
 		return not (decl inherits Initializer) or (decl to Initializer).hasParams
 
 
 class MethodSig is partial
 
-	def writeSharpDef(sw as CurlyWriter) is override
+	def writeZigDef(sw as CurlyWriter) is override
 		if .isExtern, return
-		.writeSharpAttribs(sw)
-		.writeSharpIsNames(sw)
-		sw.write('delegate [.resultType.sharpRef] [.rootName]')
+		.writeZigAttribs(sw)
+		.writeZigIsNames(sw)
+		sw.write('delegate [.resultType.ZigRef] [.rootName]')
 		if _genericParams.count
 			sw.write('<')
 			sep = ''
 			for genericParam in _genericParams
 				sw.write(sep)
-				genericParam.writeSharpDef(sw)
+				genericParam.writeZigDef(sw)
 				sep = ', '
 			sw.write('>')
 		sw.write('(')
 		sep = ''
 		for param in .params
 			sw.write(sep)
-			param.writeSharpDef(sw)
+			param.writeZigDef(sw)
 			sep = ', '
 		sw.write(');\n')
 
-	def writeSharpTest(sw as CurlyWriter) is override
+	def writeZigTest(sw as CurlyWriter) is override
 		pass
 
-	def writeSharpTestInvocation(sw as CurlyWriter) is override
+	def writeZigTestInvocation(sw as CurlyWriter) is override
 		pass
 
 
 class GenericParam
 	is partial
 
-	get sharpInit as String is override
+	get ZigInit as String is override
 		return 'default([_name])'
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		sw.write(.name)
 
-	def writeSharpConstraint(sw as CurlyWriter)
+	def writeZigConstraint(sw as CurlyWriter)
 		if _constraints.count
 			sw.write(' where [_name] :  ')
 			sep = ''
 			for constraint in _constraints
 				sw.write(sep)
-				constraint.writeSharpDef(sw)
+				constraint.writeZigDef(sw)
 				sep = ', '
 			sw.write('\n')
 
@@ -1369,59 +1355,59 @@ class GenericParam
 class GenericClassConstraint
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter) is override
+	def writeZigDef(sw as CurlyWriter) is override
 		sw.write('class')
 
 
 class GenericStructConstraint
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter) is override
+	def writeZigDef(sw as CurlyWriter) is override
 		sw.write('struct')
 
 
 class GenericCallableConstraint
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter) is override
+	def writeZigDef(sw as CurlyWriter) is override
 		sw.write('new()')
 
 
 class GenericTypeConstraint
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter) is override
-		sw.write(_representedType.sharpRef)
+	def writeZigDef(sw as CurlyWriter) is override
+		sw.write(_representedType.ZigRef)
 
 
 class Extension
 	is partial
 
-	def _computeSharpRef as String is override
-		sharp = .sharpName
+	def _computeZigRef as String is override
+		Zig = .ZigName
 		if .parentNameSpace and not .parentNameSpace.isRoot
-			sharp = .parentNameSpace.sharpQualifier + sharp
+			Zig = .parentNameSpace.ZigQualifier + Zig
 		else if .parentBox
-			sharp = .parentBox.sharpRef + '.' + sharp
-		return sharp
+			Zig = .parentBox.ZigRef + '.' + Zig
+		return Zig
 
-	get sharpInit as String is override
-		return _extendedBox.sharpInit
+	get ZigInit as String is override
+		return _extendedBox.ZigInit
 
-	get sharpInvariantVisibility as String is override
-		return _extendedBox.sharpInvariantVisibility
+	get ZigInvariantVisibility as String is override
+		return _extendedBox.ZigInvariantVisibility
 
-	get sharpKeyWord as String is override
+	get ZigKeyWord as String is override
 		return 'class'  # because the extension is always housed in a C# class
 
 	var _backEndName as String?
 
-	get sharpName as String is override
+	get ZigName as String is override
 		if not _backEndName
-			_backEndName = if(.nativeType, .nativeType.name, 'Extend_[.extendedBox.sharpNameComponent]_[Utils.toIdentifier(Path.getFileNameWithoutExtension(.compiler.curModule.fileName) to !)]')
+			_backEndName = if(.nativeType, .nativeType.name, 'Extend_[.extendedBox.ZigNameComponent]_[Utils.toIdentifier(Path.getFileNameWithoutExtension(.compiler.curModule.fileName) to !)]')
 		return _backEndName to !
 
-	get sharpThis as String is override
+	get ZigThis as String is override
 		return '_lh_this'
 
 	def extendedMethodGenericParams(genericParams as IList<of IType>) as IList<of IType> is override
@@ -1434,17 +1420,17 @@ class Extension
 		else
 			return base.extendedMethodGenericParams(genericParams)
 
-	def writeSharpDefName(sw as CurlyWriter) is override
+	def writeZigDefName(sw as CurlyWriter) is override
 		# replace base behavior
-		sw.write(.sharpName)
+		sw.write(.ZigName)
 
-	def writeSharpDef(sw as CurlyWriter) is override
+	def writeZigDef(sw as CurlyWriter) is override
 		for decl in .declsInOrder
 			if decl inherits BoxMember
-				decl.sharpExtraIsNames = {'static'}
+				decl.ZigExtraIsNames = {'static'}
 				if decl inherits AbstractMethod
 					decl.params.insert(0, Param('_lh_this', .extendedBox, isImplicit=true).bindAll to Param)
-		base.writeSharpDef(sw)
+		base.writeZigDef(sw)
 
 
 ##
@@ -1453,9 +1439,9 @@ class Extension
 
 interface IVar is partial
 
-	get sharpAssignmentNames as List<of String>?
+	get ZigAssignmentNames as List<of String>?
 		"""
-		Return the C# names to assign to above and beyond the sharpName.
+		Return the C# names to assign to above and beyond the ZigName.
 		This in support of if-inherits.
 		"""
 
@@ -1463,14 +1449,14 @@ interface IVar is partial
 class AbstractLocalVar
 	is partial
 
-	get sharpAssignmentNames as List<of String>
+	get ZigAssignmentNames as List<of String>
 		return [_backEndName]
 		# return List<of String>(_useBackEndNameStack)
 
-	get sharpName as String is override
+	get ZigName as String is override
 		if _ifInheritsStack.count
 			if _type.isReference
-				return '(([_ifInheritsStack.peek.sharpRef])[_backEndName])'
+				return '(([_ifInheritsStack.peek.ZigRef])[_backEndName])'
 			else
 				# could it be a subclass? no. value types are structs and cannot be subclassed so this must be `if i` where `i` is nullable struct
 				return '[.name].Value'  # Nullable<of T>.Value
@@ -1481,35 +1467,35 @@ class AbstractLocalVar
 
 class Param is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		if .type.isReference and not .type inherits NilableType
 			sw.write(r'[CobraCoreInternal.NotNull] ')
-		for attr in .attributes, attr.writeSharpDef(sw, '', false)
+		for attr in .attributes, attr.writeZigDef(sw, '', false)
 		branch .direction
 			on Direction.In, pass
 			on Direction.InOut, sw.write('ref ')
 			on Direction.Out, sw.write('out ')
-		sw.write('[.type.sharpParamRef] [.sharpName]')
+		sw.write('[.type.ZigParamRef] [.ZigName]')
 		if .optionalValue  # optional param
 			sw.write('=')
-			.optionalValue.writeSharpDef(sw)
+			.optionalValue.writeZigDef(sw)
 
-	def writeSharpDefSansReferenceLabels(sw as CurlyWriter)
+	def writeZigDefSansReferenceLabels(sw as CurlyWriter)
 		"""
 		Writes the parameter declaration but without C# "out" or "ref"--these are not available for
 		contract methods (require_foo and ensure_foo) because contracts cannot modify arguments.
 		"""
 		# skip the [NotNull] as well since it's not really needed
-		sw.write('[.type.sharpRef] [.sharpName]')		
+		sw.write('[.type.ZigRef] [.ZigName]')		
 
 
 class LocalVar is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
-		sw.write('[.type.sharpRef] [.sharpName]')
-		init = .type.sharpInit
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
+		sw.write('[.type.ZigRef] [.ZigName]')
+		init = .type.ZigInit
 		if init.length, sw.write(' = [init]')
 		sw.write(';\n')
 
@@ -1517,7 +1503,7 @@ class LocalVar is partial
 class ResultVar
 	is partial
 
-	get sharpName as String is override
+	get ZigName as String is override
 		return _backEndName
 
 
@@ -1528,53 +1514,53 @@ class ResultVar
 
 class BoxMember is partial
 
-	var _sharpExtraIsNames as Set<of String>?
+	var _ZigExtraIsNames as Set<of String>?
 
-	pro sharpExtraIsNames from var
+	pro ZigExtraIsNames from var
 	
-	get sharpThis as String
+	get ZigThis as String
 		# sigh. I wish .NET had metaclasses instead of this instance vs. static crap
-		return if(.isShared, 'typeof([.parentBox.sharpName])', .parentBox.sharpThis)
+		return if(.isShared, 'typeof([.parentBox.ZigName])', .parentBox.ZigThis)
 
-	def writeSharpNotNull(sw as CurlyWriter)
+	def writeZigNotNull(sw as CurlyWriter)
 		if .resultType.isReference and not .resultType inherits NilableType
-			sw.writeLine(r'[' + .sharpNotNullPrefix + 'CobraCoreInternal.NotNull]')
+			sw.writeLine(r'[' + .ZigNotNullPrefix + 'CobraCoreInternal.NotNull]')
 
-	get sharpNotNullPrefix as String
+	get ZigNotNullPrefix as String
 		# 2007-12-22 Writing the attribute like [return: NotNull] is problematic because MemberInfo.getCustomAttributes()
 		# will not see it. At least not on Novell Mono 1.2.4. I don't know if that is a bug or a "feature".
 		#return 'return: '
 		return ''
 
-	def includeSharpTestDirectly as bool
+	def includeZigTestDirectly as bool
 		# cannot put static/shared test methods in a generic def since they cannot be invoked
 		# (without computing some type args which could end up being non-trivial)
 		return .compiler.includeTests and not .parentBox.isGenericDef
 		
-	def writeSharpTest(sw as CurlyWriter)
+	def writeZigTest(sw as CurlyWriter)
 		if _testMethods and _testMethods.count
-			for tm in _testMethods, tm.writeSharpDef(sw)
+			for tm in _testMethods, tm.writeZigDef(sw)
 
-	def writeSharpTestInvocation(sw as CurlyWriter)
+	def writeZigTestInvocation(sw as CurlyWriter)
 		if _testMethods and _testMethods.count
-			for tm in _testMethods, sw.write('[tm.sharpName]();\n')
+			for tm in _testMethods, sw.write('[tm.ZigName]();\n')
 
-	def writeSharpParams(sw as CurlyWriter)
-		.writeSharpParams(sw, '()')
+	def writeZigParams(sw as CurlyWriter)
+		.writeZigParams(sw, '()')
 
-	def writeSharpParams(sw as CurlyWriter, parens as String)
+	def writeZigParams(sw as CurlyWriter, parens as String)
 		require parens.length==2 or parens==''
 		if parens.length
 			sw.write(parens[0])
 		sep = ''
 		for param in .params
 			sw.write(sep)
-			param.writeSharpDef(sw)
+			param.writeZigDef(sw)
 			sep = ', '
 		if parens.length
 			sw.write(parens[1].toString+' ')
 
-	def writeSharpIsNames(sw as CurlyWriter)
+	def writeZigIsNames(sw as CurlyWriter)
 		isNameCS = {
 			# only have to specify the ones that are different
 			'shared': 'static',
@@ -1592,38 +1578,38 @@ class BoxMember is partial
 			sw.write(name)
 			sep = ' '
 			wroteNames.add(name)
-		if _sharpExtraIsNames
-			for name in _sharpExtraIsNames
+		if _ZigExtraIsNames
+			for name in _ZigExtraIsNames
 				if name not in wroteNames
 					sw.write(sep)
 					sw.write(name)
 					sep = ' '
 		if sep.length, sw.write(' ')
 
-	def writeSharpAttribs(sw as CurlyWriter)
+	def writeZigAttribs(sw as CurlyWriter)
 		for attrib in _attribs
-			attrib.writeSharpDef(sw)
+			attrib.writeZigDef(sw)
 
 
 class BoxEvent
 	is partial
 
-	get sharpName as String is override
+	get ZigName as String is override
 		return .name.capitalized
 
-	def writeSharpDef(sw as CurlyWriter) is override
-		base.writeSharpDef(sw)
-		.writeSharpAttribs(sw)
-		.writeSharpIsNames(sw)
+	def writeZigDef(sw as CurlyWriter) is override
+		base.writeZigDef(sw)
+		.writeZigAttribs(sw)
+		.writeZigIsNames(sw)
 		sw.write('event ')
-		sw.write(.handlerType.sharpRef)
-		sw.write(' [.sharpName]')
+		sw.write(.handlerType.ZigRef)
+		sw.write(' [.ZigName]')
 		sw.write(';\n')
 
 
 class BoxField is partial
 
-	get _sharpBackEndName as String
+	get _ZigBackEndName as String
 		name = .name
 		if not name.startsWith('_')
 			name = name.capitalized
@@ -1631,31 +1617,31 @@ class BoxField is partial
 
 class BoxConst is partial
 
-	def writeSharpDef(sw as CurlyWriter) is override
-		base.writeSharpDef(sw)
-		.writeSharpAttribs(sw)
-		.writeSharpIsNames(sw)
+	def writeZigDef(sw as CurlyWriter) is override
+		base.writeZigDef(sw)
+		.writeZigAttribs(sw)
+		.writeZigIsNames(sw)
 		sw.write('const ')
-		sw.write(_type.sharpRef)
-		sw.write(' [_sharpBackEndName] = ')
-		_initExpr.writeSharpDef(sw)
+		sw.write(_type.ZigRef)
+		sw.write(' [_ZigBackEndName] = ')
+		_initExpr.writeZigDef(sw)
 		sw.write(';\n')
 
 
 class BoxVar
 	is partial
 
-	get sharpAssignmentNames as List<of String>
-		return [_sharpBackEndName]
+	get ZigAssignmentNames as List<of String>
+		return [_ZigBackEndName]
 		# return List<of String>(_useBackEndNameStack)
 
-	get sharpName as String is override
+	get ZigName as String is override
 		if _ifInheritsStack.count
 			if _type.isReference
-				return '(([_ifInheritsStack.peek.sharpRef])[_sharpBackEndName])'
+				return '(([_ifInheritsStack.peek.ZigRef])[_ZigBackEndName])'
 			else
 				# could it be a subclass? no. value types are structs and cannot be subclassed so this must be `if i` where `i` is nullable struct
-				return '[_sharpBackEndName].Value'  # Nullable<of T>.Value
+				return '[_ZigBackEndName].Value'  # Nullable<of T>.Value
 		else
 			backEndName = .name
 			if not backEndName.startsWith('_')
@@ -1664,20 +1650,20 @@ class BoxVar
 			#return _backEndName
 		# return _useBackEndNameStack.peek to !
 
-	def writeSharpDef(sw as CurlyWriter) is override
-		base.writeSharpDef(sw)
-		.writeSharpAttribs(sw)
-		.writeSharpIsNames(sw)
-		sw.write(_type.sharpRef)
-		sw.write(' [_sharpBackEndName]')
+	def writeZigDef(sw as CurlyWriter) is override
+		base.writeZigDef(sw)
+		.writeZigAttribs(sw)
+		.writeZigIsNames(sw)
+		sw.write(_type.ZigRef)
+		sw.write(' [_ZigBackEndName]')
 		if _initExpr
 			sw.write(' = ')
-			_initExpr.writeSharpDef(sw)
+			_initExpr.writeZigDef(sw)
 		else if _canInitDefault
-			sharpInit = .type.sharpInit
-			if sharpInit.length
+			ZigInit = .type.ZigInit
+			if ZigInit.length
 				sw.write(' = ')
-				sw.write(sharpInit)
+				sw.write(ZigInit)
 		sw.write(';\n')
 		
 	def _canInitDefault as bool
@@ -1688,33 +1674,33 @@ class BoxVar
 
 class AbstractMethod is partial
 
-	get sharpGenericParams as String
+	get ZigGenericParams as String
 		"""
 		Can return, for example, '<TKey,TValue>' or ''.
 		"""
 		ensure ' ' not in result
 		return ''
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		.compiler.codeMemberStack.push(this)
 		try
-			.innerWriteSharpDef(sw)
+			.innerWriteZigDef(sw)
 		finally
 			.compiler.codeMemberStack.pop
 
-	def innerWriteSharpDef(sw as CurlyWriter)
+	def innerWriteZigDef(sw as CurlyWriter)
 		pass
 	
-	def writeSharpImp(sw as CurlyWriter, skipFirst as bool)
+	def writeZigImp(sw as CurlyWriter, skipFirst as bool)
 		.compiler.codeMemberStack.push(this)
 		try
 			sw.writeAndIndent('{\n')
-			.writeSharpImpHeader(sw)
+			.writeZigImpHeader(sw)
 			if .compiler.hasDetailedStackTraceOption, .writeDSTHead(sw)
-			for param in _params, .writeSharpParamCheck(param, sw)
-			.writeSharpLocals(sw, nil, false)
-			if _requirePart and _requirePart.willGenerateCode, _requirePart.writeSharpDef(sw)
+			for param in _params, .writeZigParamCheck(param, sw)
+			.writeZigLocals(sw, nil, false)
+			if _requirePart and _requirePart.willGenerateCode, _requirePart.writeZigDef(sw)
 			willEnsure = _ensurePart and _ensurePart.willGenerateCode
 			if willEnsure
 				sw.write('bool _lh_canEnsure = false;\n')
@@ -1722,65 +1708,65 @@ class AbstractMethod is partial
 				# even though the _lh_canEnsure guard logically prevents problems at run-time
 				for param in _params
 					if param.isOut
-						sharpInit = param.type.sharpInit
-						if not sharpInit.length
+						ZigInit = param.type.ZigInit
+						if not ZigInit.length
 							# TODO/HACK: yes we need something like this (or a way to convice C# that the out param reference in `finally` really is okay),
 							# but it should be something less hackish, like an attribute
-							sharpInit = 'DateTime.Today'
-						sw.write('[param.sharpName] = [sharpInit];')
+							ZigInit = 'DateTime.Today'
+						sw.write('[param.ZigName] = [ZigInit];')
 				if _backEndResultVarName.length  # set in _bindImp
-					sw.write('[_returnType.sharpRef] [_backEndResultVarName]')
-					if _returnType.sharpInit.length
-						sw.write('= [_returnType.sharpInit]')
+					sw.write('[_returnType.ZigRef] [_backEndResultVarName]')
+					if _returnType.ZigInit.length
+						sw.write('= [_returnType.ZigInit]')
 					sw.write(';\n')
 				sw.writeAndIndent('try {\n')
 			for stmt in _stmts
 				if skipFirst
 					skipFirst = false
 					continue
-				stmt.writeSharpStmt(sw)
+				stmt.writeZigStmt(sw)
 			if willEnsure
 				if not stmt inherits ReturnStmt and not stmt inherits ThrowStmt
 					sw.write('_lh_canEnsure = true;\n')
 				sw.dedentAndWrite('} finally { // ensure\n')
 				sw.indentAndWrite('if (_lh_canEnsure) {\n')
 				sw.indent
-				_ensurePart.writeSharpDef(sw)
+				_ensurePart.writeZigDef(sw)
 				sw.dedentAndWrite('}\n')
 				sw.dedentAndWrite('}\n')
 			if .compiler.hasDetailedStackTraceOption
 				.writeDSTTail(sw)
-			.writeSharpImpFooter(sw)
+			.writeZigImpFooter(sw)
 			sw.dedent
 			sw.write('}\n')
 			sw.write('\n')
 		finally
 			.compiler.codeMemberStack.pop
 
-	def writeSharpImpHeader(sw as CurlyWriter)
+	def writeZigImpHeader(sw as CurlyWriter)
 		pass
 		
-	def writeSharpImpFooter(sw as CurlyWriter)
+	def writeZigImpFooter(sw as CurlyWriter)
 		pass
 		
-	def writeSharpPassArgs(sw as CurlyWriter)
-		.writeSharpPassArgs(sw, '()', false)
+	def writeZigPassArgs(sw as CurlyWriter)
+		.writeZigPassArgs(sw, '()', false)
 
-	def writeSharpPassArgs(sw as CurlyWriter, parens as String, excludeOutArgs as bool)
+	def writeZigPassArgs(sw as CurlyWriter, parens as String, excludeOutArgs as bool)
 		require parens.length==2 or parens==''
 		if parens.length, sw.write(parens[0])
 		sep = ''
 		for param in _params
 			if excludeOutArgs and param.isOut, continue
 			sw.write(sep)
-			sw.write(param.sharpName)
+			sw.write(param.ZigName)
 			sep = ', '
 		if parens.length, sw.write(parens[1])
 
-	def writeSharpLocals(sw as CurlyWriter, locals as List<of LocalVar>?, open as bool)
+	def writeZigLocals(sw as CurlyWriter, locals as List<of LocalVar>?, open as bool)
 		if open, sw.writeAndIndent('{\n')
 		# record the `old` expressions for `ensure`
-		.writeSharpOldAssignments(sw)
+		.writeZigOldAssignments(sw)
 		if locals is nil, locals = _locals
 		contractsAreMethods = .compiler.options['contracts'] == 'methods'
 		if locals.count
@@ -1789,84 +1775,84 @@ class AbstractMethod is partial
 			try
 				for local in locals
 					if not local.isImplicit and not (local.isForContract and contractsAreMethods)
-						local.writeSharpDef(sw)
+						local.writeZigDef(sw)
 			finally
 				sw.unhideLineNumbers
 
-	def writeSharpRequireParamDecls(sw as CurlyWriter)
+	def writeZigRequireParamDecls(sw as CurlyWriter)
 		sep = ''
 		for param in .params
 			if param.isOut
 				# a requirement cannot say anything useful about a parameter that is output only
 				continue
 			sw.write(sep)
-			param.writeSharpDefSansReferenceLabels(sw)  # no `inout/ref` label since a contract cannot modify reference arguments
+			param.writeZigDefSansReferenceLabels(sw)  # no `inout/ref` label since a contract cannot modify reference arguments
 			sep = ', '
 		
-	def writeSharpOldAssignments(sw as CurlyWriter)
+	def writeZigOldAssignments(sw as CurlyWriter)
 		if .isOverride and .matchingBaseMember
-			(.matchingBaseMember to AbstractMethod).writeSharpOldAssignments(sw)
+			(.matchingBaseMember to AbstractMethod).writeZigOldAssignments(sw)
 		for oldExpr in _oldExprs
-			oldExpr.writeSharpAssignment(sw)
+			oldExpr.writeZigAssignment(sw)
 
-	def writeSharpEnsureArgs(sw as CurlyWriter)
+	def writeZigEnsureArgs(sw as CurlyWriter)
 		if .backEndResultVarName.length
 			sw.write('[.backEndResultVarName]')
 			sep = [',']
 		else
 			sep = ['']
-		_writeSharpOldArgs(sw, sep)
+		_writeZigOldArgs(sw, sep)
 		if .params.count
 			sw.write(sep[0])
-		.writeSharpPassArgs(sw, '', false)  # these have to come last, because they might include a C# "params" which has to be last
+		.writeZigPassArgs(sw, '', false)  # these have to come last, because they might include a C# "params" which has to be last
 
-	def _writeSharpOldArgs(sw as CurlyWriter, sep as List<of String>)
+	def _writeZigOldArgs(sw as CurlyWriter, sep as List<of String>)
 		if .isOverride and .matchingBaseMember
 			assert .matchingBaseMember is not this
-			(.matchingBaseMember to AbstractMethod)._writeSharpOldArgs(sw, sep)
+			(.matchingBaseMember to AbstractMethod)._writeZigOldArgs(sw, sep)
 		for oldExpr in _oldExprs
 			sw.write(sep[0])
-			sw.write(oldExpr.sharpVarName)
+			sw.write(oldExpr.ZigVarName)
 			sep[0] = ', '
 
-	def writeSharpEnsureParamDecls(sw as CurlyWriter)
+	def writeZigEnsureParamDecls(sw as CurlyWriter)
 		if .backEndResultVarName.length
-			sw.write('[.resultType.sharpRef] [.backEndResultVarName]')
+			sw.write('[.resultType.ZigRef] [.backEndResultVarName]')
 			sep = [',']
 		else
 			sep = ['']
-		_writeSharpOldParamDecls(sw, sep)
+		_writeZigOldParamDecls(sw, sep)
 		# these have to come last, because they might include a C# "params" which has to be last
 		for param in .params
 			sw.write(sep[0])
-			param.writeSharpDefSansReferenceLabels(sw)  # no `out` or `inout/ref` labels since a contract cannot modify reference arguments
+			param.writeZigDefSansReferenceLabels(sw)  # no `out` or `inout/ref` labels since a contract cannot modify reference arguments
 			sep[0] = ', '
 
-	def _writeSharpOldParamDecls(sw as CurlyWriter, sep as List<of String>)
+	def _writeZigOldParamDecls(sw as CurlyWriter, sep as List<of String>)
 		if .isOverride and .matchingBaseMember
 			assert .matchingBaseMember is not this
-			(.matchingBaseMember to AbstractMethod)._writeSharpOldParamDecls(sw, sep)
+			(.matchingBaseMember to AbstractMethod)._writeZigOldParamDecls(sw, sep)
 		for oldExpr in _oldExprs
 			sw.write(sep[0])
-			sw.write('[oldExpr.type.sharpRef] [oldExpr.sharpVarName]')
+			sw.write('[oldExpr.type.ZigRef] [oldExpr.ZigVarName]')
 			sep[0] = ', '
 
-	def writeSharpParamCheck(param as Param, sw as CurlyWriter)
+	def writeZigParamCheck(param as Param, sw as CurlyWriter)
 		if .isCompilerGenerated, return
 		if param.type.isReference and not param.type inherits NilableType and not param.isOut
 			if .compiler.options.boolValue('include-nil-checks')
-				sw.write('if (CobraCoreInternal.CobraCore._willCheckNil && [param.sharpName]==null) throw new System.ArgumentNullException("[param.name]");\n')
+				sw.write('if (CobraCoreInternal.CobraCore._willCheckNil && [param.ZigName]==null) throw new System.ArgumentNullException("[param.name]");\n')
 
 	def writeDSTHead(sw as CurlyWriter)
 		if not .canHaveDetailedStackTrace, return
 		# could be a neat option, -trace-methods, but maybe done with events:
 		# sw.writeLine('Console.WriteLine(">> [.parentBox.name].[.name]");')
-		sw.write('CobraCoreInternal.CobraImp.PushFrame("[.parentBox.name]", "[.name]", [Utils.sharpStringLiteralFor(.token.fullPathName)], [.token.lineNum]')
+		sw.write('CobraCoreInternal.CobraImp.PushFrame("[.parentBox.name]", "[.name]", [Utils.ZigStringLiteralFor(.token.fullPathName)], [.token.lineNum]')
 		if not .isShared
-			sw.write(', "this", [.compiler.curBox.sharpThis]')
+			sw.write(', "this", [.compiler.curBox.ZigThis]')
 		for param in .params
 			if not param.isImplicit and not param.isOut
-				sw.write(', "[param.name]", [param.sharpName]')
+				sw.write(', "[param.name]", [param.ZigName]')
 		sw.write(');\n')
 		sw.writeAndIndent('try {\n')
 
@@ -1886,42 +1872,42 @@ class AbstractMethod is partial
 
 class Initializer is partial
 
-	def innerWriteSharpDef(sw as CurlyWriter)
-		base.innerWriteSharpDef(sw)
-		.writeSharpAttribs(sw)
+	def innerWriteZigDef(sw as CurlyWriter)
+		base.innerWriteZigDef(sw)
+		.writeZigAttribs(sw)
 		first = if(_stmts.count, _stmts[0], nil)
 		callInitializer as String? = nil
 		if first inherits DotExpr
 			if first.left inherits ThisOrBaseLit
 				if (firstRight = first.right) inherits IDotRightExpr
 					if firstRight.name == 'init'
-						callInitializer = (first.left to ThisOrBaseLit).asSharp
+						callInitializer = (first.left to ThisOrBaseLit).asZig
 						args = firstRight.args
 						Stmt.inInitCall = true
 						didSetInInitCall = true
 		_fixIsNames
-		.writeSharpIsNames(sw)
+		.writeZigIsNames(sw)
 		sw.write(' [.parentBox.rootName]')
-		.writeSharpParams(sw)
+		.writeZigParams(sw)
 		if callInitializer
 			sw.writeAndIndent('\n')
 			sw.write(': [callInitializer](')
 			sep = ''
 			for arg in args
 				sw.write(sep)
-				arg.writeSharpDef(sw)
+				arg.writeZigDef(sw)
 				sep = ', '
 			sw.write(') ')
 			sw.dedent
 			if didSetInInitCall
 				assert Stmt.inInitCall  # make sure it wasn't reset somewhere else
 				Stmt.inInitCall = false
-		.writeSharpImp(sw, if(callInitializer, true, false))
+		.writeZigImp(sw, if(callInitializer, true, false))
 		if _requirePart
-			_requirePart.writeSharpMethod(sw)
+			_requirePart.writeZigMethod(sw)
 		if _ensurePart
-			_ensurePart.writeSharpMethod(sw)
-		if .includeSharpTestDirectly, .writeSharpTest(sw)
+			_ensurePart.writeZigMethod(sw)
+		if .includeZigTestDirectly, .writeZigTest(sw)
 
 	def _fixIsNames
 		# suppress adding default access modifiers on static initializer
@@ -1930,8 +1916,8 @@ class Initializer is partial
 		if 'shared' in _isNames and _isNames.count > 1
 			_isNames.remove('public')
 		
-	def writeSharpImpHeader(sw as CurlyWriter)
-		base.writeSharpImpHeader(sw)
+	def writeZigImpHeader(sw as CurlyWriter)
+		base.writeZigImpHeader(sw)
 		if .isStructMember and .compiler.options['contracts'] <> 'none'
 			sw.write('\n_ih_invariantGuard = 0;\n\n')  # otherwise C# complains: Field "STRUCTNAME._ih_invariantGuard" must be fully assigned before control leaves the constructor
 		
@@ -1939,48 +1925,48 @@ class Initializer is partial
 class Method
 	is partial
 
-	get sharpGenericParams as String is override
+	get ZigGenericParams as String is override
 		params = .parentBox.extendedMethodGenericParams(_genericParams)
 		if params.count
 			sb = StringBuilder('<')
 			sep = ''
 			for param in params
 				sb.append(sep)
-				sb.append(param.sharpName)
+				sb.append(param.ZigName)
 				sep = ','
 			sb.append('>')
 			return sb.toString
 		else
 			return ''
 
-	def innerWriteSharpDef(sw as CurlyWriter)
-		base.innerWriteSharpDef(sw)
-		.writeSharpNotNull(sw)
-		.writeSharpAttribs(sw)
-		name = .sharpName
+	def innerWriteZigDef(sw as CurlyWriter)
+		base.innerWriteZigDef(sw)
+		.writeZigNotNull(sw)
+		.writeZigAttribs(sw)
+		name = .ZigName
 		returnType = _returnType ? .compiler.voidType
 		if _implementsType
-			name = _implementsType.sharpRef + '.' + name
-		.writeSharpIsNames(sw)
-		sw.write('[returnType.sharpRef] [name][.sharpGenericParams]')
-		.writeSharpParams(sw)
+			name = _implementsType.ZigRef + '.' + name
+		.writeZigIsNames(sw)
+		sw.write('[returnType.ZigRef] [name][.ZigGenericParams]')
+		.writeZigParams(sw)
 		if .genericParams.count
 			sw.indent
 			for param in .genericParams
 				if param inherits GenericParam
-					param.writeSharpConstraint(sw)
+					param.writeZigConstraint(sw)
 			sw.dedent
 		if not .parentBox.canHaveStatements
 			sw.write(';\n')
 		else
 			if .bodyExclusion, sw.writeLine(';')
-			else, .writeSharpImp(sw, false)
-			if _requirePart, _requirePart.writeSharpMethod(sw)
-			if _ensurePart, _ensurePart.writeSharpMethod(sw)
-			if .includeSharpTestDirectly, .writeSharpTest(sw)
+			else, .writeZigImp(sw, false)
+			if _requirePart, _requirePart.writeZigMethod(sw)
+			if _ensurePart, _ensurePart.writeZigMethod(sw)
+			if .includeZigTestDirectly, .writeZigTest(sw)
 
-	def writeSharpImpHeader(sw as CurlyWriter)
-		base.writeSharpImpHeader(sw)
+	def writeZigImpHeader(sw as CurlyWriter)
+		base.writeZigImpHeader(sw)
 		if .isMain
 			if .compiler.hasExceptionReportOption
 				sw.writeLine('try { // Exception Report')
@@ -1989,10 +1975,10 @@ class Method
 				sw.writeLine('try { // -debugging-tips')
 				sw.indent
 		if .isMain and .compiler.options.boolValue('include-tests')
-			(.compiler to Compiler).writeSharpRunAllTests(sw)
+			(.compiler to Compiler).writeZigRunAllTests(sw)
 
-	def writeSharpImpFooter(sw as CurlyWriter)
-		base.writeSharpImpFooter(sw)
+	def writeZigImpFooter(sw as CurlyWriter)
+		base.writeZigImpFooter(sw)
 		if .isMain
 			if .compiler.hasExceptionReportOption
 				sw.dedent
@@ -2001,26 +1987,26 @@ class Method
 				sw.dedent
 				sw.writeLine('} catch { CobraCoreInternal.CobraCore.PrintDebuggingTips(); throw; }')
 				
-	get sharpName as String is override
+	get ZigName as String is override
 		return .name.capitalized
 
 
 class ProperDexer
 	is partial
 
-	def writeSharpBody(sw as CurlyWriter)
+	def writeZigBody(sw as CurlyWriter)
 		sw.write(' {\n')
 		sw.indent
 		if _getPart
 			if .isAbstract or not .parentBox.canHaveStatements
 				sw.write('\tget;\n')
 			else
-				_getPart.writeSharpDef(sw)
+				_getPart.writeZigDef(sw)
 		if _setPart
 			if .isAbstract or not .parentBox.canHaveStatements
 				sw.write('\tset;\n')
 			else
-				_setPart.writeSharpDef(sw)
+				_setPart.writeZigDef(sw)
 		sw.dedent
 		sw.write('}\n')
 
@@ -2028,34 +2014,34 @@ class ProperDexer
 class ProperDexerXetter
 	is partial
 
-	def innerWriteSharpDef(sw as CurlyWriter)
-		base.innerWriteSharpDef(sw)
+	def innerWriteZigDef(sw as CurlyWriter)
+		base.innerWriteZigDef(sw)
 		sw.write(.xetPartName)
-		.writeSharpImp(sw, false)
+		.writeZigImp(sw, false)
 
 
 class Property
 	is partial
 
-	get sharpNotNullPrefix as String is override
+	get ZigNotNullPrefix as String is override
 		return ''
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		sw.writeLine('')
-		.writeSharpNotNull(sw)
-		.writeSharpAttribs(sw)
-		.writeSharpIsNames(sw)
-		sw.write(' [_returnType.sharpRef] [.name.capitalized]')
-		.writeSharpBody(sw)
+		.writeZigNotNull(sw)
+		.writeZigAttribs(sw)
+		.writeZigIsNames(sw)
+		sw.write(' [_returnType.ZigRef] [.name.capitalized]')
+		.writeZigBody(sw)
 		getPart = .getPart
 		if getPart
 			.compiler.codeMemberStack.push(getPart)
 			try
 				if getPart.requirePart
-					getPart.requirePart.writeSharpMethod(sw)
+					getPart.requirePart.writeZigMethod(sw)
 				if getPart.ensurePart
-					getPart.ensurePart.writeSharpMethod(sw)
+					getPart.ensurePart.writeZigMethod(sw)
 			finally
 				.compiler.codeMemberStack.pop
 		setPart = .setPart
@@ -2063,38 +2049,38 @@ class Property
 			.compiler.codeMemberStack.push(setPart)
 			try
 				if setPart.requirePart
-					setPart.requirePart.writeSharpMethod(sw)
+					setPart.requirePart.writeZigMethod(sw)
 				if setPart.ensurePart
-					setPart.ensurePart.writeSharpMethod(sw)
+					setPart.ensurePart.writeZigMethod(sw)
 			finally
 				.compiler.codeMemberStack.pop
-		if .includeSharpTestDirectly, .writeSharpTest(sw)
+		if .includeZigTestDirectly, .writeZigTest(sw)
 
 
 class Indexer
 	is partial
 
-	get sharpNotNullPrefix as String is override
+	get ZigNotNullPrefix as String is override
 		return ''
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		assert _name==r'[]'
 		sw.writeLine('')
-		.writeSharpNotNull(sw)
-		.writeSharpAttribs(sw)
-		.writeSharpIsNames(sw)
-		sw.write(' [_returnType.sharpRef] this')
-		.writeSharpParams(sw, r'[]')
-		.writeSharpBody(sw)
+		.writeZigNotNull(sw)
+		.writeZigAttribs(sw)
+		.writeZigIsNames(sw)
+		sw.write(' [_returnType.ZigRef] this')
+		.writeZigParams(sw, r'[]')
+		.writeZigBody(sw)
 		getPart = .getPart
 		if getPart
 			.compiler.codeMemberStack.push(getPart)
 			try
 				if getPart.requirePart
-					getPart.requirePart.writeSharpMethod(sw)
+					getPart.requirePart.writeZigMethod(sw)
 				if getPart.ensurePart
-					getPart.ensurePart.writeSharpMethod(sw)
+					getPart.ensurePart.writeZigMethod(sw)
 			finally
 				.compiler.codeMemberStack.pop
 		setPart = .setPart
@@ -2102,12 +2088,12 @@ class Indexer
 			.compiler.codeMemberStack.push(setPart)
 			try
 				if setPart.requirePart
-					setPart.requirePart.writeSharpMethod(sw)
+					setPart.requirePart.writeZigMethod(sw)
 				if setPart.ensurePart
-					setPart.ensurePart.writeSharpMethod(sw)
+					setPart.ensurePart.writeZigMethod(sw)
 			finally
 				.compiler.codeMemberStack.pop
-		if .includeSharpTestDirectly, .writeSharpTest(sw)
+		if .includeZigTestDirectly, .writeZigTest(sw)
 
 
 class MemberOverload
@@ -2118,50 +2104,50 @@ class MemberOverload
 
 class TestMethod is partial
 
-	get sharpName as String is override
+	get ZigName as String is override
 		if _forMember
 			name = 'test_' + _forMember.name.capitalized.replace('Cue.', '_cue_')
 			if .overloadId <> -1
 				name += '_ol_[.overloadId]'
 		else
-			name = 'test_[_forBox.sharpKeyWord]_'+_forBox.sharpNameComponent
+			name = 'test_[_forBox.ZigKeyWord]_'+_forBox.ZigNameComponent
 		return '[name]_[.serialNum]'  # embed serial number because there can be multiple test sections
 
 
 class ContractPart
 	is partial
 
-	var _sharpMethodNameCache as String?
+	var _ZigMethodNameCache as String?
 
 		
-	def writeSharpMethod(sw as CurlyWriter) is abstract
+	def writeZigMethod(sw as CurlyWriter) is abstract
 
-	def _sharpMethodName(prefix as String) as String
-		if _sharpMethodNameCache is nil
+	def _ZigMethodName(prefix as String) as String
+		if _ZigMethodNameCache is nil
 			# TODO: having the serial number in the name avoids problem with overloads, but it's ugly and it can change from run-to-run.
 			# 		would be nice if each member of an overload had an overload number.
-			name = '[prefix]_[_codeMember.sharpName][_codeMember.sharpGenericParams]_[_codeMember.serialNum]_[_codeMember.parentBox.name]'
+			name = '[prefix]_[_codeMember.ZigName][_codeMember.ZigGenericParams]_[_codeMember.serialNum]_[_codeMember.parentBox.name]'
 			name = name.replace(r'[]', 'Item') # indexer # TODO: maybe Indexer should return 'Item' in the first place
 			# properindexers like "name.get" have a '.'
 			# generics have < > and ,
 			for ch in [c'.', c'<', c'>', c',']
 				name = name.replace(ch, c'_')
-			_sharpMethodNameCache = name
-		return _sharpMethodNameCache to !
+			_ZigMethodNameCache = name
+		return _ZigMethodNameCache to !
 
-	get sharpThis as String
-		return _codeMember.sharpThis
+	get ZigThis as String
+		return _codeMember.ZigThis
 
 
 class RequirePart
 	is partial
 
 
-	get sharpMethodName as String
-		return _sharpMethodName('require')
+	get ZigMethodName as String
+		return _ZigMethodName('require')
 
-	def writeSharpDef(sw as CurlyWriter) is override
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter) is override
+		base.writeZigDef(sw)
 		assert .willGenerateCode
 		willInline = .willInlineCode
 		sw.write('if (CobraCoreInternal.CobraCore._willCheckRequire) {\n')
@@ -2190,14 +2176,14 @@ class RequirePart
 									ourParam = _codeMember.params[i]
 									ancestorParam = curCodeMember.params[i]
 									if ourParam.name <> ancestorParam.name  # this is the problem`; name mismatch
-										sw.write('[ourParam.type.sharpRef] [ancestorParam.name] = [ourParam.name];\n')
-							curCodeMember.requirePart.writeSharpChecks(sw)
+										sw.write('[ourParam.type.ZigRef] [ancestorParam.name] = [ourParam.name];\n')
+							curCodeMember.requirePart.writeZigChecks(sw)
 							if willEncapsulate
 								sw.dedent
 								sw.write('}\n')
 					else
-						sw.write('[curCodeMember.requirePart.sharpMethodName]')
-						_codeMember.writeSharpPassArgs(sw, '()', true)  # always use *our* code member since the arg names can be different than base classes
+						sw.write('[curCodeMember.requirePart.ZigMethodName]')
+						_codeMember.writeZigPassArgs(sw, '()', true)  # always use *our* code member since the arg names can be different than base classes
 						sw.write(';\n')
 					sw.dedent
 					sw.write('} catch (CobraCoreInternal.RequireException re[n]) {\n')
@@ -2215,15 +2201,15 @@ class RequirePart
 				count -= 1
 		else
 			if willInline
-				.writeSharpChecks(sw)
+				.writeZigChecks(sw)
 			else
-				sw.write('[.sharpMethodName]')
-				_codeMember.writeSharpPassArgs(sw, '()', true)
+				sw.write('[.ZigMethodName]')
+				_codeMember.writeZigPassArgs(sw, '()', true)
 				sw.write(';\n')
 		sw.dedent
 		sw.write('}\n')
 
-	def writeSharpMethod(sw as CurlyWriter) is override
+	def writeZigMethod(sw as CurlyWriter) is override
 		if .compiler.options['contracts'] <> 'methods'
 			return
 		if _codeMember.isInterfaceMember
@@ -2234,34 +2220,34 @@ class RequirePart
 			return
 		static = if(_codeMember.isShared, 'static ', '')
 		access = if(_codeMember.parentBox inherits Struct, 'private', 'protected')
-		sw.write('[static][access] void [.sharpMethodName][_codeMember.sharpGenericParams](')
-		_codeMember.writeSharpRequireParamDecls(sw)
+		sw.write('[static][access] void [.ZigMethodName][_codeMember.ZigGenericParams](')
+		_codeMember.writeZigRequireParamDecls(sw)
 		sw.write(') {\n')
 		sw.indent
-		for local in .codeMember.locals, if local.isForRequire, local.writeSharpDef(sw)
-		.writeSharpChecks(sw)
+		for local in .codeMember.locals, if local.isForRequire, local.writeZigDef(sw)
+		.writeZigChecks(sw)
 		sw.dedent
 		sw.write('}\n\n')
 
-	def writeSharpChecks(sw as CurlyWriter)
+	def writeZigChecks(sw as CurlyWriter)
 		for expr in _exprs
 			sw.write('if (!')
-			expr.writeSharpDef(sw)
+			expr.writeZigDef(sw)
 			sw.write(') ')
 			sw.indent
-			sw.write('throw new CobraCoreInternal.RequireException([expr.sharpSourceSite], ')
-			expr.writeSharpBreakdown(sw)
-			sw.write('[.sharpThis], null);\n')
+			sw.write('throw new CobraCoreInternal.RequireException([expr.ZigSourceSite], ')
+			expr.writeZigBreakdown(sw)
+			sw.write('[.ZigThis], null);\n')
 			sw.dedent
 
 
 class EnsurePart is partial
 
-	get sharpMethodName as String
-		return _sharpMethodName('ensure')
+	get ZigMethodName as String
+		return _ZigMethodName('ensure')
 
-	def writeSharpDef(sw as CurlyWriter) is override
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter) is override
+		base.writeZigDef(sw)
 		assert .willGenerateCode
 		willInline = .willInlineCode
 		sw.write('if (CobraCoreInternal.CobraCore._willCheckEnsure) {\n')
@@ -2271,24 +2257,24 @@ class EnsurePart is partial
 			post while curCodeMember
 				if not curCodeMember.parentBox.isExtern and curCodeMember.ensurePart
 					if willInline
-						curCodeMember.ensurePart.writeSharpChecks(sw)
+						curCodeMember.ensurePart.writeZigChecks(sw)
 					else
-						sw.write('[curCodeMember.ensurePart.sharpMethodName](')
-						_codeMember.writeSharpEnsureArgs(sw)
+						sw.write('[curCodeMember.ensurePart.ZigMethodName](')
+						_codeMember.writeZigEnsureArgs(sw)
 						sw.write(');\n')
 				curCodeMember = curCodeMember.matchingBaseMember to AbstractMethod?  # TODO: should a cast really be needed here?
 			# at this point in C# code, all ensure have passed
 		else
 			if willInline
-				.writeSharpChecks(sw)
+				.writeZigChecks(sw)
 			else
-				sw.write('[_codeMember.ensurePart.sharpMethodName](')
-				_codeMember.writeSharpEnsureArgs(sw)
+				sw.write('[_codeMember.ensurePart.ZigMethodName](')
+				_codeMember.writeZigEnsureArgs(sw)
 				sw.write(');\n')
 		sw.dedent
 		sw.write('}\n')
 
-	def writeSharpMethod(sw as CurlyWriter) is override
+	def writeZigMethod(sw as CurlyWriter) is override
 		if .compiler.options['contracts'] <> 'methods'
 			return
 		if _codeMember.isInterfaceMember
@@ -2299,24 +2285,24 @@ class EnsurePart is partial
 			return
 		static = if(_codeMember.isShared, 'static ', '')
 		access = if(_codeMember.parentBox inherits Struct, 'private', 'protected')
-		sw.write('[static][access] void [.sharpMethodName][_codeMember.sharpGenericParams](')
-		_codeMember.writeSharpEnsureParamDecls(sw)
+		sw.write('[static][access] void [.ZigMethodName][_codeMember.ZigGenericParams](')
+		_codeMember.writeZigEnsureParamDecls(sw)
 		sw.write(') {\n')
 		sw.indent
-		for local in .codeMember.locals, if local.isForEnsure, local.writeSharpDef(sw)
-		.writeSharpChecks(sw)
+		for local in .codeMember.locals, if local.isForEnsure, local.writeZigDef(sw)
+		.writeZigChecks(sw)
 		sw.dedent
 		sw.write('}\n\n')
 
-	def writeSharpChecks(sw as CurlyWriter)
+	def writeZigChecks(sw as CurlyWriter)
 		for expr in _exprs
 			sw.write('if (!')
-			expr.writeSharpDef(sw)
+			expr.writeZigDef(sw)
 			sw.write(') ')
 			sw.indent
-			sw.write('throw new CobraCoreInternal.EnsureException([expr.sharpSourceSite], ')
-			expr.writeSharpBreakdown(sw)
-			sw.write('[.sharpThis], null);\n')
+			sw.write('throw new CobraCoreInternal.EnsureException([expr.ZigSourceSite], ')
+			expr.writeZigBreakdown(sw)
+			sw.write('[.ZigThis], null);\n')
 			sw.dedent
 		if not _codeMember.isShared and not _codeMember.isExtensionMember
 			sw.write('if (CobraCoreInternal.CobraCore._willCheckInvariant && _ih_invariantGuard == 0) {\n')
@@ -2325,7 +2311,7 @@ class EnsurePart is partial
 			sw.write('try {\n')
 			sw.indent
 			if .willInlineCode
-				.codeMember.parentBox.writeAllSharpInvariantChecks(sw)
+				.codeMember.parentBox.writeAllZigInvariantChecks(sw)
 			else
 				sw.write('invariant_[_codeMember.parentBox.rootName]();')
 			sw.dedent
@@ -2340,18 +2326,18 @@ class EnsurePart is partial
 
 class Stmt is partial
 
-	def sharpSourceSite as String
+	def ZigSourceSite as String
 		"""
 		Returns a C# "new SourceSite(...)" expression with the correct arguments for the current code generation.
 		"""
 		if .compiler.codeMemberStack.count
 			codeMember = .compiler.curCodeMember
-			return .sharpSourceSite(codeMember.parentBox.name, codeMember.name, .sharpThis)
+			return .ZigSourceSite(codeMember.parentBox.name, codeMember.name, .ZigThis)
 		else
 			# example: var _x = someExpr ...
-			return .sharpSourceSite(.compiler.curBox.name, .compiler.curBoxMember.name, .sharpThis)
+			return .ZigSourceSite(.compiler.curBox.name, .compiler.curBoxMember.name, .ZigThis)
 		
-	def sharpSourceSite(boxName as String, memberName as String, sharpThis as String) as String
+	def ZigSourceSite(boxName as String, memberName as String, ZigThis as String) as String
 		"""
 		Returns a C# "new SourceSite(...)" expression with the correct arguments for the current code generation.
 		The arguments to this method allow for some explicit control in special circumstances, such as `invariant`.
@@ -2359,65 +2345,65 @@ class Stmt is partial
 		require
 			boxName.length
 			memberName.length
-			sharpThis.length
+			ZigThis.length
 		body
-			return 'new CobraCoreInternal.SourceSite([.sharpSourceSiteArgs(boxName, memberName, sharpThis)])'
+			return 'new CobraCoreInternal.SourceSite([.ZigSourceSiteArgs(boxName, memberName, ZigThis)])'
 
-	def sharpSourceSiteArgs as String
-		return .sharpSourceSiteArgs(.compiler.curBox.name, .compiler.curBoxMember.name, .sharpThis)
+	def ZigSourceSiteArgs as String
+		return .ZigSourceSiteArgs(.compiler.curBox.name, .compiler.curBoxMember.name, .ZigThis)
 	
-	def sharpSourceSiteArgs(boxName as String, memberName as String, sharpThis as String) as String
+	def ZigSourceSiteArgs(boxName as String, memberName as String, ZigThis as String) as String
 		require
 			boxName.length
 			memberName.length
-			sharpThis.length
+			ZigThis.length
 		body
-			boxName = Utils.sharpStringLiteralFor(boxName)
-			memberName = Utils.sharpStringLiteralFor(memberName)
+			boxName = Utils.ZigStringLiteralFor(boxName)
+			memberName = Utils.ZigStringLiteralFor(memberName)
 			tok = .token
 			fileName = tok.fileName
 			if not Path.isPathRooted(fileName)
 				fileName = Path.combine(Environment.currentDirectory, fileName)
-			fileName = Utils.sharpStringLiteralFor(fileName)
-			return '[fileName], [tok.lineNum], [boxName], [memberName], [sharpThis]'
+			fileName = Utils.ZigStringLiteralFor(fileName)
+			return '[fileName], [tok.lineNum], [boxName], [memberName], [ZigThis]'
 	
-	get sharpThis as String
+	get ZigThis as String
 		if _inInitCall  # C# won't allow 'this' in a base constructor call
 			return '"(uninitialized [.compiler.curBox.name] instance)"'
 		else if .compiler.codeMemberStack.count
-			return .compiler.curCodeMember.sharpThis
+			return .compiler.curCodeMember.ZigThis
 		else
 			assert .compiler.boxMemberStack.count
 			# so not a code member
 			return '"(uninitialized [.compiler.curBox.name] instance)"'
 
-	def writeSharpSetLine(sw as CurlyWriter)
+	def writeZigSetLine(sw as CurlyWriter)
 		if _canSetLine and .token.lineNum > 0
 			sw.write('CobraCoreInternal.CobraImp._curFrame._lineNum = [.token.lineNum];\n')
 
-	def writeSharpStmt(sw as CurlyWriter)
+	def writeZigStmt(sw as CurlyWriter)
 		require .didBindImp
 		sw.node(this)
-		.writeSharpSetLine(sw)
-		.writeSharpDef(sw)
+		.writeZigSetLine(sw)
+		.writeZigDef(sw)
 
 
 class AssertStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		if not .compiler.options.boolValue('include-asserts')
 			return
 		sw.write('if (CobraCoreInternal.CobraCore._willCheckAssert && !')
-		_expr.writeSharpDef(sw)
+		_expr.writeZigDef(sw)
 		sw.write(') \n')  # \n for improved readability of the generated code
 		sw.indent
-		sw.write('throw new CobraCoreInternal.AssertException([.sharpSourceSite], ')
-		_expr.writeSharpBreakdown(sw)
-		sw.write('[.sharpThis], ')
+		sw.write('throw new CobraCoreInternal.AssertException([.ZigSourceSite], ')
+		_expr.writeZigBreakdown(sw)
+		sw.write('[.ZigThis], ')
 		if _info
-			_info.writeSharpDef(sw)
+			_info.writeZigDef(sw)
 		else
 			sw.write('null')
 		sw.write(');\n')
@@ -2427,15 +2413,15 @@ class AssertStmt
 class BranchStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		if _expr.type.isDynamic
 			# if the expression is dynamic, then use an if-else ladder with CobraImp.Equals(
 			sw.writeLine('// branch [_expr.toCobraSource]')
 			
 			varName = '_lh_branch_[.serialNum]'
-			sw.write('[_expr.type.sharpRef] [varName] = ')
-			_expr.writeSharpDef(sw)
+			sw.write('[_expr.type.ZigRef] [varName] = ')
+			_expr.writeZigDef(sw)
 			sw.writeLine(';')
 						
 			elseWord = ''
@@ -2445,19 +2431,19 @@ class BranchStmt
 				for e in onPart.exprs
 					sw.write(sep)
 					sw.write('CobraCoreInternal.CobraImp.Equals([varName], ')
-					e.writeSharpDef(sw, false)
+					e.writeZigDef(sw, false)
 					sw.write(')')
 					sep = ' || '
 				sw.write(')')
-				onPart.block.writeSharpDef(sw)
+				onPart.block.writeZigDef(sw)
 				elseWord = 'else '
 			if _elsePart
 				sw.write('else ')
-				_elsePart.writeSharpDef(sw)
+				_elsePart.writeZigDef(sw)
 		else
 			# for any other kind of expression, use a C# switch
 			sw.write('switch(')
-			_expr.writeSharpDef(sw)
+			_expr.writeZigDef(sw)
 			sw.write(') {\n')
 			sw.indent
 			for onPart in _onParts
@@ -2465,15 +2451,15 @@ class BranchStmt
 				for e in onPart.exprs
 					sw.write(sep)
 					sw.write('case ')
-					e.writeSharpDef(sw)
+					e.writeZigDef(sw)
 					sw.write(': ')
 					sep = '\n'
-				onPart.block.writeSharpDef(sw)
+				onPart.block.writeZigDef(sw)
 				if not onPart.block.stmts.count or not onPart.block.stmts[onPart.block.stmts.count-1] inherits ReturnStmt  # CC: use .last
 					sw.write('break;\n')
 			if _elsePart
 				sw.write('default: ')
-				_elsePart.writeSharpDef(sw)
+				_elsePart.writeZigDef(sw)
 				sw.write('break;\n')
 			sw.dedent
 			sw.write('}\n')
@@ -2482,31 +2468,31 @@ class BranchStmt
 class BlockStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
-		.writeSharpDef(sw, true, nil)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
+		.writeZigDef(sw, true, nil)
 
-	def writeSharpDef(sw as CurlyWriter, close as bool)
-		.writeSharpDef(sw, close, nil)
+	def writeZigDef(sw as CurlyWriter, close as bool)
+		.writeZigDef(sw, close, nil)
 
-	def writeSharpDef(sw as CurlyWriter, top as String?)
-		.writeSharpDef(sw, true, top)
+	def writeZigDef(sw as CurlyWriter, top as String?)
+		.writeZigDef(sw, true, top)
 
-	def writeSharpDef(sw as CurlyWriter, close as bool, top as String?)
+	def writeZigDef(sw as CurlyWriter, close as bool, top as String?)
 		sw.node(this)
 		sw.write(' {\n')
 		sw.indent
 		if top
 			sw.write(top)
 		if _ifInheritsVar
-			#typeName = _ifInheritsType.sharpRef
-			#newName = '_lh_' + _ifInheritsVar.name + '_' + _ifInheritsType.sharpNameComponent
-			#sw.write('[typeName] [newName] = ([typeName])[_ifInheritsVar.sharpName];\n')
+			#typeName = _ifInheritsType.ZigRef
+			#newName = '_lh_' + _ifInheritsVar.name + '_' + _ifInheritsType.ZigNameComponent
+			#sw.write('[typeName] [newName] = ([typeName])[_ifInheritsVar.ZigName];\n')
 			#_ifInheritsVar.useBackEndNameStack.push(newName)
 			ifInheritsCount = _ifInheritsVar.ifInheritsStack.count  # AssignExpr could pop our _ifInheritsType. We detect that with the count.
 			_ifInheritsVar.ifInheritsStack.push(_ifInheritsType)
 		for stmt in _stmts
-			stmt.writeSharpStmt(sw)
+			stmt.writeZigStmt(sw)
 		if _ifInheritsVar and _ifInheritsVar.ifInheritsStack.count > ifInheritsCount
 			#_ifInheritsVar.useBackEndNameStack.pop
 			_ifInheritsVar.ifInheritsStack.pop
@@ -2518,29 +2504,29 @@ class BlockStmt
 class BreakStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		sw.write('break;\n')
 
 
 class ContinueStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		sw.write('continue;\n')
 
 
 class ExpectStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
-		exceptionTypeRef = _exceptionType.sharpRef
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
+		exceptionTypeRef = _exceptionType.ZigRef
 		gotRightExceptionVarName = '_lh_expect_[_varNumber-1]'  # lh => "local helper"
 		sw.write('bool [gotRightExceptionVarName] = false;\n')
 		sw.write('try ')
-		_block.writeSharpDef(sw)
+		_block.writeZigDef(sw)
 		sw.writeAndIndent('catch ([exceptionTypeRef]) {\n')
 		sw.write('// exactly what is expected\n')
 		sw.write('[gotRightExceptionVarName] = true;\n')
@@ -2564,83 +2550,83 @@ class OldForNumericStmt
 	is partial
 
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
-		csVar = _var.sharpName
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
+		csVar = _var.ZigName
 		trackLocals = .compiler.willTrackLocals
 		if trackLocals
 			sw.write('for (CobraCoreInternal.CobraImp.SetLocal("[.var.name]", [csVar]=')
 		else
 			sw.write('for ([csVar]=')
-		_start.writeSharpDef(sw)
+		_start.writeZigDef(sw)
 		if trackLocals
 			sw.write(')')
 		if _var.type.isDynamic
 			sw.write('; CobraCoreInternal.CobraImp.DynamicCompare([csVar], ')
-			_stop.writeSharpDef(sw, false)
+			_stop.writeZigDef(sw, false)
 			sw.write(')[if(_dir==1, "<", ">")]0')
 			opName = if(_dir==1, 'op_Addition', 'op_Subtraction')
 			sw.write('; [csVar]=CobraCoreInternal.CobraImp.DynamicOp("[opName]", [csVar], ')
 			if _step
-				_step.writeSharpDef(sw, false)
+				_step.writeZigDef(sw, false)
 			else
 				sw.write('1')
 			sw.write(')')
 		else
 			sw.write('; [csVar]')
 			sw.write(if(_dir==1, '<', '>'))
-			_stop.writeSharpDef(sw)
+			_stop.writeZigDef(sw)
 			sw.write('; ')
 			if _step
 				if _dir==1
 					sw.write('[csVar]+=')
 				else
 					sw.write('[csVar]-=')
-				_step.writeSharpDef(sw)
+				_step.writeZigDef(sw)
 			else
 				if _dir==1
 					sw.write('[csVar]++')
 				else
 					sw.write('[csVar]--')
 		sw.write(')')
-		_block.writeSharpDef(sw)
+		_block.writeZigDef(sw)
 
 
 class ForNumericStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		if _var.type.isDynamic
-			_writeSharpDefForDynamic(sw)
+			_writeZigDefForDynamic(sw)
 		else
-			_writeSharpDefForStatic(sw)
+			_writeZigDefForStatic(sw)
 	
-	def _writeSharpDefForDynamic(sw as CurlyWriter)
+	def _writeZigDefForDynamic(sw as CurlyWriter)
 		# TODO: this is the old numeric for loop behavior. 
-		csVar = _var.sharpName
+		csVar = _var.ZigName
 		trackLocals = .compiler.willTrackLocals
 		if trackLocals
 			sw.write('for (CobraCoreInternal.CobraImp.SetLocal("[.var.name]", [csVar]=')
 		else
 			sw.write('for ([csVar]=')
-		_start.writeSharpDef(sw)
+		_start.writeZigDef(sw)
 		if trackLocals
 			sw.write(')')
 		sw.write('; CobraCoreInternal.CobraImp.DynamicCompare([csVar], ')
-		_stop.writeSharpDef(sw, false)
+		_stop.writeZigDef(sw, false)
 		sw.write(')[if(_dir==1, "<", ">")]0')
 		opName = if(_dir==1, 'op_Addition', 'op_Subtraction')
 		sw.write('; [csVar]=CobraCoreInternal.CobraImp.DynamicOp("[opName]", [csVar], ')
 		if _step
-			_step.writeSharpDef(sw, false)
+			_step.writeZigDef(sw, false)
 		else
 			sw.write('1')
 		sw.write(')')
 		sw.write(')')
-		_block.writeSharpDef(sw)
+		_block.writeZigDef(sw)
 
-	def _writeSharpDefForStatic(sw as CurlyWriter)
+	def _writeZigDefForStatic(sw as CurlyWriter)
 		"""
 		Pseudo example:
 			Cobra:
@@ -2664,56 +2650,56 @@ class ForNumericStmt
 		"""
 		trackLocals = .compiler.willTrackLocals
 		sw.write('{ // for [.var.name] in [.start.toCobraSource] : [.stop.toCobraSource]' + if(.step, ' : [.step.toCobraSource]', '') + '\n')
-		sharpVar = _var.sharpName
-		sharpStart = '_lh_start_[.serialNum]'
-		sharpStop = '_lh_stop_[.serialNum]'
-		sharpStep = '_lh_step_[.serialNum]'
-		sharpDir = '_lh_dir_[.serialNum]'
-		sharpType = _var.type.sharpRef
+		ZigVar = _var.ZigName
+		ZigStart = '_lh_start_[.serialNum]'
+		ZigStop = '_lh_stop_[.serialNum]'
+		ZigStep = '_lh_step_[.serialNum]'
+		ZigDir = '_lh_dir_[.serialNum]'
+		ZigType = _var.type.ZigRef
 
-		sw.write('[sharpType] [sharpStart] = ')
-		.start.writeSharpDef(sw)
+		sw.write('[ZigType] [ZigStart] = ')
+		.start.writeZigDef(sw)
 		sw.write(';\n')
 		
 		if .stop inherits IntegerLit
-			sharpStop = (.stop to IntegerLit).asSharp
+			ZigStop = (.stop to IntegerLit).asZig
 		else
-			sw.write('[sharpType] [sharpStop] = ')
-			.stop.writeSharpDef(sw)
+			sw.write('[ZigType] [ZigStop] = ')
+			.stop.writeZigDef(sw)
 			sw.write(';\n')
 
 		isSimpleStep = false
 		step = .step
 		if step is nil
-			sharpStep = '1'
+			ZigStep = '1'
 			isSimpleStep = true
 		else if step inherits IntegerLit
-			sharpStep = step.asSharp
+			ZigStep = step.asZig
 			isSimpleStep = step.valueAsInt > 0
 		else
-			sw.write('[sharpType] [sharpStep] = ')
-			step.writeSharpDef(sw)
+			sw.write('[ZigType] [ZigStep] = ')
+			step.writeZigDef(sw)
 			sw.write(';\n')
 
 		if not isSimpleStep
-			sw.write('int [sharpDir] = [sharpStep] < 0 ? -1 : +1;\n')
+			sw.write('int [ZigDir] = [ZigStep] < 0 ? -1 : +1;\n')
 
 		sw.write('for(')
 		if trackLocals
-			sw.write('CobraCoreInternal.CobraImp.SetLocal("[.var.name]", [sharpVar] = [sharpStart])')
+			sw.write('CobraCoreInternal.CobraImp.SetLocal("[.var.name]", [ZigVar] = [ZigStart])')
 		else
-			sw.write('[sharpVar] = [sharpStart]')		
+			sw.write('[ZigVar] = [ZigStart]')		
 		if isSimpleStep
-			sw.write('; [sharpVar] < [sharpStop] ; ')
+			sw.write('; [ZigVar] < [ZigStop] ; ')
 		else
-			sw.write('; ([sharpDir]==1) ? [sharpVar] < [sharpStop] : [sharpVar] > [sharpStop]; ')
+			sw.write('; ([ZigDir]==1) ? [ZigVar] < [ZigStop] : [ZigVar] > [ZigStop]; ')
 		if trackLocals
-			sw.write('CobraCoreInternal.CobraImp.SetLocal("[.var.name]", [sharpVar] += [sharpStep])')
+			sw.write('CobraCoreInternal.CobraImp.SetLocal("[.var.name]", [ZigVar] += [ZigStep])')
 		else
-			sw.write('[sharpVar] += [sharpStep]')		
+			sw.write('[ZigVar] += [ZigStep]')		
 		sw.write(') ')
 
-		_block.writeSharpDef(sw, false)
+		_block.writeZigDef(sw, false)
 
 		sw.dedent
 		sw.write('}\n')
@@ -2723,44 +2709,44 @@ class ForNumericStmt
 class ForEnumerableStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		# in a C# foreach, (1) you must declare a new variable, (2) you cannot reassign it and (3) you cannot access it after the loop
 		# these constraints don't exist in Cobra
 		helperName = '_lh_for_[_var.name]_[_varNumber]'
-		sw.write('foreach ([_var.type.sharpRef] [helperName] in ')
+		sw.write('foreach ([_var.type.ZigRef] [helperName] in ')
 
-		# TODO: the sharpRef of a type is not qualified and there is no using System.Collections;
-		# _what.writeSharpDefInContext(sw, false)
+		# TODO: the ZigRef of a type is not qualified and there is no using System.Collections;
+		# _what.writeZigDefInContext(sw, false)
 		if _what.type.isDynamic
 			sw.write('CobraCoreInternal.CobraImp.GetEnumerable(')
-			_what.writeSharpDef(sw, false)
+			_what.writeZigDef(sw, false)
 			sw.write(')')
 		else
-			_what.writeSharpDef(sw, false)
+			_what.writeZigDef(sw, false)
 
 		sw.write(')')
-		stmt = '[.var.sharpName] = [helperName]'
+		stmt = '[.var.ZigName] = [helperName]'
 		if .compiler.willTrackLocals
 			stmt = 'CobraCoreInternal.CobraImp.SetLocal("[.var.name]", [stmt])'
 		stmt += ';\n'
-		_block.writeSharpDef(sw, stmt)
+		_block.writeZigDef(sw, stmt)
 
 
 class IfStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
+	def writeZigDef(sw as CurlyWriter)
 		# if you're looking for if-inherits related code gen, see BlockStmt
-		base.writeSharpDef(sw)
+		base.writeZigDef(sw)
 		sw.write('if (')
-		_cond.writeSharpDef(sw, false)
+		_cond.writeZigDef(sw, false)
 		sw.write(')')
-		_trueStmts.writeSharpDef(sw, false)
+		_trueStmts.writeZigDef(sw, false)
 		sw.dedent
 		if _falseStmts
 			sw.write('} else')
-			_falseStmts.writeSharpDef(sw, false)
+			_falseStmts.writeZigDef(sw, false)
 			sw.dedent
 		sw.write('}\n')
 
@@ -2768,38 +2754,38 @@ class IfStmt
 class ListenOrIgnoreStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
-		_event.writeSharpDef(sw, false)
-		sw.write(' [.sharpOperator] ')
-		_target.writeSharpDef(sw, false)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
+		_event.writeZigDef(sw, false)
+		sw.write(' [.ZigOperator] ')
+		_target.writeZigDef(sw, false)
 		sw.writeLine(';')
 
-	get sharpOperator as String is abstract
+	get ZigOperator as String is abstract
 
 
 class ListenStmt
 	is partial
 
-	get sharpOperator as String is override
+	get ZigOperator as String is override
 		return '+='
 
 
 class IgnoreStmt
 	is partial
 
-	get sharpOperator as String is override
+	get ZigOperator as String is override
 		return '-='
 
 
 class LockStmt is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		sw.write('lock (')
-		_expr.writeSharpDef(sw, false)
+		_expr.writeZigDef(sw, false)
 		sw.write(')')
-		_block.writeSharpDef(sw)
+		_block.writeZigDef(sw)
 
 
 class PassStmt
@@ -2811,10 +2797,10 @@ class PassStmt
 class PrintStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		if _destination
-			_destination.writeSharpDef(sw, true)
+			_destination.writeZigDef(sw, true)
 			methodName = if(_stop, 'Write', 'WriteLine')
 			sw.write('.[methodName](')
 		else
@@ -2823,7 +2809,7 @@ class PrintStmt
 		sep = ''
 		for arg in _args
 			sw.write('[sep]CobraCoreInternal.CobraImp._printStringMaker.MakeString(')
-			arg.writeSharpDef(sw)
+			arg.writeZigDef(sw)
 			sw.write(')')
 			sep = '+" "+'
 		sw.writeLine(');')
@@ -2832,13 +2818,13 @@ class PrintStmt
 class PrintRedirectStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		sw.write('CobraCoreInternal.CobraImp.PushPrintTo(')
-		_destination.writeSharpDef(sw, false)
+		_destination.writeZigDef(sw, false)
 		sw.write(');\n')
 		sw.write('try')
-		_block.writeSharpDef(sw)
+		_block.writeZigDef(sw)
 		sw.write('finally {\n')
 		sw.indent
 		sw.write('CobraCoreInternal.CobraImp.PopPrintTo();\n')
@@ -2848,17 +2834,17 @@ class PrintRedirectStmt
 
 class RaiseStmt is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		name = .name.capitalized
 		localName = '_lh_event_[.serialNum]'
 		sw.writeLine('// raise [.name] ...')
 		this_ = if(_definition and _definition.isShared, '', 'this.')
-		sw.write('{ [_eventType.sharpRef] [localName] = [this_][name]; if ([localName]!=null) [localName](')
+		sw.write('{ [_eventType.ZigRef] [localName] = [this_][name]; if ([localName]!=null) [localName](')
 		sep = ''
 		for expr in _args
 			sw.write(sep)
-			expr.writeSharpDef(sw, false)
+			expr.writeZigDef(sw, false)
 			sep = ', '
 		sw.write('); }\n')
 
@@ -2866,8 +2852,8 @@ class RaiseStmt is partial
 class ReturnStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		ensurePart = .compiler.curCodeMember.ensurePart
 		willEnsure = ensurePart and ensurePart.willGenerateCode
 		if willEnsure
@@ -2875,11 +2861,11 @@ class ReturnStmt
 		if _expr
 			if willEnsure and _backEndResultVarName and _backEndResultVarName.length
 				sw.write('return [_backEndResultVarName]=')
-				_expr.writeSharpDefInContext(sw)
+				_expr.writeZigDefInContext(sw)
 				sw.write(';\n')
 			else
 				sw.write('return ')
-				_expr.writeSharpDefInContext(sw, false)
+				_expr.writeZigDefInContext(sw, false)
 				sw.write(';\n')
 		else
 			sw.write('return;\n')
@@ -2894,45 +2880,45 @@ class TraceStmt
 class TraceLocationStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		if .includeTraces
-			sw.write('CobraCoreInternal.CobraCore.Tracer.Trace([.sharpSourceSite]);\n')
+			sw.write('CobraCoreInternal.CobraCore.Tracer.Trace([.ZigSourceSite]);\n')
 
 
 class TraceAllStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		if .includeTraces
-			sw.write('CobraCoreInternal.CobraCore.Tracer.Trace([.sharpSourceSite], "this", [_codePart.sharpThis]')
+			sw.write('CobraCoreInternal.CobraCore.Tracer.Trace([.ZigSourceSite], "this", [_codePart.ZigThis]')
 			for param in _codePart.params
-				sw.write(', "[param.name]", [param.sharpName]')
+				sw.write(', "[param.name]", [param.ZigName]')
 			for local in _codePart.locals
-				sw.write(', "[local.name]", [local.sharpName]')
+				sw.write(', "[local.name]", [local.ZigName]')
 			sw.write(');\n')
 
 
 class TraceExprsStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		if .includeTraces
-			sw.write('CobraCoreInternal.CobraCore.Tracer.Trace([.sharpSourceSite]')
+			sw.write('CobraCoreInternal.CobraCore.Tracer.Trace([.ZigSourceSite]')
 			sep = ', '
 			for expr in _exprs
-				sw.write('[sep][Utils.sharpStringLiteralFor(expr.toCobraSource)][sep]')
-				expr.writeSharpDef(sw, false)
+				sw.write('[sep][Utils.ZigStringLiteralFor(expr.toCobraSource)][sep]')
+				expr.writeZigDef(sw, false)
 			sw.write(');\n')
 
 
 class TryStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		if _successBlock
 			# C# has no "success" (or in Python, "else") block for the "try" statement
 			# so it has to be simulated
@@ -2942,36 +2928,36 @@ class TryStmt
 				sw.write('try {\n')
 				sw.indent
 			sw.write('try')
-			_tryBlock.writeSharpDef(sw, false)
+			_tryBlock.writeZigDef(sw, false)
 			sw.dedent
 			sw.write('}\n')
 			if _catchBlocks.count
 				.writeCatchBlocks(sw, helperName)
 
 			sw.write('finally { if ([helperName])')
-			_successBlock.writeSharpDef(sw)
+			_successBlock.writeZigDef(sw)
 			sw.write('}\n')
 
 			if _finallyBlock
 				sw.dedent
 				sw.write('}\n')
 				sw.write('finally')
-				_finallyBlock.writeSharpDef(sw)
+				_finallyBlock.writeZigDef(sw)
 		else
 			sw.write('try')
-			_tryBlock.writeSharpDef(sw)
+			_tryBlock.writeZigDef(sw)
 			.writeCatchBlocks(sw, nil)
 			if _finallyBlock
 				sw.write('finally')
-				_finallyBlock.writeSharpDef(sw)
+				_finallyBlock.writeZigDef(sw)
 
 	def writeCatchBlocks(sw as CurlyWriter, localSuccessVar as String?)
 		for eb in _catchBlocks
 			sw.write('catch')
 			if eb.type
-				sw.write(' ([eb.type.sharpRef]')
+				sw.write(' ([eb.type.ZigRef]')
 				if eb.varName
-					helperName = eb.sharpHelperName
+					helperName = eb.ZigHelperName
 					sw.write(' [helperName]')
 				sw.write(')')
 			sb = StringBuilder()
@@ -2983,34 +2969,34 @@ class TryStmt
 				trackLocals = .compiler.willTrackLocals
 				if trackLocals
 					sb.append('CobraCoreInternal.CobraImp.SetLocal("[eb.varName]", ')
-				sb.append('[eb.sharpVarName] = [helperName]')
+				sb.append('[eb.ZigVarName] = [helperName]')
 				if trackLocals
 					sb.append(')')
 				sb.append(';\n')
-			eb.block.writeSharpDef(sw, sb.toString)
+			eb.block.writeZigDef(sw, sb.toString)
 
 
 class CatchBlock
 	is partial
 
-	var _sharpHelperName as String?
+	var _ZigHelperName as String?
 
-	get sharpHelperName from var
+	get ZigHelperName from var
 
-	get sharpVarName as String
-		return _var.sharpName
+	get ZigVarName as String
+		return _var.ZigName
 
 
 class ThrowStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		sw.write('throw ')
 		if _expr
 			if _expr.type.isDynamic
 				sw.write('((System.Exception)')
-			_expr.writeSharpDef(sw, false)
+			_expr.writeZigDef(sw, false)
 			if _expr.type.isDynamic
 				sw.write(')')
 		sw.write(';\n')
@@ -3019,14 +3005,14 @@ class ThrowStmt
 class UsingStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
-		name = _var.sharpName
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
+		name = _var.ZigName
 		sw.write('// using\n')
 		sw.write('[name] = ')
-		_initExpr.writeSharpDef(sw)
+		_initExpr.writeZigDef(sw)
 		sw.write(';\ntry')
-		_block.writeSharpDef(sw)
+		_block.writeZigDef(sw)
 		sw.write('finally {\n')
 		sw.indent
 		if _var.type.isReference
@@ -3039,24 +3025,24 @@ class UsingStmt
 class WhileStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		sw.write('while (')
-		_expr.writeSharpDef(sw, false)
+		_expr.writeZigDef(sw, false)
 		sw.write(')')
-		_block.writeSharpDef(sw)
+		_block.writeZigDef(sw)
 
 
 class PostWhileStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter) is override
-		# base.writeSharpDef(sw) - don't generate the other form of while loop
+	def writeZigDef(sw as CurlyWriter) is override
+		# base.writeZigDef(sw) - don't generate the other form of while loop
 		sw.write('do')
-		_block.writeSharpDef(sw, false)
+		_block.writeZigDef(sw, false)
 		sw.dedent
 		sw.write('} while (')
-		_expr.writeSharpDef(sw, false)
+		_expr.writeZigDef(sw, false)
 		sw.write(');\n')
 
 
@@ -3069,16 +3055,16 @@ class YieldStmt
 class YieldBreakStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		sw.write('yield break;\n')
 
 
 class YieldReturnStmt
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		ensurePart = .compiler.curCodeMember.ensurePart
 		willEnsure = ensurePart and ensurePart.willGenerateCode
 		if willEnsure
@@ -3090,11 +3076,11 @@ class YieldReturnStmt
 				# sw.write('yield return [backEndResultVarName]=')
 				# so for now:
 				sw.write('yield return ')
-				_expr.writeSharpDefInContext(sw)
+				_expr.writeZigDefInContext(sw)
 				sw.write(';\n')
 			else
 				sw.write('yield return ')
-				_expr.writeSharpDefInContext(sw)
+				_expr.writeZigDefInContext(sw)
 				sw.write(';\n')
 		else
 			sw.write('yield return;\n')
@@ -3102,8 +3088,8 @@ class YieldReturnStmt
 
 class MultiTargetAssignStatement is partial
 
-	def writeSharpDef(sw as CurlyWriter)
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter)
+		base.writeZigDef(sw)
 		if _rightValues
 			sw.write('{ // multi-assign \n')
 			nums = List<of int>()
@@ -3113,17 +3099,17 @@ class MultiTargetAssignStatement is partial
 				# updated rather that in _rightValues, hence this check:
 				if value.transformedTo, value = value.transformedTo to Expr
 				num = .compiler.curBox.makeNextPrivateSerialNumber
-				sw.write('[value.type.sharpRef] lh_rvalue_[num] = ')
-				value.writeSharpDef(sw, false)
+				sw.write('[value.type.ZigRef] lh_rvalue_[num] = ')
+				value.writeZigDef(sw, false)
 				sw.write(';\n')
 				nums.add(num)			
 			for i in _rightValues.count
 				assign = _block.stmts[i] to AssignExpr
-				assign.writeSharpDefWithRight(sw, false)  # false = do not write right side
+				assign.writeZigDefWithRight(sw, false)  # false = do not write right side
 				sw.write('lh_rvalue_[nums[i]];\n')
 			sw.write('}\n')
 		else
-			_block.writeSharpDef(sw)
+			_block.writeZigDef(sw)
 
 ##
 ## Expressions
@@ -3144,10 +3130,10 @@ class Expr
 			if type.size < 32, return true
 		return false
 
-	def writeSharpDefInContext(sw as CurlyWriter)
-		.writeSharpDefInContext(sw, true)
+	def writeZigDefInContext(sw as CurlyWriter)
+		.writeZigDefInContext(sw, true)
 
-	def writeSharpDefInContext(sw as CurlyWriter, parens as bool)
+	def writeZigDefInContext(sw as CurlyWriter, parens as bool)
 		"""
 		When an expression is used where a particular type is expected, such as:
 			# assignment
@@ -3157,75 +3143,75 @@ class Expr
 			obj[x, y]
 		it may need C# typecasting--particularly if it is dynamic typed expression.
 		This method relies on having had its .contextType set beforehand.
-		This method should be invoked instead of `writeSharpDef` in any situation where .contextType was set.
+		This method should be invoked instead of `writeZigDef` in any situation where .contextType was set.
 		"""
 		cast = _contextType and .needsContextCast
 		if cast
 			if parens, sw.write('(')
-			sw.write('([_contextType.sharpRef])(')
-		.writeSharpDef(sw)
+			sw.write('([_contextType.ZigRef])(')
+		.writeZigDef(sw)
 		if cast
 			sw.write(')')
 			if parens, sw.write(')')
 
-	def writeSharpDef(sw as CurlyWriter) is override
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter) is override
+		base.writeZigDef(sw)
 		branch .direction
 			on Direction.In,    pass
 			on Direction.Out,   sw.write('out ')
 			on Direction.InOut, sw.write('ref ')
-		.writeSharpDef(sw, true)
+		.writeZigDef(sw, true)
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool)
+	def writeZigDef(sw as CurlyWriter, parens as bool)
 		pass
 
-	def writeSharpStmt(sw as CurlyWriter) is override
+	def writeZigStmt(sw as CurlyWriter) is override
 		assert .didBindImp
 		sw.node(this)
-		.writeSharpSetLine(sw)
-		.writeSharpDef(sw, false)
+		.writeZigSetLine(sw)
+		.writeZigDef(sw, false)
 		sw.write(';\n')
 
-	def writeSharpBreakdown(sw as CurlyWriter)
+	def writeZigBreakdown(sw as CurlyWriter)
 		sw.write(r'new object[] { 0')
-		.writeSharpBreakdownItems(sw)
+		.writeZigBreakdownItems(sw)
 		sw.write('}, ')
 
-	get willWriteSharpBreakdownItems as bool
+	get willWriteZigBreakdownItems as bool
 		return _direction <> Direction.Out
 
-	def writeSharpBreakdownItems(sw as CurlyWriter)
-		if .willWriteSharpBreakdownItems
-			src = Utils.sharpStringLiteralFor(.toCobraSource)
+	def writeZigBreakdownItems(sw as CurlyWriter)
+		if .willWriteZigBreakdownItems
+			src = Utils.ZigStringLiteralFor(.toCobraSource)
 			sw.write(', [src], ')
-			.writeSharpDefForBreakdown(sw)
+			.writeZigDefForBreakdown(sw)
 
-	def writeSharpDefForBreakdown(sw as CurlyWriter)
-		.writeSharpDef(sw)
+	def writeZigDefForBreakdown(sw as CurlyWriter)
+		.writeZigDef(sw)
 
 
 class NameExpr
 	is partial
 
-	get asSharp as String
-		return _definition.sharpName
+	get asZig as String
+		return _definition.ZigName
 
 
 class AsExpr
 	is partial
 
-	def writeSharpStmt(sw as CurlyWriter) is override
+	def writeZigStmt(sw as CurlyWriter) is override
 		# this happens for declarations like "i as int"
 		sw.write('// [_name] as [_type.name]\n')
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
-		sw.write(.asSharp)
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
+		sw.write(.asZig)
 
 
 class AnonymousMethodExpr
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		# note that C# delegates don't allow explicit return types
 		# C# always infers the return type from the return statement
 		sw.write('delegate')
@@ -3234,20 +3220,20 @@ class AnonymousMethodExpr
 			sep = ''
 			for param in .params
 				sw.write(sep)
-				sw.write('[param.type.sharpRef] [param.sharpName]')
+				sw.write('[param.type.ZigRef] [param.ZigName]')
 				sep = ', '
 			sw.write(')')
-		_method.writeSharpImp(sw, false)  # writes { ... }
+		_method.writeZigImp(sw, false)  # writes { ... }
 
-	def writeSharpDefForBreakdown(sw as CurlyWriter) is override
-		# .writeSharpDef(sw)
+	def writeZigDefForBreakdown(sw as CurlyWriter) is override
+		# .writeZigDef(sw)
 		sw.write('new CobraCoreInternal.CobraDirectString("(anonymous method)")')
 
 
 class LambdaExpr
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		# note that C# delegates don't allow explicit return types
 		# C# always infers the return type from the return statement
 		sw.write('delegate')
@@ -3256,21 +3242,21 @@ class LambdaExpr
 			sep = ''
 			for param in .params
 				sw.write(sep)
-				sw.write('[param.type.sharpRef] [param.sharpName]')
+				sw.write('[param.type.ZigRef] [param.ZigName]')
 				sep = ', '
 			sw.write(')')
 		sw.write('{ return ')
-		.expr.writeSharpDef(sw, false)
+		.expr.writeZigDef(sw, false)
 		sw.write(';}')
 
-	def writeSharpDefForBreakdown(sw as CurlyWriter) is override
-		# .writeSharpDef(sw)
+	def writeZigDefForBreakdown(sw as CurlyWriter) is override
+		# .writeZigDef(sw)
 		sw.write('new CobraCoreInternal.CobraDirectString("(lambda)")')
 
 
 class CallExpr is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		assert .superNode inherits DotExpr
 		name = .name
 		if _definition inherits BoxMember and (_definition to BoxMember).binaryName
@@ -3282,7 +3268,7 @@ class CallExpr is partial
 			sw.write('<')
 			sep = ''
 			for genericArgType in _genericArgTypes
-				sw.write(sep + genericArgType.sharpRef)
+				sw.write(sep + genericArgType.ZigRef)
 				sep = ', '
 			sw.write('>')
 		sw.write('(')
@@ -3290,97 +3276,97 @@ class CallExpr is partial
 		for arg in _args
 			sw.write(sep)
 			if arg inherits AssignExpr  # named parameter
-				# can't do arg.left.writeSharpDef as binding invariants are incomplete
+				# can't do arg.left.writeZigDef as binding invariants are incomplete
 				# C# form is:  name:value
 				sw.write((arg.left to IdentifierExpr).name) 
 				sw.write(':')
-				arg.right.writeSharpDef(sw)
+				arg.right.writeZigDef(sw)
 			else	
-				arg.writeSharpDefInContext(sw)
+				arg.writeZigDefInContext(sw)
 			sep = ', '
 		sw.write(')')
 
-	def writeSharpBreakdownItems(sw as CurlyWriter) is override
+	def writeZigBreakdownItems(sw as CurlyWriter) is override
 		# leaving out the base call is intentional:
-		# base.writeSharpBreakdownItems(sw)
+		# base.writeZigBreakdownItems(sw)
 		sw.write(', +1')
 		for expr in _args
-			expr.writeSharpBreakdownItems(sw)
+			expr.writeZigBreakdownItems(sw)
 		sw.write(', -1')
 
 
 class EnumCallExpr
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		if parens
 			sw.write('(')
 		if _args.count == 0
-			sw.write('default([_definition.sharpRef])')
+			sw.write('default([_definition.ZigRef])')
 		else
 			sep = ''
 			for member in _members
 				sw.write(sep)
-				sw.write(member.sharpRef)
+				sw.write(member.ZigRef)
 				sep = '|'
 		if parens
 			sw.write(')')
 
-	def writeSharpBreakdownItems(sw as CurlyWriter)
-		base.writeSharpBreakdownItems(sw)
+	def writeZigBreakdownItems(sw as CurlyWriter)
+		base.writeZigBreakdownItems(sw)
 		sw.write(', +1')
 		for member in _members
 			sw.write(', ')
-			sw.write(member.sharpRef)
+			sw.write(member.ZigRef)
 		sw.write(', -1')
 
 
 class ForExpr
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		# C#:  CobraImp.For(stuff, delegate(x as int) { return x*x })
 		# C#:  CobraImp.For(stuff, delegate(x as int) { if (x<0) return x*x; })
 		inType = .inferredType
 		outType = _getExpr.type
-		sw.write('CobraCoreInternal.CobraImp.For<[inType.sharpRef],[outType.sharpRef]>(')
+		sw.write('CobraCoreInternal.CobraImp.For<[inType.ZigRef],[outType.ZigRef]>(')
 		if _stop
 			# C#:  Numeric For Expr CobraImp.For(start, stop, step, delegate(x as int) { return x*x; })
-			_start.writeSharpDef(sw, false)
+			_start.writeZigDef(sw, false)
 			sw.write(', ')
-			_stop.writeSharpDef(sw, false)
+			_stop.writeZigDef(sw, false)
 			sw.write(', ')
-			_step.writeSharpDef(sw, false)
+			_step.writeZigDef(sw, false)
 		else
-			_what.writeSharpDef(sw, false)
+			_what.writeZigDef(sw, false)
 		sw.write(', ')
 		helperName = '_lh_for_[_var.name]_[_varNumber]'
 		if _whereExpr is nil
-			sw.write('delegate([inType.sharpRef] [helperName]) {\n')
+			sw.write('delegate([inType.ZigRef] [helperName]) {\n')
 			sw.indent
-			sw.write('[_var.sharpName] = [helperName];\n')
+			sw.write('[_var.ZigName] = [helperName];\n')
 			sw.write('return ')
-			_getExpr.writeSharpDef(sw, false)
+			_getExpr.writeZigDef(sw, false)
 			sw.write(';\n')
 			sw.dedent
 			sw.write('})')
 		else
 			outHelperName = helperName + '_out'
-			sw.write('delegate([inType.sharpRef] [helperName], out [outType.sharpRef] [outHelperName]) {\n')
+			sw.write('delegate([inType.ZigRef] [helperName], out [outType.ZigRef] [outHelperName]) {\n')
 			sw.indent
-			sw.write('[_var.sharpName] = [helperName];\n')
+			sw.write('[_var.ZigName] = [helperName];\n')
 			sw.write('if (')
-			_whereExpr.writeSharpDef(sw, false)
+			_whereExpr.writeZigDef(sw, false)
 			sw.write(') {\n')
 			sw.indent
 			sw.write('[outHelperName] = ')
-			_getExpr.writeSharpDef(sw, false)
+			_getExpr.writeZigDef(sw, false)
 			sw.write(';\n')
 			sw.write('return true;\n')
 			sw.dedent
 			sw.write('} else {\n')
 			sw.indent
-			sw.write('[outHelperName] = [outType.sharpInit];\n')
+			sw.write('[outHelperName] = [outType.ZigInit];\n')
 			sw.write('return false;\n')
 			sw.dedent
 			sw.write('}\n')
@@ -3390,17 +3376,17 @@ class ForExpr
 			
 class TryCatchExpr is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
-		sw.write('CobraCoreInternal.CobraImp.RunTryCatchExpr<[_type.sharpRef]')
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
+		sw.write('CobraCoreInternal.CobraImp.RunTryCatchExpr<[_type.ZigRef]')
 		if _excType
 			sw.write(',')
-			sw.write(_excType.sharpRef)
+			sw.write(_excType.ZigRef)
 		sw.write('>(')
 		# try-expr delegate
 		sw.write('delegate() {\n')
 		sw.indent
 		sw.write('return (')
-		.what.writeSharpDef(sw, false)
+		.what.writeZigDef(sw, false)
 		sw.write(');\n')
 		sw.dedent
 		sw.write('}')
@@ -3409,7 +3395,7 @@ class TryCatchExpr is partial
 		sw.write('delegate() {\n')
 		sw.indent
 		sw.write('return (')
-		_getExpr.writeSharpDef(sw, false)	
+		_getExpr.writeZigDef(sw, false)	
 		sw.write(');\n')
 		sw.dedent
 		sw.write('})')
@@ -3418,30 +3404,30 @@ class TryCatchExpr is partial
 class IdentifierExpr
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		# recall that this cannot be the right side of "foo.bar" since that is a MemberExpr
-		sharp = .sharpQualification + .sharpName
-		if _requiresTypeOf, sharp = 'typeof(' + sharp + ')'
-		sw.write(sharp)
+		Zig = .ZigQualification + .ZigName
+		if _requiresTypeOf, Zig = 'typeof(' + Zig + ')'
+		sw.write(Zig)
 
-	get sharpQualification as String
+	get ZigQualification as String
 		qual = ''
 		if .definition inherits IVar
 			# the only definition that has no parentNameSpace in practice is IVar
 			pass
 		else
 			pn = .definition.parentNameSpace
-			if pn, qual = pn.sharpQualifier
+			if pn, qual = pn.ZigQualifier
 		return qual
 		
-	get sharpName as String
+	get ZigName as String
 		assert .didBindImp
 		assert .namedDefinition
 		assert not .type inherits UnspecifiedType
 		if .superNode inherits DotExpr
 			assert this is not (.superNode to DotExpr).right  # should be a CallExpr or MemberExpr instead
 		defi = .namedDefinition
-		return defi.sharpName
+		return defi.ZigName
 
 	def _requiresTypeOf as bool
 		# C# often requires typeof(Foo) instead of just plain Foo
@@ -3454,23 +3440,23 @@ class IdentifierExpr
 				return false
 		return true
 
-	def writeSharpStmt(sw as CurlyWriter) is override
+	def writeZigStmt(sw as CurlyWriter) is override
 		assert .isCalling
 		sw.write('[_name]();')
 
-	get sharpAssignmentNames as List<of String>?
+	get ZigAssignmentNames as List<of String>?
 		require
 			.didBindImp
 			.namedDefinition
 		body
 			if _definition inherits IVar
-				return _definition.sharpAssignmentNames
+				return _definition.ZigAssignmentNames
 			else
 				return nil
 
-	def writeSharpDefForBreakdown(sw as CurlyWriter) is override
-		name = .sharpQualification + .sharpName
-		# _requiresTypeOf may return false, but in the sharp def breakdown, typeof() is always required
+	def writeZigDefForBreakdown(sw as CurlyWriter) is override
+		name = .ZigQualification + .ZigName
+		# _requiresTypeOf may return false, but in the Zig def breakdown, typeof() is always required
 		if .isTypeReference, name = 'typeof(' + name + ')'
 		sw.write(name)
 
@@ -3478,45 +3464,45 @@ class IdentifierExpr
 class IfExpr
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		cond, tpart, fpart = .cond, .tpart, .fpart
 		cast = tpart.type <> fpart.type
 		# C# doesn't do the "greatest common denominator" thing like Cobra does, so some casting is in order
 		sw.write('(')
-		cond.writeSharpDef(sw)
+		cond.writeZigDef(sw)
 		sw.write('?')
-		if cast, sw.write('([.type.sharpRef])(')
-		tpart.writeSharpDef(sw)
+		if cast, sw.write('([.type.ZigRef])(')
+		tpart.writeZigDef(sw)
 		if cast, sw.write(')')
 		sw.write(':')
-		if cast, sw.write('([.type.sharpRef])(')
-		fpart.writeSharpDef(sw)
+		if cast, sw.write('([.type.ZigRef])(')
+		fpart.writeZigDef(sw)
 		if cast, sw.write(')')
 		sw.write(')')
 
-	def writeSharpBreakdownItems(sw as CurlyWriter)
-		base.writeSharpBreakdownItems(sw)
+	def writeZigBreakdownItems(sw as CurlyWriter)
+		base.writeZigBreakdownItems(sw)
 
 		sw.write(', +1') # indent
 
 		cond, tpart, fpart = .cond, .tpart, .fpart
-		cond.writeSharpBreakdownItems(sw)
+		cond.writeZigBreakdownItems(sw)
 		# only one of the target expressions is actually evaluated
 
 		# tpart:
-		src = Utils.sharpStringLiteralFor(tpart.toCobraSource)
+		src = Utils.ZigStringLiteralFor(tpart.toCobraSource)
 		sw.write(', [src], new CobraCoreInternal.CobraDirectString(')
-		cond.writeSharpDefForBreakdown(sw)
+		cond.writeZigDefForBreakdown(sw)
 		sw.write(' ? CobraCoreInternal.CobraCore.ToTechString(')
-		tpart.writeSharpDefForBreakdown(sw)
+		tpart.writeZigDefForBreakdown(sw)
 		sw.write(') : "(not-evaluated)")')
 
 		# fpart:
-		src = Utils.sharpStringLiteralFor(fpart.toCobraSource)
+		src = Utils.ZigStringLiteralFor(fpart.toCobraSource)
 		sw.write(', [src], new CobraCoreInternal.CobraDirectString(')
-		cond.writeSharpDefForBreakdown(sw)
+		cond.writeZigDefForBreakdown(sw)
 		sw.write(' ? "(not-evaluated)" : CobraCoreInternal.CobraCore.ToTechString(')
-		fpart.writeSharpDefForBreakdown(sw)
+		fpart.writeZigDefForBreakdown(sw)
 		sw.write('))')
 
 		sw.write(', -1') # dedent
@@ -3525,13 +3511,13 @@ class IfExpr
 class IndexExpr
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		if _target.type.isDynamic
 			sw.write('CobraCoreInternal.CobraImp.GetIndexerValue(')
-			_target.writeSharpDef(sw, false)
+			_target.writeZigDef(sw, false)
 			for expr in _args
 				sw.write(', ')
-				expr.writeSharpDef(sw, false)
+				expr.writeZigDef(sw, false)
 			sw.write(')')
 			return
 		if parens
@@ -3542,104 +3528,104 @@ class IndexExpr
 				sw.write(_target.name)
 				handled = true
 		if not handled
-			_target.writeSharpDef(sw)
+			_target.writeZigDef(sw)
 		sw.write(r'[')
 		sep = ''
 		for expr in _args
 			sw.write(sep)
-			expr.writeSharpDefInContext(sw)
+			expr.writeZigDefInContext(sw)
 			sep = ', '
 		sw.write(']')
 		if parens
 			sw.write(')')
 
-	def writeSharpBreakdownItems(sw as CurlyWriter)
-		base.writeSharpBreakdownItems(sw)
+	def writeZigBreakdownItems(sw as CurlyWriter)
+		base.writeZigBreakdownItems(sw)
 		sw.write(', +1')
-		_target.writeSharpBreakdownItems(sw)
+		_target.writeZigBreakdownItems(sw)
 		for expr in _args
-			expr.writeSharpBreakdownItems(sw)
+			expr.writeZigBreakdownItems(sw)
 		sw.write(', -1')
 
 
 class IsNilExpr
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		if parens
 			sw.write('(')
 		sw.write('(')
-		_expr.writeSharpDef(sw)
+		_expr.writeZigDef(sw)
 		sw.write(')')
 		sw.write('==null')
 		if parens
 			sw.write(')')
 
-	def writeSharpBreakdownItems(sw as CurlyWriter)
-		base.writeSharpBreakdownItems(sw)
-		_expr.writeSharpBreakdownItems(sw)
+	def writeZigBreakdownItems(sw as CurlyWriter)
+		base.writeZigBreakdownItems(sw)
+		_expr.writeZigBreakdownItems(sw)
 
 
 class IsNotNilExpr
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		if parens, sw.write('(')
 		sw.write('(')
-		_expr.writeSharpDef(sw)
+		_expr.writeZigDef(sw)
 		sw.write(')')
 		sw.write('!=null')
 		if parens, sw.write(')')
 
-	def writeSharpBreakdownItems(sw as CurlyWriter)
-		base.writeSharpBreakdownItems(sw)
-		_expr.writeSharpBreakdownItems(sw)
+	def writeZigBreakdownItems(sw as CurlyWriter)
+		base.writeZigBreakdownItems(sw)
+		_expr.writeZigBreakdownItems(sw)
 
 
 class MemberExpr is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		assert .superNode inherits DotExpr
 		if _definition inherits BoxMember
 			name = _definition.binaryName
 		else if _definition inherits EnumMember
-			name = _definition.sharpName
+			name = _definition.ZigName
 		if name is nil, name = _name.capitalized
 		sw.write(name)
 		if _definition and (_definition.isMethod or _name=='toString') and not _isReference  # TODO: axe the 'toString' check
 			sw.write('()')
 
-	def writeSharpBreakdownItems(sw as CurlyWriter) is override
+	def writeZigBreakdownItems(sw as CurlyWriter) is override
 		pass
 
 
 class OldExpr
 	is partial
 
-	var _sharpVarName as String?
+	var _ZigVarName as String?
 
-	pro sharpVarName from var
+	pro ZigVarName from var
 
-	def writeSharpAssignment(sw as CurlyWriter)
+	def writeZigAssignment(sw as CurlyWriter)
 		require
 			.didBindImp
-			.sharpVarName
+			.ZigVarName
 			.type
 		body
-			sw.write('[.type.sharpRef] [_sharpVarName] = ')
-			_expr.writeSharpDef(sw)
+			sw.write('[.type.ZigRef] [_ZigVarName] = ')
+			_expr.writeZigDef(sw)
 			sw.write(';\n')
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
-		assert _sharpVarName
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
+		assert _ZigVarName
 		# this gets called when generating the `ensure` code
-		sw.write(_sharpVarName)
+		sw.write(_ZigVarName)
 
 
 class PostCallExpr
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		if _helperMethod
 			sw.write(_helperMethod.name + '(')
 			sep = ''
@@ -3647,7 +3633,7 @@ class PostCallExpr
 				sw.write(sep)
 				if arg inherits AssignExpr
 					arg = arg.right
-				arg.writeSharpDefInContext(sw, false)
+				arg.writeZigDefInContext(sw, false)
 				sep = ','
 			sw.write(')')
 		else
@@ -3658,14 +3644,14 @@ class PostCallExpr
 			if expr inherits TypeExpr
 				if expr.containedType inherits ArrayType
 					# arrays
-					_writeNewCall(sw, nil, (expr.containedType to ArrayType).theWrappedType.sharpRef, false) 
+					_writeNewCall(sw, nil, (expr.containedType to ArrayType).theWrappedType.ZigRef, false) 
 				else
 					_writeNewCall(sw, expr, '', true) 
 			else if expr inherits IdentifierExpr
 				if expr.isTypeReference
 					_writeNewCall(sw, expr, '', true) 
 				else if expr.receiverType inherits GenericParam # TODO: shouldn't expr.isTypeReference above have caught this?
-					_writeNewCall(sw, nil, expr.receiverType.sharpRef, true) 
+					_writeNewCall(sw, nil, expr.receiverType.ZigRef, true) 
 				else if expr.type.nonNil.isDescendantOf(.compiler.delegateType)
 					isMethodSig = true
 				else if expr.type.isSystemTypeClass or _type.isDynamic
@@ -3682,24 +3668,24 @@ class PostCallExpr
 			else
 				assert false, expr
 			if isMethodSig
-				expr.writeSharpDef(sw, false)
+				expr.writeZigDef(sw, false)
 				sw.write('(')
-				.writeSharpArgs(sw)
+				.writeZigArgs(sw)
 				sw.write(')')
 			else if isDynamic
 				defi = expr.definition
 				assert not defi inherits Box, expr  # TODO: just curious
-				what = if(defi inherits IType, 'typeof([defi.sharpName])', defi.sharpName to String)
+				what = if(defi inherits IType, 'typeof([defi.ZigName])', defi.ZigName to String)
 				if defi inherits IVar
 					if defi.type.isDynamic
 						what = '(System.Type)' + what
 				# TODO: could speed this up. see http://ayende.com/Blog/archive/2008/02/27/Creating-objects--Perf-implications.aspx
 				sw.write('System.Activator.CreateInstance(')
 				if what == r'[]'  # indexer - something like myList[idx]()
-					expr.writeSharpDef(sw)
+					expr.writeZigDef(sw)
 				else
 					sw.write(what)
-				.writeSharpArgs(sw, ', ')
+				.writeZigArgs(sw, ', ')
 				sw.write(')')
 			if parens, sw.write(')')
 				
@@ -3707,58 +3693,58 @@ class PostCallExpr
 		require expr or exprStr.length >0
 		delimeters = if(isInvocation, '()', r'[]')  # invocation or index deref
 		sw.write('new ')
-		if expr, expr.writeSharpDef(sw)
+		if expr, expr.writeZigDef(sw)
 		else, sw.write(exprStr)
 		sw.write(delimeters[0])
-		.writeSharpArgs(sw)
+		.writeZigArgs(sw)
 		sw.write(delimeters[1])
 				
-	def writeSharpArgs(sw as CurlyWriter)
-		.writeSharpArgs(sw, '')
+	def writeZigArgs(sw as CurlyWriter)
+		.writeZigArgs(sw, '')
 
-	def writeSharpArgs(sw as CurlyWriter, sep as String)
+	def writeZigArgs(sw as CurlyWriter, sep as String)
 		for arg in _args
 			sw.write(sep)
 			if arg inherits AssignExpr  # named parameter
-				# cant do arg.left.writeSharpDef as binding invariants are incomplete
+				# cant do arg.left.writeZigDef as binding invariants are incomplete
 				sw.write((arg.left to IdentifierExpr).name) 
 				sw.write(':')				# C# form is name:value
-				arg.right.writeSharpDef(sw)
+				arg.right.writeZigDef(sw)
 			else	
-				arg.writeSharpDefInContext(sw, false)
+				arg.writeZigDefInContext(sw, false)
 			sep = ','
 		
-	def writeSharpBreakdownItems(sw as CurlyWriter)
-		base.writeSharpBreakdownItems(sw)
+	def writeZigBreakdownItems(sw as CurlyWriter)
+		base.writeZigBreakdownItems(sw)
 		sw.write(', +1')
-		_expr.writeSharpBreakdownItems(sw)
+		_expr.writeZigBreakdownItems(sw)
 		for expr in _args
-			expr.writeSharpBreakdownItems(sw)
+			expr.writeZigBreakdownItems(sw)
 		sw.write(', -1')
 
 
 class RefExpr
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		if parens
 			sw.write('(')
-		_expr.writeSharpDef(sw, false)
+		_expr.writeZigDef(sw, false)
 		if parens
 			sw.write(')')
 
-	def writeSharpBreakdownItems(sw as CurlyWriter)
-		base.writeSharpBreakdownItems(sw)
+	def writeZigBreakdownItems(sw as CurlyWriter)
+		base.writeZigBreakdownItems(sw)
 		# TODO
 
 
-class SharpExpr
+class ZigExpr
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		if parens, sw.write('(')
-		if _sharpSource
-			sw.write(_sharpSource)
+		if _ZigSource
+			sw.write(_ZigSource)
 		else
 			sw.write(_expr.token.value)
 		if parens, sw.write(')')
@@ -3768,73 +3754,73 @@ class SliceExpr
 	is partial
 
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		sw.write('CobraCoreInternal.CobraImp.GetSlice(')
-		_target.writeSharpDef(sw, false)
+		_target.writeZigDef(sw, false)
 		sw.write(',')
 		if _start is nil, sw.write('null')
-		else, _start.writeSharpDefInContext(sw, false)
+		else, _start.writeZigDefInContext(sw, false)
 		sw.write(',')
 		if _stop is nil, sw.write('null')
-		else, _stop.writeSharpDefInContext(sw, false)
+		else, _stop.writeZigDefInContext(sw, false)
 		sw.write(',')
 		if _step is nil, sw.write('null')
-		else, _step.writeSharpDefInContext(sw, false)
+		else, _step.writeZigDefInContext(sw, false)
 		sw.write(')')
 
-	def writeSharpBreakdownItems(sw as CurlyWriter)
-		base.writeSharpBreakdownItems(sw)
+	def writeZigBreakdownItems(sw as CurlyWriter)
+		base.writeZigBreakdownItems(sw)
 		sw.write(', +1')
-		_target.writeSharpBreakdownItems(sw)
-		if _start, _start.writeSharpBreakdownItems(sw)
-		if _stop, _stop.writeSharpBreakdownItems(sw)
-		if _step, _step.writeSharpBreakdownItems(sw)
+		_target.writeZigBreakdownItems(sw)
+		if _start, _start.writeZigBreakdownItems(sw)
+		if _stop, _stop.writeZigBreakdownItems(sw)
+		if _step, _step.writeZigBreakdownItems(sw)
 		sw.write(', -1')
 
 
 class TruthExpr
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		lparen = if(parens, '(', '')
 		rparen = if(parens, ')', '')
 		branch _treatment
 			on Treatment.AsIs
-				_expr.writeSharpDef(sw, parens)
+				_expr.writeZigDef(sw, parens)
 			on Treatment.InvokeRuntime
 				sw.write('CobraCoreInternal.CobraImp.IsTrue(')
-				_expr.writeSharpDef(sw, false)
+				_expr.writeZigDef(sw, false)
 				sw.write(')')				
 			on Treatment.CompareToZero
 				sw.write('[lparen]0!=')
-				_expr.writeSharpDef(sw, true)
+				_expr.writeZigDef(sw, true)
 				sw.write(rparen)
 			on Treatment.CompareToZeroChar
 				sw.write("[lparen]'\\0'!=")
-				_expr.writeSharpDef(sw, true)
+				_expr.writeZigDef(sw, true)
 				sw.write(rparen)
 			on Treatment.CompareToNull
 				sw.write('[lparen]null!=')
-				_expr.writeSharpDef(sw, true)
+				_expr.writeZigDef(sw, true)
 				sw.write(rparen)
 
-	def writeSharpBreakdownItems(sw as CurlyWriter) is override
+	def writeZigBreakdownItems(sw as CurlyWriter) is override
 		# leaving out the base class is intentional:
-		# base.writeSharpBreakdownItems(sw, isFirstExpr)
-		_expr.writeSharpBreakdownItems(sw)
+		# base.writeZigBreakdownItems(sw, isFirstExpr)
+		_expr.writeZigBreakdownItems(sw)
 
 
 class TypeExpr
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
-		sharpRef = _containedType.sharpRef
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
+		ZigRef = _containedType.ZigRef
 		if _requiresTypeOf()
 			sw.write('typeof(')
-			sw.write(sharpRef)
+			sw.write(ZigRef)
 			sw.write(')')
 		else
-			sw.write(sharpRef)
+			sw.write(ZigRef)
 
 	def _requiresTypeOf as bool
 		# Cobra never requires that you wrap a type reference in typeof(Foo).
@@ -3856,36 +3842,36 @@ class TypeExpr
 						return false
 			return true
 
-	def writeSharpDefForBreakdown(sw as CurlyWriter) is override
+	def writeZigDefForBreakdown(sw as CurlyWriter) is override
 		requiresTypeOf = _requiresTypeOf
 		if not requiresTypeOf, sw.write('typeof(')
-		.writeSharpDef(sw)
+		.writeZigDef(sw)
 		if not requiresTypeOf, sw.write(')')
 
 
 class AllOrAnyExpr
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		sw.write('CobraCoreInternal.CobraImp.[.opName.capitalized](')
-		.expr.writeSharpDefInContext(sw)
+		.expr.writeZigDefInContext(sw)
 		sw.write(')')
 
-	def writeSharpBreakdownItems(sw as CurlyWriter)
-		base.writeSharpBreakdownItems(sw)
+	def writeZigBreakdownItems(sw as CurlyWriter)
+		base.writeZigBreakdownItems(sw)
 		sw.write(', +1')
-		.expr.writeSharpBreakdownItems(sw)
+		.expr.writeZigBreakdownItems(sw)
 		sw.write(', -1')
 
 
 class UnaryOpExpr
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		if _op == 'PLUS'
 			if parens
 				sw.write('(')
-			_expr.writeSharpDef(sw, false)
+			_expr.writeZigDef(sw, false)
 			if parens
 				sw.write(')')
 			return
@@ -3893,9 +3879,9 @@ class UnaryOpExpr
 			specs = OperatorSpecs.unaryOpSpecsByCobraText
 			assert specs.containsKey(.token.text)
 			spec = specs[.token.text]
-			opText = Utils.sharpStringLiteralFor(spec.opMethodName)
+			opText = Utils.ZigStringLiteralFor(spec.opMethodName)
 			sw.write('CobraCoreInternal.CobraImp.DynamicOp([opText], ')
-			_expr.writeSharpDef(sw, false)
+			_expr.writeZigDef(sw, false)
 			sw.write(')')
 			return
 		if parens
@@ -3909,45 +3895,45 @@ class UnaryOpExpr
 				sw.write('!')
 			else
 				throw FallThroughException(_op)
-		_expr.writeSharpDef(sw)
+		_expr.writeZigDef(sw)
 		if parens
 			sw.write(')')
 
-	def writeSharpBreakdownItems(sw as CurlyWriter)
-		base.writeSharpBreakdownItems(sw)
+	def writeZigBreakdownItems(sw as CurlyWriter)
+		base.writeZigBreakdownItems(sw)
 		sw.write(', +1')
-		_expr.writeSharpBreakdownItems(sw)
+		_expr.writeZigBreakdownItems(sw)
 		sw.write(', -1')
 
 
 class Literal
 	is partial
 
-	get asSharp as String
+	get asZig as String
 		return ''
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
-		sw.write(.asSharp)
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
+		sw.write(.asZig)
 
 
 class AtomicLiteral
 	is partial
 
-	get willWriteSharpBreakdownItems as bool is override
+	get willWriteZigBreakdownItems as bool is override
 		return false
 
 
 class BoolLit
 	is partial
 
-	get asSharp as String is override
+	get asZig as String is override
 		return if(_value, 'true', 'false')
 
 
 class CharLit
 	is partial
 
-	get asSharp as String is override
+	get asZig as String is override
 		if _value[0] to int == 39, return "'\\''"  # single quote
 		else, return "'" + _value.toString + "'"
 
@@ -3955,14 +3941,14 @@ class CharLit
 class DecimalLit
 	is partial
 
-	get asSharp as String is override
+	get asZig as String is override
 		return _value.toString(Utils.cultureInfoForNumbers) + 'm'
 
 
 class FractionalLit
 	is partial
 
-	get asSharp as String is override
+	get asZig as String is override
 		if _type == .compiler.floatType(32), suffix = 'f'
 		else if _type == .compiler.floatType(64), suffix = ''
 		else if _type == .compiler.decimalType, suffix = 'm'
@@ -3973,7 +3959,7 @@ class FractionalLit
 class FloatLit
 	is partial
 
-	get asSharp as String is override
+	get asZig as String is override
 		# suppose you have the literal: 0.00001
 		# using 'F' format for 'fixed point' gives '0.00' which loses the original value
 		# using 'R' format for 'round trip' gives '1E-05'
@@ -3986,7 +3972,7 @@ class FloatLit
 class IntegerLit
 	is partial
 
-	get asSharp as String is override
+	get asZig as String is override
 		s = ''
 		if (info = .token.info) inherits int
 			branch info
@@ -4008,37 +3994,37 @@ class IntegerLit
 class NilLiteral
 	is partial
 
-	get asSharp as String is override
+	get asZig as String is override
 		return 'null'
 
 
 class StringLit
 	is partial
 
-	get asSharp as String is override
-		return Utils.sharpStringLiteralFor(_string)
+	get asZig as String is override
+		return Utils.ZigStringLiteralFor(_string)
 
 
 class StringSubstLit
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		if _items.count>1
 			sw.write('CobraCoreInternal.CobraImp.MakeString(')
 		sep = ''
 		for item in _items
 			sw.write(sep)
 			if item inherits StringLit
-				item.writeSharpDef(sw, true)  # CC: axe the "true" when the bug about overload groups crossing inheritance is fixed
+				item.writeZigDef(sw, true)  # CC: axe the "true" when the bug about overload groups crossing inheritance is fixed
 			else if item inherits FormattedExpr
 				sw.write('CobraCoreInternal.CobraImp._printStringMaker.MakeString(')
-				item.expr.writeSharpDef(sw)
+				item.expr.writeZigDef(sw)
 				sw.write(',')
-				sw.write(Utils.sharpStringLiteralFor(item.format))
+				sw.write(Utils.ZigStringLiteralFor(item.format))
 				sw.write(')')
 			else
 				sw.write('CobraCoreInternal.CobraImp._printStringMaker.MakeString(')
-				item.writeSharpDef(sw, false)
+				item.writeZigDef(sw, false)
 				sw.write(')')
 			sep = ','
 		if _items.count>1
@@ -4048,47 +4034,47 @@ class StringSubstLit
 class BaseLit
 	is partial
 
-	get asSharp as String is override
+	get asZig as String is override
 		return 'base'
 
 
 class ThisLit
 	is partial
 
-	get asSharp as String is override
-		return .compiler.curBox.sharpThis
+	get asZig as String is override
+		return .compiler.curBox.ZigThis
 
 
 class VarLit
 	is partial
 
-	get asSharp as String is override
+	get asZig as String is override
 		return _name
 
 
 class SequenceLit
 	is partial
 
-	def writeSharpBreakdownItems(sw as CurlyWriter) is override  # CC: axe is override
-		base.writeSharpBreakdownItems(sw)
+	def writeZigBreakdownItems(sw as CurlyWriter) is override  # CC: axe is override
+		base.writeZigBreakdownItems(sw)
 		sw.write(', +1')
 		for expr in _exprs
-			expr.writeSharpBreakdownItems(sw)
+			expr.writeZigBreakdownItems(sw)
 		sw.write(', -1')
 
 
 class ListLit
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		innerType = (_type to Box).genericParams[0]
-		sw.write('CobraCoreInternal.CobraImp.MakeList<[innerType.sharpRef]>(typeof([_type.sharpRef])')
+		sw.write('CobraCoreInternal.CobraImp.MakeList<[innerType.ZigRef]>(typeof([_type.ZigRef])')
 		if _exprs.count
 			sw.write(', ')
 			sep = ''
 			for expr in _exprs
 				sw.write(sep)
-				expr.writeSharpDef(sw, false)
+				expr.writeZigDef(sw, false)
 				sep = ', '
 		sw.write(')')
 
@@ -4096,13 +4082,13 @@ class ListLit
 class ArrayLit
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
-		sw.write('new [_type.sharpRef] { ')
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
+		sw.write('new [_type.ZigRef] { ')
 		if _exprs.count
 			sep = ''
 			for expr in _exprs
 				sw.write(sep)
-				expr.writeSharpDef(sw, false)
+				expr.writeZigDef(sw, false)
 				sep = ', '
 		sw.write(' }')
 
@@ -4110,15 +4096,15 @@ class ArrayLit
 class SetLit
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		innerType = (_type to Box).genericParams[0]
-		sw.write('CobraCoreInternal.CobraImp.MakeSet<[innerType.sharpRef]>(typeof([_type.sharpRef])')
+		sw.write('CobraCoreInternal.CobraImp.MakeSet<[innerType.ZigRef]>(typeof([_type.ZigRef])')
 		if _exprs.count
 			sw.write(', ')
 			sep = ''
 			for expr in _exprs
 				sw.write(sep)
-				expr.writeSharpDef(sw, false)
+				expr.writeZigDef(sw, false)
 				sep = ', '
 		sw.write(')')
 
@@ -4126,54 +4112,54 @@ class SetLit
 class DictLit
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		assert (_type to Box).genericParams.count==2
 		keyType   = (_type to Box).genericParams[0]
 		valueType = (_type to Box).genericParams[1]
-		sw.write('CobraCoreInternal.CobraImp.MakeDict<[keyType.sharpRef],[valueType.sharpRef]>(typeof([_type.sharpRef])')
+		sw.write('CobraCoreInternal.CobraImp.MakeDict<[keyType.ZigRef],[valueType.ZigRef]>(typeof([_type.ZigRef])')
 		if _entries.count
 			sw.write(', ')
 			sep = ''
 			for entry in _entries
 				sw.write(sep)
-				entry[0].writeSharpDef(sw)
+				entry[0].writeZigDef(sw)
 				sw.write(',')
-				entry[1].writeSharpDef(sw)
+				entry[1].writeZigDef(sw)
 				sep = ', '
 		sw.write(')')
 
-	def writeSharpBreakdownItems(sw as CurlyWriter) is override  # CC: axe is override
-		base.writeSharpBreakdownItems(sw)
+	def writeZigBreakdownItems(sw as CurlyWriter) is override  # CC: axe is override
+		base.writeZigBreakdownItems(sw)
 		sw.write(', +1')
 		for entry in _entries
 			# CC: keyExpr, valueExpr = entry
 			keyExpr = entry[0]
 			valueExpr = entry[1]
-			keyExpr.writeSharpBreakdownItems(sw)
-			valueExpr.writeSharpBreakdownItems(sw)
+			keyExpr.writeZigBreakdownItems(sw)
+			valueExpr.writeZigBreakdownItems(sw)
 		sw.write(', -1')
 
 
 class ToNilableOrNotExpr
 	is partial
 
-	def writeSharpBreakdownItems(sw as CurlyWriter)
-		base.writeSharpBreakdownItems(sw)
-		_expr.writeSharpBreakdownItems(sw)
+	def writeZigBreakdownItems(sw as CurlyWriter)
+		base.writeZigBreakdownItems(sw)
+		_expr.writeZigBreakdownItems(sw)
 
 
 class ToNilableExpr
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		if _expr.type.isReference
 			# In C#/.NET, reference types are always "nilable"
-			_expr.writeSharpDef(sw)
+			_expr.writeZigDef(sw)
 		else
 			# ex: ((int?)x)
 			# ex: ((Color?)Color.Black)
-			sw.write('(([_expr.type.sharpRef]?)')
-			_expr.writeSharpDef(sw, false)
+			sw.write('(([_expr.type.ZigRef]?)')
+			_expr.writeZigDef(sw, false)
 			sw.write(')')
 
 
@@ -4181,22 +4167,22 @@ class ToNonNilableExpr
 	is partial
 
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		type = _expr.type
 		if type inherits NilableType and not type.nonNil.isReference
 			# ex: (x).Value
 			# ex: (obj.foo).Value
 			sw.write('(')
-			_expr.writeSharpDef(sw, false)
+			_expr.writeZigDef(sw, false)
 			sw.write(').Value')
 		else if .compiler.options.boolValue('include-nil-checks')
-			sw.write('(CobraCoreInternal.CobraCore._willCheckNil?CobraCoreInternal.CobraImp.CheckNonNil<[type.sharpRef]>([.sharpThis], [Utils.sharpStringLiteralFor(_expr.toCobraSource)], ')
-			_expr.writeSharpDef(sw, false)
-			sw.write(', [.sharpSourceSiteArgs]):')
-			_expr.writeSharpDef(sw, false)
+			sw.write('(CobraCoreInternal.CobraCore._willCheckNil?CobraCoreInternal.CobraImp.CheckNonNil<[type.ZigRef]>([.ZigThis], [Utils.ZigStringLiteralFor(_expr.toCobraSource)], ')
+			_expr.writeZigDef(sw, false)
+			sw.write(', [.ZigSourceSiteArgs]):')
+			_expr.writeZigDef(sw, false)
 			sw.write(')')
 		else
-			_expr.writeSharpDef(sw, parens)
+			_expr.writeZigDef(sw, parens)
 
 
 ##
@@ -4205,46 +4191,46 @@ class ToNonNilableExpr
 
 class BinaryOpExpr is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		if parens, sw.write('(')
-		_writeSharpDef(sw)
+		_writeZigDef(sw)
 		if parens, sw.write(')')
 
-	def _writeSharpDef(sw as CurlyWriter)
+	def _writeZigDef(sw as CurlyWriter)
 		pass
 
-	def writeSharpBreakdownItems(sw as CurlyWriter)
-		base.writeSharpBreakdownItems(sw)
+	def writeZigBreakdownItems(sw as CurlyWriter)
+		base.writeZigBreakdownItems(sw)
 		sw.write(', +1')
-		_writeSharpBreakdownItemsLeft(sw)
-		_writeSharpBreakdownItemsRight(sw)
+		_writeZigBreakdownItemsLeft(sw)
+		_writeZigBreakdownItemsRight(sw)
 		sw.write(', -1')
 
-	def _writeSharpBreakdownItemsLeft(sw as CurlyWriter)
-		_left.writeSharpBreakdownItems(sw)
+	def _writeZigBreakdownItemsLeft(sw as CurlyWriter)
+		_left.writeZigBreakdownItems(sw)
 
-	def _writeSharpBreakdownItemsRight(sw as CurlyWriter)
-		_right.writeSharpBreakdownItems(sw)
+	def _writeZigBreakdownItemsRight(sw as CurlyWriter)
+		_right.writeZigBreakdownItems(sw)
 
 
 class AbstractAssignExpr is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		if _trackLocal
 			sw.write('CobraCoreInternal.CobraImp.SetLocal("[_trackName]", ')
 		else if parens
 			sw.write('(')
-		_writeSharpDef(sw)
+		_writeZigDef(sw)
 		if _trackLocal or parens
 			sw.write(')')
 
 
 class AssignExpr is partial
 
-	def _writeSharpDef(sw as CurlyWriter) is override
-		.writeSharpDefWithRight(sw, true)
+	def _writeZigDef(sw as CurlyWriter) is override
+		.writeZigDefWithRight(sw, true)
 
-	def writeSharpDefWithRight(sw as CurlyWriter, right as bool)
+	def writeZigDefWithRight(sw as CurlyWriter, right as bool)
 		# TODO:
 		# if trackLocal:
 		#	out.write('CobraCoreInternal.CobraImp.SetLocal("%s", ' % .left.name)
@@ -4252,26 +4238,26 @@ class AssignExpr is partial
 			if _left.target.type.isDynamic
 				# assigning to an indexer of a dynamically typed target requires special code gen
 				sw.write('CobraCoreInternal.CobraImp.SetIndexerValue(')
-				_left.target.writeSharpDef(sw, false)
+				_left.target.writeZigDef(sw, false)
 				sw.write(', ')
-				_right.writeSharpDef(sw, false)
+				_right.writeZigDef(sw, false)
 				for expr in _left.args
 					sw.write(', ')
-					expr.writeSharpDef(sw, false)
+					expr.writeZigDef(sw, false)
 				sw.write(')')
 				return
 		handled = false
 		if _left inherits IdentifierExpr
-			sharpNames = _left.sharpAssignmentNames
-			if sharpNames and sharpNames.count
-				sharpNames.reverse
-				for i in sharpNames.count
+			ZigNames = _left.ZigAssignmentNames
+			if ZigNames and ZigNames.count
+				ZigNames.reverse
+				for i in ZigNames.count
 					sw.write(if(i==0, '', '='))
-					assert sharpNames[i].length
-					sw.write(sharpNames[i])
+					assert ZigNames[i].length
+					sw.write(ZigNames[i])
 			else
-				assert _left.sharpName <> ''
-				sw.write(_left.sharpName)
+				assert _left.ZigName <> ''
+				sw.write(_left.ZigName)
 			handled = true
 		if not handled
 			# `obj.foo = bar` where `obj` is dynamic, requires special handling
@@ -4279,19 +4265,19 @@ class AssignExpr is partial
 				if _left.left.type.isDynamic
 					assert _left.right inherits MemberExpr
 					sw.write('CobraCoreInternal.CobraImp.SetPropertyValue(')
-					_left.left.writeSharpDef(sw, false)
+					_left.left.writeZigDef(sw, false)
 					sw.write(', ')
-					sw.write(Utils.sharpStringLiteralFor((_left.right to MemberExpr).name.capitalized))
+					sw.write(Utils.ZigStringLiteralFor((_left.right to MemberExpr).name.capitalized))
 					sw.write(', ')
-					_right.writeSharpDef(sw)
+					_right.writeZigDef(sw)
 					sw.write(')')
 					return
 		if not handled
 			# for something like "p.total = 0", cannot generate "(p.Total)=0" because then C# sees
 			# the left hand side as an r-value instead an l-value/target. hence the false below.
-			_left.writeSharpDef(sw, false)
+			_left.writeZigDef(sw, false)
 		sw.write('=')
-		if right, _right.writeSharpDefInContext(sw)
+		if right, _right.writeZigDefInContext(sw)
 		# handle the case where a type got backed up because of assignment inside of an if-inherits
 		if _backUpIfInheritsStack
 			assert _left.definition inherits IVar
@@ -4300,52 +4286,52 @@ class AssignExpr is partial
 
 class NumericPromoExpr is partial
 
-	def _writeSharpDefDynamic(sw as CurlyWriter)
+	def _writeZigDefDynamic(sw as CurlyWriter)
 		specs = OperatorSpecs.binaryOpSpecsByCobraText
 		assert specs.containsKey(.token.text)
 		spec = specs[.token.text]
-		opText = Utils.sharpStringLiteralFor(spec.opMethodName)
+		opText = Utils.ZigStringLiteralFor(spec.opMethodName)
 		sw.write('CobraCoreInternal.CobraImp.DynamicOp([opText], ')
-		_left.writeSharpDef(sw)
+		_left.writeZigDef(sw)
 		sw.write(', ')
-		_right.writeSharpDef(sw)
+		_right.writeZigDef(sw)
 		sw.write(')')
 
 
 class AugAssignMathExpr is partial
 
-	def _writeSharpDef(sw as CurlyWriter) is override
+	def _writeZigDef(sw as CurlyWriter) is override
 		if .isConcated
-			_writeSharpDefConcated(sw)
+			_writeZigDefConcated(sw)
 		else if _type.isDynamic
-			_writeSharpDefDynamic(sw)
+			_writeZigDefDynamic(sw)
 		else
-			_writeSharpDefOperation(sw)
+			_writeZigDefOperation(sw)
 
-	def _writeSharpDefConcated(sw as CurlyWriter)
-		_left.writeSharpDef(sw, false)
+	def _writeZigDefConcated(sw as CurlyWriter)
+		_left.writeZigDef(sw, false)
 		sw.write(' = ')
-		sw.write('(' + _left.type.sharpRef + ')')
+		sw.write('(' + _left.type.ZigRef + ')')
 		sw.write('CobraCoreInternal.CobraImp.Concated(')
-		_left.writeSharpDef(sw, false)
+		_left.writeZigDef(sw, false)
 		sw.write(', ')
-		_right.writeSharpDef(sw, false)
+		_right.writeZigDef(sw, false)
 		sw.write(')')
 
-	def _writeSharpDefDynamic(sw as CurlyWriter) is override
-		_left.writeSharpDef(sw)
+	def _writeZigDefDynamic(sw as CurlyWriter) is override
+		_left.writeZigDef(sw)
 		sw.write(' = ')
 		specs = OperatorSpecs.binaryOpSpecsByCobraText
 		assert specs.containsKey(.token.text)
 		spec = specs[.token.text]
-		opText = Utils.sharpStringLiteralFor(spec.opMethodName)
+		opText = Utils.ZigStringLiteralFor(spec.opMethodName)
 		sw.write('CobraCoreInternal.CobraImp.DynamicOp([opText], ')
-		_left.writeSharpDef(sw)  # TODO: add , false
+		_left.writeZigDef(sw)  # TODO: add , false
 		sw.write(', ')
-		_right.writeSharpDef(sw)  # TODO: add , false
+		_right.writeZigDef(sw)  # TODO: add , false
 		sw.write(')')
 
-	def _writeSharpDefOperation(sw as CurlyWriter)
+	def _writeZigDefOperation(sw as CurlyWriter)
 		op = ''
 		sep = ','  # for the method call case
 		branch _op
@@ -4370,34 +4356,34 @@ class AugAssignMathExpr is partial
 				throw FallThroughException(_op)
 		assert op.length
 		if op.length==2   # C# operator. ex: *= +=
-			_left.writeSharpDef(sw)
+			_left.writeZigDef(sw)
 			sw.write(op)
-			_right.writeSharpDef(sw)
+			_right.writeZigDef(sw)
 		else              # method call that returns a value
-			_left.writeSharpDef(sw)
+			_left.writeZigDef(sw)
 			sw.write('=')
 			sw.write(op)  # ex: 'CobraCoreInternal.CobraImp.Foo('
-			_left.writeSharpDef(sw)
+			_left.writeZigDef(sw)
 			sw.write(sep)
-			_right.writeSharpDef(sw)
+			_right.writeZigDef(sw)
 			sw.write(')')
 
 
 class AugAssignBitwiseExpr
 	is partial
 
-	def _writeSharpDef(sw as CurlyWriter) is override
+	def _writeZigDef(sw as CurlyWriter) is override
 		if _left.type.isDynamic
-			_left.writeSharpDef(sw)
+			_left.writeZigDef(sw)
 			sw.write(' = ')
 			specs = OperatorSpecs.binaryOpSpecsByCobraText
 			assert specs.containsKey(.token.text)
 			spec = specs[.token.text]
-			opText = Utils.sharpStringLiteralFor(spec.opMethodName)
+			opText = Utils.ZigStringLiteralFor(spec.opMethodName)
 			sw.write('CobraCoreInternal.CobraImp.DynamicOp([opText], ')
-			_left.writeSharpDef(sw)  # TODO: add , false
+			_left.writeZigDef(sw)  # TODO: add , false
 			sw.write(', ')
-			_right.writeSharpDef(sw)  # TODO: add , false
+			_right.writeZigDef(sw)  # TODO: add , false
 			sw.write(')')
 			return
 		op = ''
@@ -4415,26 +4401,26 @@ class AugAssignBitwiseExpr
 			else
 				throw FallThroughException(_op)
 		assert op.length
-		_left.writeSharpDef(sw)
+		_left.writeZigDef(sw)
 		sw.write(op)
-		_right.writeSharpDef(sw)
+		_right.writeZigDef(sw)
 
 
 class BinaryBoolExpr
 	is partial
 
-	def _writeSharpDef(sw as CurlyWriter) is override
+	def _writeZigDef(sw as CurlyWriter) is override
 		if _op=='IMPLIES'
 			sw.write('!')
-		_left.writeSharpDef(sw)
+		_left.writeZigDef(sw)
 		branch _op
 			on 'AND'
 				sw.write('&&')
 			on 'OR' or 'IMPLIES'
 				sw.write('||')
-		_right.writeSharpDef(sw)
+		_right.writeZigDef(sw)
 
-	def _writeSharpBreakdownItemsRight(sw as CurlyWriter) is override
+	def _writeZigBreakdownItemsRight(sw as CurlyWriter) is override
 		# have to respect the short circuit otherwise something like "s and s.length" will give
 		# NullReference exception for "s.length"
 		# solution is: given L and R,
@@ -4442,23 +4428,23 @@ class BinaryBoolExpr
 		# that's for 'AND'. for, 'OR', remove the !, for 'IMPLIES' it's like AND
 
 		# so rather than:
-		# _right.writeSharpBreakdownItems(sw)
+		# _right.writeZigBreakdownItems(sw)
 		# do this:
-		src = Utils.sharpStringLiteralFor(_right.toCobraSource)
-		sharpNot = if(_op=='OR', '', '!')
-		sw.write(', [src], new CobraCoreInternal.CobraDirectString([sharpNot]')
-		_left.writeSharpDefForBreakdown(sw)
+		src = Utils.ZigStringLiteralFor(_right.toCobraSource)
+		ZigNot = if(_op=='OR', '', '!')
+		sw.write(', [src], new CobraCoreInternal.CobraDirectString([ZigNot]')
+		_left.writeZigDefForBreakdown(sw)
 		sw.write(' ? "(short-circuited)" : CobraCoreInternal.CobraCore.ToTechString(')
-		_right.writeSharpDefForBreakdown(sw)
+		_right.writeZigDefForBreakdown(sw)
 		sw.write('))')
 
 
 class BinaryBitwiseExpr
 	is partial
 
-	def _writeSharpDef(sw as CurlyWriter) is override
+	def _writeZigDef(sw as CurlyWriter) is override
 		if _type.isDynamic
-			_writeSharpDefDynamic(sw)
+			_writeZigDefDynamic(sw)
 			return
 		op = ''
 		branch _op
@@ -4475,30 +4461,30 @@ class BinaryBitwiseExpr
 			else
 				throw FallThroughException(_op)
 		assert op.length
-		_left.writeSharpDef(sw)
+		_left.writeZigDef(sw)
 		sw.write(op)
-		_right.writeSharpDef(sw)
+		_right.writeZigDef(sw)
 
 
 class BinaryMathExpr is partial
 
-	def _writeSharpDef(sw as CurlyWriter) is override
+	def _writeZigDef(sw as CurlyWriter) is override
 		if .isConcated
-			_writeSharpDefConcated(sw)
+			_writeZigDefConcated(sw)
 		else if _type.isDynamic
-			_writeSharpDefDynamic(sw)
+			_writeZigDefDynamic(sw)
 		else
-			_writeSharpDefOperation(sw)
+			_writeZigDefOperation(sw)
 
-	def _writeSharpDefConcated(sw as CurlyWriter)
-		sw.write('(' + _left.type.sharpRef + ')')
+	def _writeZigDefConcated(sw as CurlyWriter)
+		sw.write('(' + _left.type.ZigRef + ')')
 		sw.write('CobraCoreInternal.CobraImp.Concated(')
-		_left.writeSharpDef(sw, false)
+		_left.writeZigDef(sw, false)
 		sw.write(', ')
-		_right.writeSharpDef(sw, false)
+		_right.writeZigDef(sw, false)
 		sw.write(')')
 
-	def _writeSharpDefOperation(sw as CurlyWriter)
+	def _writeZigDefOperation(sw as CurlyWriter)
 		intType = .compiler.anyIntType
 		left = _left
 		right = _right
@@ -4517,7 +4503,7 @@ class BinaryMathExpr is partial
 			on 'SLASH'
 				op = '/'
 				if _left.isKindOf(intType) and _right.isKindOf(intType)
-					pre = '(' + .compiler.numberType.sharpRef + ')'
+					pre = '(' + .compiler.numberType.ZigRef + ')'
 			on 'SLASHSLASH'
 				if left.isKindOf(intType) and right.isKindOf(intType)
 					op = '/'
@@ -4536,21 +4522,21 @@ class BinaryMathExpr is partial
 		assert op.length
 		sw.write(pre)
 		if op.length==1
-			_left.writeSharpDef(sw)
+			_left.writeZigDef(sw)
 			sw.write(op)
-			_right.writeSharpDef(sw)
+			_right.writeZigDef(sw)
 		else
 			sw.write(op)  # ex: 'CobraCoreInternal.CobraImp.Foo('
-			_left.writeSharpDef(sw)
+			_left.writeZigDef(sw)
 			sw.write(sep)
-			_right.writeSharpDef(sw)
+			_right.writeZigDef(sw)
 			sw.write(')')
 
 
 class CompareExpr
 	is partial
 
-	var _cobraToSharp = {
+	var _cobraToZig = {
 		'EQ': '==',
 		'NE': '!=',
 		'GT': '>',
@@ -4561,7 +4547,7 @@ class CompareExpr
 		'ISNOT': '!=',
 	}
 	
-	def _writeSharpDef(sw as CurlyWriter) is override
+	def _writeZigDef(sw as CurlyWriter) is override
 		left = _left
 		right = _right
 		op = _op
@@ -4574,12 +4560,12 @@ class CompareExpr
 					op = '.Equals('
 				else
 					# primitives like ints and decimals (even mixed like someDecimal == someInt)
-					op = _cobraToSharp[_op]
+					op = _cobraToZig[_op]
 			else
 				done = false
 				stringType = .compiler.stringType
 				if left.isKindOf(stringType) and right.isKindOf(stringType)  # TODO: check for static comparison operations instead
-					op = _cobraToSharp[_op]
+					op = _cobraToZig[_op]
 					done = true
 				else if left.type inherits Box  # TODO: try skipping on requiring that the type is a Box
 					leftBox = left.type to Box
@@ -4597,7 +4583,7 @@ class CompareExpr
 					op = if(op=='EQ', 'CobraCoreInternal.CobraImp.Equals(', 'CobraCoreInternal.CobraImp.NotEquals(')
 		else if op=='IS' or op=='ISNOT'
 			if left.type inherits PrimitiveType and right.type inherits PrimitiveType
-				op = _cobraToSharp[_op]
+				op = _cobraToZig[_op]
 			else if left.type.isReference and right.type.isReference
 				# skip the CobraCoreInternal.CobraImp.Is call for faster performance
 				op = if(op=='IS', 'System.Object.ReferenceEquals(', '!System.Object.ReferenceEquals(')
@@ -4607,10 +4593,10 @@ class CompareExpr
 		else
 			if left.type.isDynamic or right.type.isDynamic
 				sw.write('CobraCoreInternal.CobraImp.DynamicCompare(')
-				left.writeSharpDef(sw, false)
+				left.writeZigDef(sw, false)
 				sw.write(', ')
-				right.writeSharpDef(sw, false)
-				sw.write(')[_cobraToSharp[_op]]0')
+				right.writeZigDef(sw, false)
+				sw.write(')[_cobraToZig[_op]]0')
 				return
 			else
 				done = false
@@ -4621,29 +4607,29 @@ class CompareExpr
 						op = '.CompareTo('
 						done = true
 				if not done
-					op = _cobraToSharp[_op]
+					op = _cobraToZig[_op]
 		# Write the C# code
 		if op.length <= 2
-			left.writeSharpDef(sw)
+			left.writeZigDef(sw)
 			sw.write(op)
-			right.writeSharpDef(sw)
+			right.writeZigDef(sw)
 		else if op == '.Equals('
 			if _op == 'NE', sw.write('!(')
-			left.writeSharpDef(sw)
+			left.writeZigDef(sw)
 			sw.write(op)
-			right.writeSharpDef(sw, false)
+			right.writeZigDef(sw, false)
 			sw.write(')')
 			if _op == 'NE', sw.write(')')
 		else if op == '.CompareTo('
-			left.writeSharpDef(sw)
+			left.writeZigDef(sw)
 			sw.write(op)
-			right.writeSharpDef(sw, false)
-			sw.write(') [_cobraToSharp[_op]] 0')
+			right.writeZigDef(sw, false)
+			sw.write(') [_cobraToZig[_op]] 0')
 		else if op.endsWith('(')
 			sw.write(op)
-			left.writeSharpDef(sw)
+			left.writeZigDef(sw)
 			sw.write(',')
-			right.writeSharpDef(sw)
+			right.writeZigDef(sw)
 			sw.write(')')
 		else
 			throw FallThroughException(op)
@@ -4651,18 +4637,18 @@ class CompareExpr
 
 class ChainedCompareExpr is partial
 	
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		if parens, sw.write('(')
-		.writeSharpDef(sw)
+		.writeZigDef(sw)
 		if parens, sw.write(')')
 	
-	def writeSharpDef(sw as CurlyWriter) is override
+	def writeZigDef(sw as CurlyWriter) is override
 		sw.write('CobraCoreInternal.CobraCore.ChainedComparison(')
-		_items[0].writeSharpDef(sw)
+		_items[0].writeZigDef(sw)
 		itemIndex = 1
 		for operation in _operations
 			sw.write(', "[operation]", ')
-			_items[itemIndex].writeSharpDef(sw)
+			_items[itemIndex].writeZigDef(sw)
 			itemIndex += 1
 		sw.write(')')
 
@@ -4680,25 +4666,25 @@ class DotExpr
 			# This would confuse the code generation into thinking that `d.getType` is a statically typed expression.
 		return r
 
-	def _writeSharpDef(sw as CurlyWriter) is override
+	def _writeZigDef(sw as CurlyWriter) is override
 		if _left.receiverType.isDynamic
 			# handle dynamic typing
 			if _dotRightExpr.definition
-				sw.write('(' + _dotRightExpr.type.sharpRef + ')')
+				sw.write('(' + _dotRightExpr.type.ZigRef + ')')
 			if _right inherits MemberExpr
 				sw.write('CobraCoreInternal.CobraImp.GetPropertyValue(')
-				_left.writeSharpDef(sw, not _left inherits DotExpr)
+				_left.writeZigDef(sw, not _left inherits DotExpr)
 				sw.write(', ')
-				sw.write(Utils.sharpStringLiteralFor(_right.name.capitalized))
+				sw.write(Utils.ZigStringLiteralFor(_right.name.capitalized))
 				sw.write(')')
 			else if _right inherits CallExpr
 				sw.write('CobraCoreInternal.CobraImp.InvokeMethod(')
-				_left.writeSharpDef(sw, not _left inherits DotExpr)
+				_left.writeZigDef(sw, not _left inherits DotExpr)
 				sw.write(', ')
-				sw.write(Utils.sharpStringLiteralFor(_right.name.capitalized))
+				sw.write(Utils.ZigStringLiteralFor(_right.name.capitalized))
 				for arg in _right.args
 					sw.write(', ')
-					arg.writeSharpDef(sw, false)
+					arg.writeZigDef(sw, false)
 				sw.write(')')
 			else
 				throw FallThroughException(_right)
@@ -4712,14 +4698,14 @@ class DotExpr
 					# also used for extension methods under .NET 2.0
 					sw.write(backing+'(')
 					if not (_dotRightExpr.memberDefinition to BoxMember).sharedMethodBackingIsAlias  # guard against Cobra "decimal.parse('5.0')" --> C# "Decimal.Parse(decimal, "5.0")"
-						_left.writeSharpDef(sw, false)
+						_left.writeZigDef(sw, false)
 						sep = ', '
 					else
 						sep = ''
 					if _right inherits CallExpr
 						for arg in _right.args
 							sw.write(sep)
-							arg.writeSharpDefInContext(sw)
+							arg.writeZigDefInContext(sw)
 							sep = ', '
 					sw.write(')')
 					return
@@ -4729,26 +4715,26 @@ class DotExpr
 			if _left inherits ThisLit
 				writeThis = not _dotRightExpr.memberDefinition.isShared
 			else if .curCodeMember inherits Initializer and _right inherits IDotRightExpr and (_right to IDotRightExpr).name == 'init' and _left inherits ThisOrBaseLit
-				# Well, in practice this doesn't really happen because Constructer.innerWriteSharpDef usurps the code gen for base calls
+				# Well, in practice this doesn't really happen because Constructer.innerWriteZigDef usurps the code gen for base calls
 				Stmt.inInitCall = true
 				didSetInInitCall = true
 			if writeThis
 				if _left.needsContextCast
-					_left.writeSharpDefInContext(sw)
+					_left.writeZigDefInContext(sw)
 				else
-					_left.writeSharpDef(sw, not _left inherits DotExpr)
+					_left.writeZigDef(sw, not _left inherits DotExpr)
 				sw.write('.')
-			_right.writeSharpDef(sw, false)
+			_right.writeZigDef(sw, false)
 			if didSetInInitCall
 				Stmt.inInitCall = false
 
-	def _writeSharpBreakdownItemsLeft(sw as CurlyWriter) is override
-		_left.writeSharpBreakdownItems(sw)
+	def _writeZigBreakdownItemsLeft(sw as CurlyWriter) is override
+		_left.writeZigBreakdownItems(sw)
 
 
 class InExpr is partial
 
-	def writeSharpDef(sw as CurlyWriter, parens as bool) is override
+	def writeZigDef(sw as CurlyWriter, parens as bool) is override
 		v = true
 		branch _op
 			on 'NOTIN', sw.write('!')
@@ -4761,9 +4747,9 @@ class InExpr is partial
 			# In general, don't cause side effects from extra evaluation.
 			if .left inherits IdentifierExpr and (.left to IdentifierExpr).definition inherits IVar
 				# If the left is a var, there is no danger in double evaluation causing side effects.
-				# sharp: (someVar==null ? false : <check>)
+				# Zig: (someVar==null ? false : <check>)
 				sw.write('(')
-				.left.writeSharpDef(sw, false)
+				.left.writeZigDef(sw, false)
 				sw.write('==null ? false : ')
 				# may have to cast int? to int, for example
 				if  .left.type inherits NilableType _
@@ -4774,51 +4760,51 @@ class InExpr is partial
 					
 					# then need cast
 					assert .left.type inherits NilableType
-					.right.writeSharpDef(sw, false)
-					sw.write('.Contains(([.left.type.nonNil.sharpRef])')
-					.left.writeSharpDef(sw)
+					.right.writeZigDef(sw, false)
+					sw.write('.Contains(([.left.type.nonNil.ZigRef])')
+					.left.writeZigDef(sw)
 					sw.write(')')
 					if v, sw.write('/* A */')
 				else
-					.writeInCheckSharp(sw, false, v)
+					.writeInCheckZig(sw, false, v)
 					if v, sw.write('/* B */')
 				sw.write(')')
 			else
 				# cobra: left in right
-				# sharp: CobraCoreInternal.CobraImp.InWithNullCheck(<left>, delegate(__lh_value) { return <right>.Contains(__lh_value); })
+				# Zig: CobraCoreInternal.CobraImp.InWithNullCheck(<left>, delegate(__lh_value) { return <right>.Contains(__lh_value); })
 				# use:   static public bool InWithNullCheck<T>(T a, Predicate<T> predicate)
 
 				# cobra: left in right
-				# sharp: CobraCoreInternal.CobraImp.In(left, delegate() { return right; })
+				# Zig: CobraCoreInternal.CobraImp.In(left, delegate() { return right; })
 				sw.write('CobraCoreInternal.CobraImp.InWithNullCheck(')
-				.left.writeSharpDef(sw, false)
-				sw.write(', delegate([.left.type.sharpRef] __lh_value_[.serialNum]) { return ')
+				.left.writeZigDef(sw, false)
+				sw.write(', delegate([.left.type.ZigRef] __lh_value_[.serialNum]) { return ')
 				if .containsExpr
 					# Do not write the .containsExpr here because it's argument to .contains in the
 					# full left expression. Instead, we want to pass the argument passed to the delegate.
-					.right.writeSharpDef(sw, false)
-					sw.write('.Contains(([.left.type.nonNil.sharpRef]) __lh_value_[.serialNum]);')
+					.right.writeZigDef(sw, false)
+					sw.write('.Contains(([.left.type.nonNil.ZigRef]) __lh_value_[.serialNum]);')
 					if v, sw.write('/* C */')
 				else
 					# No .containsExpr means we use CobraImp.In(a, b) for the delegate
 					sw.write('CobraCoreInternal.CobraImp.In(__lh_value_[.serialNum], ')
-					.right.writeSharpDef(sw, false)
+					.right.writeZigDef(sw, false)
 					sw.write(');')
 					if v, sw.write('/* D */')
 				sw.write(' })')
 		else
-			.writeInCheckSharp(sw, parens, v)
+			.writeInCheckZig(sw, parens, v)
 			if v, sw.write('/* E */')
 
-	def writeInCheckSharp(sw as CurlyWriter, parens as bool, v as bool)
+	def writeInCheckZig(sw as CurlyWriter, parens as bool, v as bool)
 		if .containsExpr
-			.containsExpr.writeSharpDef(sw, parens)
+			.containsExpr.writeZigDef(sw, parens)
 			if v, sw.write('/* F */')
 		else
 			sw.write('CobraCoreInternal.CobraImp.In(')
-			.left.writeSharpDef(sw, false)
+			.left.writeZigDef(sw, false)
 			sw.write(',')
-			.right.writeSharpDef(sw, false)
+			.right.writeZigDef(sw, false)
 			sw.write(')')
 			if v, sw.write('/* G */')
 
@@ -4826,10 +4812,10 @@ class InExpr is partial
 class InheritsExpr
 	is partial
 				
-	def _writeSharpDef(sw as CurlyWriter) is override
-		_left.writeSharpDef(sw)
+	def _writeZigDef(sw as CurlyWriter) is override
+		_left.writeZigDef(sw)
 		sw.write(' is ')
-		_right.writeSharpDef(sw, false)
+		_right.writeZigDef(sw, false)
 
 
 class ToExpr is partial
@@ -4838,26 +4824,26 @@ class ToExpr is partial
 		if .type.isDynamic, return base.needsContextCast
 		else, return false  # the user is already casting, so go with their cast
 
-	def _writeSharpDef(sw as CurlyWriter) is override
+	def _writeZigDef(sw as CurlyWriter) is override
 		rightType = _potentialTypeExpr.potentialType to !   # it's not nil or _bindImp would have thrown an error
 		if rightType is .compiler.passThroughType
-			_left.writeSharpDef(sw)
+			_left.writeZigDef(sw)
 			return
 		sw.write('(')
-		_right.writeSharpDef(sw, false)  # double parens would be pointless and also causes a C# error
+		_right.writeZigDef(sw, false)  # double parens would be pointless and also causes a C# error
 		sw.write(')')
 		if not rightType inherits NilableType and rightType.isReference and .compiler.options.boolValue('include-nil-checks')
-			sw.write('CobraCoreInternal.CobraImp.CheckNonNil<[_left.type.sharpRef]>([.sharpThis], [Utils.sharpStringLiteralFor(_left.toCobraSource)], ')
-			_left.writeSharpDef(sw, false)
-			sw.write(', [.sharpSourceSiteArgs])')
+			sw.write('CobraCoreInternal.CobraImp.CheckNonNil<[_left.type.ZigRef]>([.ZigThis], [Utils.ZigStringLiteralFor(_left.toCobraSource)], ')
+			_left.writeZigDef(sw, false)
+			sw.write(', [.ZigSourceSiteArgs])')
 		else
-			_left.writeSharpDef(sw)
+			_left.writeZigDef(sw)
 
 
 class ToQExpr
 	is partial
 
-	def _writeSharpDef(sw as CurlyWriter) is override
+	def _writeZigDef(sw as CurlyWriter) is override
 		# x to? int     --> ((x is int || x is int?) ? (int?)x : (int?)null)
 		# x to? int?    --> ((x is int || x is int?) ? (int?)x : (int?)null)
 		# ^ but this would cause multiple evaluation of x, so...
@@ -4868,29 +4854,29 @@ class ToQExpr
 		right = .right
 		t = right.definition to IType
 		t = t.nonNil
-		typeSharpRef = t.sharpRef
+		typeZigRef = t.ZigRef
 		if t.isReference
 			sw.write('(')
-			.left.writeSharpDef(sw)
-			sw.write(') as [typeSharpRef]')
+			.left.writeZigDef(sw)
+			sw.write(') as [typeZigRef]')
 		else
-			sw.write('[typeSharpRef]?)CobraCoreInternal.CobraImp.ToOrNil<[typeSharpRef]>(')
-			.left.writeSharpDef(sw)
+			sw.write('[typeZigRef]?)CobraCoreInternal.CobraImp.ToOrNil<[typeZigRef]>(')
+			.left.writeZigDef(sw)
 
 
 class CoalesceExpr
 	is partial
 
-	def _writeSharpDef(sw as CurlyWriter) is override
-		_left.writeSharpDef(sw)
+	def _writeZigDef(sw as CurlyWriter) is override
+		_left.writeZigDef(sw)
 		sw.write(' ?? ')
-		_right.writeSharpDef(sw)
+		_right.writeZigDef(sw)
 
 
 class InverseCoalesceExpr
 	is partial
 
-	def _writeSharpDef(sw as CurlyWriter) is override
+	def _writeZigDef(sw as CurlyWriter) is override
 		if _right inherits NilLiteral
 			# `left ! nil` always returns nil -- it's like a no-op
 			if _left inherits IdentifierExpr
@@ -4898,44 +4884,44 @@ class InverseCoalesceExpr
 				sw.write('null')
 			else
 				# in case `left` has side effects, evaluate it
-				sw.write('CobraCoreInternal.CobraImp.Return<[_type.sharpRef]>(null, ')
-				_left.writeSharpDef(sw, false)
+				sw.write('CobraCoreInternal.CobraImp.Return<[_type.ZigRef]>(null, ')
+				_left.writeZigDef(sw, false)
 				sw.write(')')
 		else
-			_left.writeSharpDef(sw)
+			_left.writeZigDef(sw)
 			sw.write('==null ? null : ')
 			if not _right.type inherits NilableType and not _right.type inherits NilType
-				sw.write('([_right.type.sharpRef]?)')
-			_right.writeSharpDef(sw)
+				sw.write('([_right.type.ZigRef]?)')
+			_right.writeZigDef(sw)
 
 
 class CoalesceAssignExpr
 	is partial
 
-	def _writeSharpDef(sw as CurlyWriter) is override
+	def _writeZigDef(sw as CurlyWriter) is override
 		# L = L * R
-		_left.writeSharpDef(sw)
+		_left.writeZigDef(sw)
 		sw.write(' = ')
-		_left.writeSharpDef(sw)
+		_left.writeZigDef(sw)
 		sw.write(' ?? ')
-		_right.writeSharpDef(sw)
+		_right.writeZigDef(sw)
 
 
 class InverseCoalesceAssignExpr
 	is partial
 
-	def _writeSharpDef(sw as CurlyWriter) is override
-		_left.writeSharpDef(sw)
+	def _writeZigDef(sw as CurlyWriter) is override
+		_left.writeZigDef(sw)
 		sw.write(' = ')
 		if _right inherits NilLiteral
 			# `left != nil` is the same as `left = nil`
 			sw.write('null')
 		else
-			_left.writeSharpDef(sw)
+			_left.writeZigDef(sw)
 			sw.write('==null ? null : ')
 			if not _right.type inherits NilableType and not _right.type inherits NilType
-				sw.write('([_right.type.sharpRef]?)')
-			_right.writeSharpDef(sw)
+				sw.write('([_right.type.ZigRef]?)')
+			_right.writeZigDef(sw)
 
 
 ##
@@ -4944,18 +4930,18 @@ class InverseCoalesceAssignExpr
 
 class AttributeDecl is partial
 
-	def writeSharpDef(sw as CurlyWriter) is override
-		.writeSharpDef(sw, '', true)
+	def writeZigDef(sw as CurlyWriter) is override
+		.writeZigDef(sw, '', true)
 
-	def writeSharpDef(sw as CurlyWriter, prefix as String)
-		.writeSharpDef(sw, prefix, true)
+	def writeZigDef(sw as CurlyWriter, prefix as String)
+		.writeZigDef(sw, prefix, true)
 
-	def writeSharpDef(sw as CurlyWriter, prefix as String, willNewLine as bool)
+	def writeZigDef(sw as CurlyWriter, prefix as String, willNewLine as bool)
 		sw.write(r'[')
 		if .isReturnTarget and prefix == '', prefix = 'return:'
 		sw.write(prefix)
 		expr = _expr to PostCallExpr
-		sw.write('[expr.type.sharpRef]')
+		sw.write('[expr.type.ZigRef]')
 		if expr.args.count
 			sw.write('(')
 			sep = ''
@@ -4966,7 +4952,7 @@ class AttributeDecl is partial
 					sw.write('=')
 					arg = arg.right
 				assert not arg inherits AssignExpr
-				arg.writeSharpDefInContext(sw)
+				arg.writeZigDefInContext(sw)
 				sep = ', '
 			sw.write(')')
 		sw.write(r']')
@@ -4976,12 +4962,12 @@ class AttributeDecl is partial
 class AssemblyDecl
 	is partial
 
-	def writeSharpDef(sw as CurlyWriter) is override
-		base.writeSharpDef(sw)
+	def writeZigDef(sw as CurlyWriter) is override
+		base.writeZigDef(sw)
 		for attrib in _attribs
-			attrib.writeSharpDef(sw, 'assembly: ')
+			attrib.writeZigDef(sw, 'assembly: ')
 
-	def writeSharpTestInvocation(sw as CurlyWriter)
+	def writeZigTestInvocation(sw as CurlyWriter)
 		pass
 
 
@@ -4989,7 +4975,7 @@ class AssemblyDecl
 ## Misc items
 ##
 
-class SharpBackEndUtils
+class ZigBackEndUtils
 
 	shared
 

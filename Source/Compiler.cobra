@@ -51,6 +51,7 @@ class LoadReferenceException inherits Exception
 enum PlatformEnum
 	Microsoft
 	Novell
+	Zig
 
 
 class CompileParams
