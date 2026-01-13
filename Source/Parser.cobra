@@ -250,7 +250,6 @@ class Parser is abstract
 	def _warning(token as IToken?, msg as String)
 		_warningRecorder.warning(CobraWarning(_fileName, token, msg))
 
-	# TODO: do this with a callback/delegate instead of this bullshit Java-style interface technique
 	var _warningRecorder as IWarningRecorder?
 	var _errorRecorder as IErrorRecorder?
 

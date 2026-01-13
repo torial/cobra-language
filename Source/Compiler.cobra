@@ -1209,7 +1209,7 @@ class Compiler implements ITypeProvider, IWarningRecorder, IErrorRecorder, IComp
 	def typeTypeProxy as AbstractTypeProxy 
 		"""
 		Type proxy for backEnd notion of a class for a Type
-			e.g. System.Type in dotNet, java.lang.class in Java
+			e.g. System.Type in dotNet, ??? in Zig
 		"""
 		return .backEnd.typeTypeProxy
 		

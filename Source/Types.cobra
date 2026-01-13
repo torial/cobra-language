@@ -44,13 +44,13 @@ class NativeType is abstract
 	get isSystemObjectClass as bool is abstract
 		"""
 		Return true if this is the Native Type Object for the root Object of the class hierarchy.
-			e.g. like System.Object in .Net, java.lang.Object in java
+			e.g. like System.Object in .Net, ??? in zig
 		"""
 
 	get isSystemTypeClass as bool is abstract
 		"""
 		Return true if this is the Native Type Object for a System Type.
-			e.g. like System.Type in .Net, java.lang.class in java
+			e.g. like System.Type in .Net, ??? in zig
 		"""
 				
 	def customAttributes as IList<of dynamic> is abstract

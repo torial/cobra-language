@@ -47,7 +47,7 @@ class LineEndings
 	var _textExtensionsSpec = _
 		'bash bat c cmd cobra cobratext cobraproj config cpp cs css cxx ' + _
 		'dif diff h htaccess htm html java js kv m ' + _
-		'patch py rb sh shtml sln sql svg targets text txt xhtml xaml xml'
+		'patch py rb sh shtml sln sql svg targets text txt xhtml xaml xml zig'
 
 	var _excludeNamesCache   = List<of String>()
 	var _binExtensionsCache  = List<of String>()

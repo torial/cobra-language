@@ -486,7 +486,7 @@ class Module is partial
 		pass
 
 
-class JavaModule inherits NativeModule is partial
+class ZigModule inherits NativeModule is partial
 
 	def writeSharpDef as Dictionary<of int, int>? is override
 		assert false

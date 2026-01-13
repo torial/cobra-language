@@ -71,8 +71,7 @@ NOTES
 
 TODO
 
-	[ ] stack trace filtering could be interesting. more experience will be required to see if it's necessary. see
-		http://www.google.com/codesearch/p?hl=en#uX1GffpyOZk/test-runner/junit/runner/BaseTestRunner.java&q=testrunner&d=2
+	[ ] stack trace filtering could be interesting. more experience will be required to see if it's necessary. 
 
 	There are more TODOs in the code below.
 """

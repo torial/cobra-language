@@ -1314,8 +1314,7 @@ class TryCatchExpr inherits Expr is partial
 	get getExpr from _getExpr
 	
 	def _bindImp
-		# to-do: revisit this when java backend based on java8 (supports closures)
-		if 'java' in .compiler.backEnd.name 
+		if 'zig' in .compiler.backEnd.name 
 			if not _superNode inherits BinaryOpExpr or .binarySuperNode.op <> 'ASSIGN'
 				msg = 'More complicated expressions cannot yet have code generated without side effects.'
 				.throwError('Can only use a tryCatch expression as the simple target of an assignment (e.g "ID = try EXPR catch EXCEPTION get EXPR". [msg]')

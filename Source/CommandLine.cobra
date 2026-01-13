@@ -371,7 +371,7 @@ class CommandLineOptionSpecs
 		{
 			'name': 'native-compiler',
 			'synonyms': ['sharp-compiler'],
-			'description': 'Specify the path to the back-end native compiler. This can be an executable (such as csc.exe or javac), a library (such as Cobra.Sharp.dll), "auto" or "provider".',
+			'description': 'Specify the path to the back-end native compiler. This can be an executable (such as csc.exe or zigc), a library (such as Cobra.Sharp.dll), "auto" or "provider".',
 			'type': 'string',
 			'args': 'file-system-path',
 			'default': 'auto',
@@ -444,7 +444,7 @@ class CommandLineOptionSpecs
 		{
 			'name': 'native-compiler-arg',
 			'synonyms': ['native-compiler-args', 'sharp-args'],
-			'description': 'Pass an additional argument to the native back-end compiler (such as C# or Java). Can specify multiple times.',
+			'description': 'Pass an additional argument to the native back-end compiler (such as C# or Zig). Can specify multiple times.',
 			'isAccumulator': true,
 			'type': 'string',
 			'args': '"arg"',

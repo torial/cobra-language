@@ -49,7 +49,7 @@ class ParsePhase inherits Phase
 		for file in compiler.filesToCompile
 			nativeModule = backEnd.genNativeModule(file, .verbosity)
 			if nativeModule
-				modules.add(nativeModule) # SharpModule or JavaModule or ...
+				modules.add(nativeModule) # SharpModule or ZigModule or ...
 			else
 				parser = CobraParser()
 				parser.verbosity = .verbosity

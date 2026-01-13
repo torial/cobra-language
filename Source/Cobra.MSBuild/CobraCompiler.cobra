@@ -582,7 +582,7 @@ class CobraCompiler inherits ToolTask
 		-native-compiler[:file-system-path]  default is auto
 		-sharp-compiler
 		
-		Specify the path to the back-end native compiler. This can be an executable (such as csc.exe or javac), a
+		Specify the path to the back-end native compiler. This can be an executable (such as csc.exe or zigc), a
 		library (such as Cobra.Sharp.dll), "auto" or "provider".
 		"""
 	
@@ -591,7 +591,7 @@ class CobraCompiler inherits ToolTask
 		-native-compiler-args:"arg1 arg2"
 		-sharp-args
 		
-		Pass additional arguments to the native back-end compiler (such as C# or Java).
+		Pass additional arguments to the native back-end compiler (such as C# or Zig).
 		"""
 	
 	pro number from var as String? = "decimal"

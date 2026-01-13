@@ -40,7 +40,7 @@ class Compiler is partial
 			return lineNum  # map[lineNum]
 
 	def _deleteIntermediateFiles
-		# remove intermediate files such as *.cobra.cs and *.cobra.java
+		# remove intermediate files such as *.cobra.cs and *.cobra.zig
 		if _intermediateFileNames.count == 0
 			if _verbosity >= 1, print 'No intermediate files to keep or delete.'
 		else

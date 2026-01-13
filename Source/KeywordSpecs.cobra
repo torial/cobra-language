@@ -170,7 +170,7 @@ class KeywordSpecs
 				'all         | expression: Evaluate to true if all elements in a sequent is true.',
 				'each (r)    | expression:',
 				'in          | expression: Test inclusion | arg modifier: Value passed into method only (the default).',
-				"passthrough | expression: Psuedo-type used in typecasting in order to bypass the compiler's typechecking. Code pass through to the backend (C#, Java, whatever).",
+				"passthrough | expression: Psuedo-type used in typecasting in order to bypass the compiler's typechecking. Code pass through to the backend (C#, Zig, whatever).",
 				'true        | expression: The Boolean value `true`.',
 				'false       | expression: The Boolean value `value`.',
 				'nil         | expression: The special value `nil`. Called `null`, `None` and `Nothing` in some languages.',
