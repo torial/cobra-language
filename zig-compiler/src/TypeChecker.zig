@@ -76,6 +76,8 @@ pub const Type = union(enum) {
     udp_socket,
     /// `Regex` — compiled regular expression.
     regex,
+    /// `Gui` — GUI context passed to `Gui.run` frame callback; also the `Gui` namespace type.
+    gui_context,
 
     // ── Special ───────────────────────────────────────────────────────────────
     /// Cannot determine type: upstream error or unsupported construct.
@@ -102,6 +104,7 @@ pub const Type = union(enum) {
             .tcp_conn       => b == .tcp_conn,
             .udp_socket     => b == .udp_socket,
             .regex          => b == .regex,
+            .gui_context    => b == .gui_context,
             .unknown        => b == .unknown,
         };
     }
@@ -123,6 +126,7 @@ pub const Type = union(enum) {
         if (from == .tcp_conn   and to == .tcp_conn)   return true;
         if (from == .udp_socket and to == .udp_socket) return true;
         if (from == .regex      and to == .regex)      return true;
+        if (from == .gui_context and to == .gui_context) return true;
         return eql(from, to);
     }
 
@@ -146,6 +150,7 @@ pub const Type = union(enum) {
             .tcp_conn       => "TcpConn",
             .udp_socket     => "UdpSocket",
             .regex          => "Regex",
+            .gui_context    => "Gui",
             .unknown        => "<unknown>",
         };
     }
@@ -693,6 +698,14 @@ const TypeChecker = struct {
                     if (std.mem.eql(u8, mem.member, "compile")) return .regex;
                     return .void_;
                 }
+                // Gui.* static methods.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Gui")) {
+                    _ = try tc.inferExpr(mem.object);
+                    // Infer the callback arg so widget method types are checked inside it.
+                    if (std.mem.eql(u8, mem.member, "run") and e.args.len >= 4)
+                        _ = try tc.inferExpr(e.args[3].value);
+                    return .void_;
+                }
                 // sys.* static methods.
                 if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "sys")) {
                     _ = try tc.inferExpr(mem.object);
@@ -776,6 +789,15 @@ const TypeChecker = struct {
             if (std.mem.eql(u8, method, "findAll")) return .unknown; // []const []const u8 slice — not modelled
             if (std.mem.eql(u8, method, "replace")) return .string;
             return .void_;
+        }
+        // Gui widget methods (on gui_context receiver)
+        if (obj_type == .gui_context) {
+            if (std.mem.eql(u8, method, "button"))   return .bool;
+            if (std.mem.eql(u8, method, "checkbox")) return .bool;
+            if (std.mem.eql(u8, method, "slider"))   return .float;
+            if (std.mem.eql(u8, method, "input"))    return .string;
+            // void-returning widgets
+            return .void_;  // text, separator, sameLine, spacing, indent, unindent, panel, window
         }
         // toString() on any type → string
         if (std.mem.eql(u8, method, "toString")) return .string;
@@ -1020,6 +1042,7 @@ fn builtinType(n: []const u8) Type {
     if (std.mem.eql(u8, n, "TcpConn"))       return .tcp_conn;
     if (std.mem.eql(u8, n, "UdpSocket"))     return .udp_socket;
     if (std.mem.eql(u8, n, "Regex"))         return .regex;
+    if (std.mem.eql(u8, n, "Gui"))          return .gui_context;
     return switch (Builtins.scalarKind(n)) {
         .int        => .int,
         .uint       => .uint,

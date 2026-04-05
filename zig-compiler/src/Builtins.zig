@@ -66,6 +66,8 @@ pub const NAMES = std.StaticStringMap(void).initComptime(&.{
     .{ "UdpSocket",     {} },
     // Stdlib regex
     .{ "Regex",         {} },
+    // Stdlib UI
+    .{ "Gui",           {} },
     // System / process
     .{ "sys",           {} },
 });
@@ -125,6 +127,8 @@ pub fn zigTypeName(name: []const u8) []const u8 {
     if (std.mem.eql(u8, name, "float32"))  return "f32";
     if (std.mem.eql(u8, name, "float64"))  return "f64";
     if (std.mem.eql(u8, name, "float128")) return "f128";
+    // UI context
+    if (std.mem.eql(u8, name, "Gui"))      return "GuiContext";
     return name;
 }
 

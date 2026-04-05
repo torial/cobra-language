@@ -1136,6 +1136,72 @@ const Generator = struct {
             \\
         );
 
+        // ── GUI (stub backend — 1 frame, prints to stderr) ─────────────────
+        try g.w.writeAll(
+            \\// ─── Gui stub backend ────────────────────────────────────────────────────────
+            \\const GuiContext = struct {
+            \\    pub fn text(self: GuiContext, s: []const u8) void {
+            \\        _ = self;
+            \\        std.debug.print("[gui] text: {s}\n", .{s});
+            \\    }
+            \\    pub fn separator(self: GuiContext) void {
+            \\        _ = self;
+            \\        std.debug.print("[gui] ---\n", .{});
+            \\    }
+            \\    pub fn sameLine(self: GuiContext) void {
+            \\        _ = self;
+            \\        std.debug.print("[gui] sameLine\n", .{});
+            \\    }
+            \\    pub fn spacing(self: GuiContext) void {
+            \\        _ = self;
+            \\        std.debug.print("[gui] spacing\n", .{});
+            \\    }
+            \\    pub fn indent(self: GuiContext) void {
+            \\        _ = self;
+            \\        std.debug.print("[gui] indent\n", .{});
+            \\    }
+            \\    pub fn unindent(self: GuiContext) void {
+            \\        _ = self;
+            \\        std.debug.print("[gui] unindent\n", .{});
+            \\    }
+            \\    pub fn button(self: GuiContext, label: []const u8) bool {
+            \\        _ = self;
+            \\        std.debug.print("[gui] button: {s}\n", .{label});
+            \\        return false;
+            \\    }
+            \\    pub fn checkbox(self: GuiContext, label: []const u8, value: bool) bool {
+            \\        _ = self;
+            \\        std.debug.print("[gui] checkbox: {s} = {}\n", .{ label, value });
+            \\        return value;
+            \\    }
+            \\    pub fn slider(self: GuiContext, label: []const u8, value: f64, min: f64, max: f64) f64 {
+            \\        _ = self;
+            \\        std.debug.print("[gui] slider: {s} = {d} [{d}, {d}]\n", .{ label, value, min, max });
+            \\        return value;
+            \\    }
+            \\    pub fn input(self: GuiContext, label: []const u8, value: []const u8) []const u8 {
+            \\        _ = self;
+            \\        std.debug.print("[gui] input: {s} = {s}\n", .{ label, value });
+            \\        return value;
+            \\    }
+            \\    pub fn panel(self: GuiContext, label: []const u8, callback: anytype) void {
+            \\        std.debug.print("[gui] panel: {s}\n", .{label});
+            \\        if (comptime @typeInfo(@TypeOf(callback)) == .@"fn") callback(self) else callback.call(self);
+            \\    }
+            \\    pub fn window(self: GuiContext, label: []const u8, callback: anytype) void {
+            \\        std.debug.print("[gui] window: {s}\n", .{label});
+            \\        if (comptime @typeInfo(@TypeOf(callback)) == .@"fn") callback(self) else callback.call(self);
+            \\    }
+            \\};
+            \\fn _gui_run(title: []const u8, width: i64, height: i64, frame: anytype) void {
+            \\    _ = title; _ = width; _ = height;
+            \\    var _mframe = frame;
+            \\    const _g = GuiContext{};
+            \\    if (comptime @typeInfo(@TypeOf(frame)) == .@"fn") frame(_g) else _mframe.call(_g);
+            \\}
+            \\
+        );
+
         for (module.decls) |decl| try g.genTopDecl(decl);
 
         // Emit a top-level `pub fn main()` thunk if any class has a
@@ -1598,6 +1664,8 @@ const Generator = struct {
                 try g.w.writeAll(";\n");
             },
             .expr      => |e| {
+                // GUI widget calls with allocating string args need block-scoped temps.
+                if (try g.genGuiWidgetStmt(e)) return;
                 try g.writeIndent();
                 try g.genExpr(e);
                 // Inside a try block, a call to a `throws` method must have its
@@ -1682,6 +1750,9 @@ const Generator = struct {
         if (n.init) |e| {
             if (e.* == .lambda and e.lambda.capture.len > 0) {
                 if (g.closure_vars) |cv| try cv.put(n.name, {});
+                // The struct variable itself uses the normal const/var analysis.
+                // Mutable captures are handled via `self: *@This()` in the call method,
+                // and _gui_run/_http_serve make a `var _mframe = frame` copy internally.
                 try g.w.writeAll(kw);
                 try g.w.writeAll(" ");
                 try g.w.writeAll(n.name);
@@ -1795,6 +1866,7 @@ const Generator = struct {
                 if (std.mem.eql(u8, n.name, "TcpConn"))   return g.genTcpMethod(object, method, args);
                 if (std.mem.eql(u8, n.name, "UdpSocket"))  return g.genUdpMethod(object, method, args);
                 if (std.mem.eql(u8, n.name, "Regex"))      return g.genRegexMethod(object, method, args);
+                if (std.mem.eql(u8, n.name, "Gui"))        return g.genGuiWidgetMethod(object, method, args);
                 // toString() on int/float/bool — format as string.
                 if (std.mem.eql(u8, method, "toString")) {
                     const fmt = if (std.mem.eql(u8, n.name, "float") or
@@ -2150,6 +2222,116 @@ const Generator = struct {
             return true;
         }
         return false;
+    }
+
+    // ── Gui static + widget methods ──────────────────────────────────────────
+
+    /// Gui.run(title, width, height, callback) → _gui_run(...)
+    fn genGuiCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "run")) {
+            try g.w.writeAll("_gui_run(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"App\"");
+            try g.w.writeAll(", ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("800");
+            try g.w.writeAll(", ");
+            if (args.len >= 3) try g.genExpr(args[2].value) else try g.w.writeAll("600");
+            try g.w.writeAll(", ");
+            if (args.len >= 4) try g.genExpr(args[3].value) else try g.w.writeAll("undefined");
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    /// g.text(s), g.button(label), etc. — pass through directly to GuiContext methods.
+    /// Used for expression context (return values like button, checkbox, slider, input).
+    /// For void-returning statement calls with allocating string args, use genGuiWidgetStmt.
+    fn genGuiWidgetMethod(g: Generator, obj: *const Ast.Expr, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        const known = std.StaticStringMap(void).initComptime(&.{
+            .{ "text",      {} }, .{ "separator", {} }, .{ "sameLine",  {} },
+            .{ "spacing",   {} }, .{ "indent",    {} }, .{ "unindent",  {} },
+            .{ "button",    {} }, .{ "checkbox",  {} }, .{ "slider",    {} },
+            .{ "input",     {} }, .{ "panel",     {} }, .{ "window",    {} },
+        });
+        if (known.get(method) == null) return false;
+        try g.genExpr(obj);
+        try g.w.print(".{s}(", .{method});
+        for (args, 0..) |a, i| {
+            if (i > 0) try g.w.writeAll(", ");
+            try g.genExpr(a.value);
+        }
+        try g.w.writeAll(")");
+        return true;
+    }
+
+    /// Statement-level GUI widget call handler. Wraps allocating string args in temp
+    /// vars with defer-free to prevent GPA leaks. Returns true if emitted.
+    fn genGuiWidgetStmt(g: Generator, e: *const Ast.Expr) anyerror!bool {
+        if (e.* != .call) return false;
+        const call = e.call;
+        if (call.callee.* != .member) return false;
+        const mem = call.callee.member;
+        // Determine if receiver is a gui_context typed value.
+        const obj_tc = if (g.tc) |tc| tc.expr_types.get(mem.object) orelse .unknown else .unknown;
+        const is_gui = obj_tc == .gui_context or
+            (g.getExprDeclaredType(mem.object) != null and blk: {
+                const tr = g.getExprDeclaredType(mem.object).?;
+                break :blk tr == .named and std.mem.eql(u8, tr.named.name, "Gui");
+            });
+        if (!is_gui) return false;
+        const void_methods = std.StaticStringMap(void).initComptime(&.{
+            .{ "text", {} }, .{ "separator", {} }, .{ "sameLine", {} },
+            .{ "spacing", {} }, .{ "indent", {} }, .{ "unindent", {} },
+            .{ "panel", {} }, .{ "window", {} },
+        });
+        if (void_methods.get(mem.member) == null) return false;
+        // Check if any arg is allocating.
+        var any_alloc = false;
+        for (call.args) |a| {
+            if (a.value.* == .string_interp or isAllocatingStringInit(a.value, g.tc)) {
+                any_alloc = true; break;
+            }
+        }
+        if (!any_alloc) return false;
+        // Emit a block with temp vars.
+        try g.writeIndent();
+        try g.w.writeAll("{\n");
+        const bg = g.indented();
+        var tmp_names = std.ArrayList(?[]const u8){};
+        try tmp_names.ensureTotalCapacity(g.alloc, call.args.len);
+        defer {
+            for (tmp_names.items) |tn| if (tn) |n| g.alloc.free(n);
+            tmp_names.deinit(g.alloc);
+        }
+        for (call.args, 0..) |a, i| {
+            if (a.value.* == .string_interp or isAllocatingStringInit(a.value, g.tc)) {
+                const tname = try std.fmt.allocPrint(g.alloc, "_gw{d}", .{i});
+                try tmp_names.append(g.alloc, tname);
+                try bg.writeIndent();
+                try bg.w.print("const {s} = ", .{tname});
+                try bg.genExpr(a.value);
+                try bg.w.writeAll(";\n");
+                try bg.writeIndent();
+                try bg.w.print("defer _allocator.free({s});\n", .{tname});
+            } else {
+                try tmp_names.append(g.alloc, null);
+            }
+        }
+        try bg.writeIndent();
+        try bg.genExpr(mem.object);
+        try bg.w.print(".{s}(", .{mem.member});
+        for (call.args, 0..) |_, i| {
+            if (i > 0) try bg.w.writeAll(", ");
+            if (tmp_names.items[i]) |tn| {
+                try bg.w.writeAll(tn);
+            } else {
+                try bg.genExpr(call.args[i].value);
+            }
+        }
+        try bg.w.writeAll(");\n");
+        try g.writeIndent();
+        try g.w.writeAll("}\n");
+        return true;
     }
 
     fn genUdpMethod(g: Generator, obj: *const Ast.Expr, method: []const u8, args: []const Ast.Arg) anyerror!bool {
@@ -2570,6 +2752,19 @@ const Generator = struct {
         defer field_names.deinit(g.alloc);
         for (e.capture) |cv| try field_names.append(g.alloc, cv.name);
 
+        // Determine if any capture field is mutated in the body.
+        // If so, `call` must take `self: *@This()` so assignments are visible to the caller.
+        const body_stmts: []const Ast.Stmt = switch (e.body) {
+            .stmts => |ss| ss,
+            .expr  => &.{},
+        };
+        var body_mutations = try scanMutations(body_stmts, g.alloc);
+        defer body_mutations.deinit();
+        var any_capture_mutated = false;
+        for (e.capture) |cv| {
+            if (body_mutations.contains(cv.name)) { any_capture_mutated = true; break; }
+        }
+
         try g.w.writeAll("struct {\n");
         const fg = g.indented();
 
@@ -2582,9 +2777,13 @@ const Generator = struct {
             try fg.w.writeAll(",\n");
         }
 
-        // Emit call method — self by value (read-only captures)
+        // Emit call method — mutable self if any capture field is assigned.
         try fg.writeIndent();
-        try fg.w.writeAll("fn call(self: @This()");
+        if (any_capture_mutated) {
+            try fg.w.writeAll("fn call(self: *@This()");
+        } else {
+            try fg.w.writeAll("fn call(self: @This()");
+        }
         for (e.params) |p| {
             try fg.w.writeAll(", ");
             try fg.w.writeAll(p.name);
@@ -3755,6 +3954,13 @@ const Generator = struct {
                 if (try g.genRegexCall(mem.member, e.args)) return;
             }
         }
+        // Gui static call: Gui.run(title, w, h, callback).
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Gui")) {
+                if (try g.genGuiCall(mem.member, e.args)) return;
+            }
+        }
         // sys static calls: sys.args(), sys.exit(n), sys.err("msg"), etc.
         if (e.callee.* == .member) {
             const mem = e.callee.member;
@@ -3793,7 +3999,8 @@ const Generator = struct {
                     .string     => if (try g.genStringMethod(mem.object, mem.member, e.args)) return,
                     .tcp_conn   => if (try g.genTcpMethod(mem.object, mem.member, e.args)) return,
                     .udp_socket => if (try g.genUdpMethod(mem.object, mem.member, e.args)) return,
-                    .regex      => if (try g.genRegexMethod(mem.object, mem.member, e.args)) return,
+                    .regex       => if (try g.genRegexMethod(mem.object, mem.member, e.args)) return,
+                    .gui_context => if (try g.genGuiWidgetMethod(mem.object, mem.member, e.args)) return,
                     .unknown    => if (try g.genListMethod(mem.object, mem.member, e.args)) return,
                     else        => {},
                 }
@@ -4195,7 +4402,8 @@ fn printFmt(tc: ?*const TypeChecker.TypeCheckResult, catch_var: []const u8, expr
         .http_response,
         .tcp_conn,
         .udp_socket,
-        .regex                         => "{any}",
+        .regex,
+        .gui_context                   => "{any}",
     };
 }
 
