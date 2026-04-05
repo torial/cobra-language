@@ -1,0 +1,13 @@
+class Program
+    shared
+        def main
+            var s as str = "Hello World"
+            print s.upper()
+            print s.lower()
+            print s.indexOf("World")
+            print s.indexOf("xyz")
+            var r as str = s.replace("World", "Zebra")
+            print r
+            print s.len
+            for part in s.split(" ")
+                print part

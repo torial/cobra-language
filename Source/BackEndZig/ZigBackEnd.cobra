@@ -58,8 +58,8 @@ class ZigBackEnd inherits BackEnd
 			}
 
 	def makePhases(phases as IList<of Phase>) is override
-		phases.add(GenerateSharpCodePhase(.compiler))
-		phases.add(CompileSharpCodePhase(.compiler))
+		phases.add(GenerateZigCodePhase(.compiler))
+		phases.add(CompileZigCodePhase(.compiler))
 
 	def getRecommendedBuiltInType(parentNameSpace as NameSpace?, name as String) as String? is override
 		n = nil to String?
@@ -81,7 +81,7 @@ class ZigBackEnd inherits BackEnd
 		return n
 
 	def computeOutName as String is override
-		return .compiler.computeOutNameSharp
+		return .compiler.computeOutNameZig
 		
 	def genNativeModule(file as FileSpec, verbosity as int) as Module? is override
 		m as Module? = nil
@@ -259,40 +259,16 @@ class GenerateZigCodePhase inherits Phase
 
 	def innerRun is override
 		c = .compiler
-		v = c.verbosity
-		
+
 		nativeCompiler = c.options.getDefault('native-compiler', '') to String
-		if nativeCompiler == 'auto'
-			if CobraCore.isRunningOnMono
-				nativeCompiler = 'provider'
-				entryAssemblyDir = Path.getDirectoryName(Assembly.getEntryAssembly.location)
-				for candidateDllName in _candidateDllNames
-					cobraSharp = Path.combine(entryAssemblyDir, candidateDllName)
-					if File.exists(cobraSharp)
-						if v >= 2, print '-native-compiler:auto ... Found [cobraSharp]'
-						nativeCompiler = cobraSharp
-						break
-			else
-				if v >= 2, print '-native-compiler:auto ... Not running on Mono'
-				nativeCompiler = 'provider'
+		if nativeCompiler == '' or nativeCompiler == 'auto'
+			nativeCompiler = 'zig'
 		c.nativeCompiler = nativeCompiler
-		c.willWriteZigToDisk = not nativeCompiler.endsWith('.dll')  # only Cobra.Sharp.*.dll will take in-memory source code
+		c.willWriteZigToDisk = true  # always write Zig source to disk
 
 		c.writeZig  # extension method
 		if c.willWriteTestInvocation
 			c.writeZigTestInvocation
-
-
-	def _candidateDllNames as String* is private
-		# .monoVersionString could be '2.6.7' or 'Cobra.Sharp.2_8 (tarball Mon Oct 11 00:24:15 PDT 2010).dll'
-		monoVer = CobraCore.monoVersionString.split(c' ')[0].trim
-		if '.' in monoVer
-			parts = monoVer.split(c'.')
-			if parts.length >= 2
-				ver = parts[0] + '_' + parts[1]  # ex: '2.4', '2.6', '2.7'
-				name = 'Cobra.Zig.' + ver + '.dll'
-				yield name
-		yield 'Cobra.Zig.dll'
 
 
 class CompileZigCodePhase inherits Phase

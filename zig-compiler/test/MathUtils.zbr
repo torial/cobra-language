@@ -1,0 +1,7 @@
+class MathUtils
+    shared
+        def double(x as int) as int
+            return x * 2
+
+        def square(x as int) as int
+            return x * x

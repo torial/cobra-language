@@ -1,0 +1,30 @@
+class Main
+    shared
+        def main
+            # ── Format specs in string interpolation ─────────────────────
+            # Zero-padded hex: 08x → {x:0>8}
+            var n as int32 = 255
+            print "${n:08x}"
+
+            # Float precision: .2f → {d:.2}
+            var fval as float64 = 3.14159
+            print "${fval:.2f}"
+
+            # Right-aligned string: >20 → {s:>20}
+            var greeting as str = "hello"
+            print "${greeting:>20}"
+
+            # Left-aligned with fill: <-15 → {s:-<15}
+            var tag as str = "ok"
+            print "${tag:-<15}"
+
+            # ── padLeft / padRight / center ───────────────────────────────
+            var word as str = "hi"
+            print word.padLeft(8)
+            print word.padRight(8)
+            print word.center(8)
+
+            # ── bytes() — iterate raw bytes of a string ──────────────────
+            var s as str = "ab"
+            for c in s.bytes()
+                print "${c:c}"

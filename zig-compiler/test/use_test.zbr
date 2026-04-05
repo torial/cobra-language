@@ -1,0 +1,9 @@
+use MathUtils
+
+class App
+    shared
+        def main
+            var d as int = MathUtils.double(7)
+            var s as int = MathUtils.square(4)
+            print d
+            print s

@@ -1,0 +1,14 @@
+class Main
+    shared
+        def main
+            var handler = def(req as HttpRequest) as HttpResponse
+                if req.path == "/"
+                    return HttpResponse.ok("<h1>Hello from Zebra!</h1>")
+                if req.path == "/greet"
+                    var msg as str = "Hello, ${req.method} ${req.path}"
+                    return HttpResponse.ok(msg)
+                if req.path == "/echo"
+                    return HttpResponse.ok(req.content)
+                return HttpResponse.notFound("<h1>404 Not Found</h1>")
+            print "Listening on http://localhost:8080"
+            Http.serve(8080, handler)

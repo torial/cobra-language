@@ -1,0 +1,11 @@
+class Main
+    shared
+        def main
+            var n as int = 42
+            var f as float = 3.14
+            var s1 = n.toString()
+            var s2 = f.toString()
+            print s1
+            print s2
+            var big as int = -100
+            print big.toString()

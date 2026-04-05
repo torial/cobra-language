@@ -1,0 +1,9 @@
+class Counter
+    shared var count as int = 0
+
+class Program
+    shared
+        def main
+            Counter.count = Counter.count + 1
+            Counter.count = Counter.count + 1
+            print Counter.count

@@ -1,0 +1,11 @@
+class Program
+    shared
+        def main
+            var double = def(x as int) = x * 2
+            var offset as int = 10
+            var adder = def(x as int)
+                capture
+                    var offset as int = offset
+                print x + offset
+            print double(7)
+            adder(5)

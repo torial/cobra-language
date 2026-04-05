@@ -1,0 +1,9 @@
+class Program
+    shared
+        def main
+            var nums as List(int) = List()
+            nums.add(10)
+            nums.add(20)
+            nums.add(30)
+            for x in nums.items
+                print x

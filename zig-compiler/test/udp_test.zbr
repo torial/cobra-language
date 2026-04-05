@@ -1,0 +1,10 @@
+class Main
+    shared
+        def main
+            # ── UDP send ─────────────────────────────────────────────────────
+            # Send a datagram to a local echo server (if available).
+            # We just verify the socket opens and send returns without error.
+            var sock as UdpSocket = Udp.socket()
+            sock.send("127.0.0.1", 9999, "hello udp")
+            sock.close()
+            print "ok"

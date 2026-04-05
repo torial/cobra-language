@@ -1,0 +1,28 @@
+class FileInfo
+    var path as str
+    var code as int
+
+    cue init(p as str, c as int)
+        path = p
+        code = c
+
+    def toString as str
+        return "FileInfo(".concat(path).concat(")")
+
+class Main
+    shared
+        def tryRead(path as str) throws
+            raise "file not found", FileInfo(path, 404)
+
+        def main
+            try
+                Main.tryRead("data.txt")
+            catch |e|
+                print e.message
+                print e.details.toString()
+
+            # Simple raise (no details)
+            try
+                raise "simple error"
+            catch |e|
+                print e.message

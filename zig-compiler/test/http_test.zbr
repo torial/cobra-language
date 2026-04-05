@@ -1,0 +1,11 @@
+class Main
+    shared
+        def main
+            # ── Http.get ─────────────────────────────────────────────────────
+            var response as HttpResponse = Http.get("http://httpbin.org/get")
+            print response.status       # 200
+            print response.text.len     # some positive number
+
+            # ── Http.post ────────────────────────────────────────────────────
+            var r2 as HttpResponse = Http.post("http://httpbin.org/post", "hello=world")
+            print r2.status             # 200

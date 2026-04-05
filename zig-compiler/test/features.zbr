@@ -1,0 +1,33 @@
+class Counter
+    var count as int = 0
+
+    def increment
+        count = count + 1
+
+    def value as int
+        return count
+
+class Program
+    shared
+        def main
+            # Test pipeline operator
+            var nums as int = 42
+            print nums
+
+            # Test with block (contextual self)
+            var c as Counter = zig"Counter{}"
+            c.increment()
+            c.increment()
+            c.increment()
+            print c.value()
+
+            # Test expression-body lambda
+            var double = def(x as int) = x + x
+            var result = double(5)
+            print result
+
+            # Test except struct update
+            var c2 as Counter = zig"Counter{}"
+            var c3 = c2 except
+                count = 99
+            print c3.count

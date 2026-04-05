@@ -1,0 +1,25 @@
+class Program
+    shared
+        def main
+            var nums as List(int) = List()
+            nums.add(10)
+            nums.add(20)
+            nums.add(30)
+            print nums.len
+            print nums.at(1)
+            nums.remove(0)
+            print nums.len
+
+            var scores as HashMap(str, int) = HashMap()
+            scores.put("alice", 95)
+            scores.put("bob", 87)
+            print scores.contains("alice")
+            print scores.fetch("alice")
+            print scores.len
+
+            var greeting as str = "hello"
+            print greeting.contains("ell")
+            print greeting.startsWith("hel")
+            print greeting.endsWith("llo")
+            var full as str = greeting.concat(" world")
+            print full

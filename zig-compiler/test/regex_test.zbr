@@ -1,0 +1,44 @@
+class Main
+    shared
+        def main
+            # Basic match
+            var re1 as Regex = Regex.compile("hello")
+            print re1.match("hello")          # true
+            print re1.match("world")          # false
+
+            # Wildcard and star
+            var re2 as Regex = Regex.compile("h.*o")
+            print re2.match("hello")          # true
+            print re2.match("ho")             # true
+            print re2.match("hi")             # false
+
+            # Digit class shorthand
+            var re3 as Regex = Regex.compile("\\d+")
+            print re3.match("42")             # true
+            print re3.match("abc")            # false
+
+            # Alternation
+            var re4 as Regex = Regex.compile("cat|dog")
+            print re4.match("cat")            # true
+            print re4.match("dog")            # true
+            print re4.match("fish")           # false
+
+            # find — returns matched substring
+            var re5 as Regex = Regex.compile("\\d+")
+            print re5.find("abc 42 def")      # 42
+            print re5.find("no digits")       # (empty string)
+
+            # Escape sequences — literal dot
+            var re6 as Regex = Regex.compile("\\d+\\.\\d+")
+            print re6.match("3.14")           # true
+            print re6.match("3")              # false
+
+            # findAll — returns all matches as a slice
+            var re7 as Regex = Regex.compile("\\d+")
+            for m in re7.findAll("one 1 two 22 three 333")
+                print m                       # 1, 22, 333
+
+            # replace — substitute all matches
+            var re8 as Regex = Regex.compile("\\d+")
+            print re8.replace("abc 42 def 99", "NUM")   # abc NUM def NUM
+            print re8.replace("no digits here", "X")    # no digits here

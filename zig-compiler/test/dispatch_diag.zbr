@@ -1,0 +1,6 @@
+class Main
+    shared
+        def main
+            var n as int = 42
+            var s = n.toString()
+            print s

@@ -1,0 +1,6 @@
+class App
+    shared
+        def main
+            var b as int? = 42
+            var c as int = b to!
+            print c

@@ -1,0 +1,17 @@
+class Math
+    shared
+        def add(a as int, b as int) as int
+            return a + b
+
+        def double(x as int) as int
+            return x + x
+
+        def main
+            # Pipeline: 3 -> add(10) -> double() = double(add(3, 10)) = 26
+            var result = 3 -> Math.add(10) -> Math.double()
+            print result
+
+            # Expression-body lambda with explicit return type
+            var triple = def(x as int) as int = x + x + x
+            var t = triple(7)
+            print t

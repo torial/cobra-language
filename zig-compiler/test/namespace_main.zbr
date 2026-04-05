@@ -1,0 +1,5 @@
+namespace App
+    class Runner
+        shared
+            def main
+                print "from namespace"

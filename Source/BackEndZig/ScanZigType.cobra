@@ -355,7 +355,7 @@ class Compiler is partial
 		finally
 			_curModule = saveModule
 
-	def dotNetFixNilableMemberSigs
+	def zigFixNilableMemberSigs
 		# Fix the listed members to be non Nilable
 		# TODO: this really needs to go in a separate file that the compiler reads each time
 		# TODO: look to see if what the Spec# team put together can be leveraged instead of recreating all this work!

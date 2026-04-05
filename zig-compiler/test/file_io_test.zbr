@@ -1,0 +1,10 @@
+class Main
+    shared
+        def main
+            File.write("test/_tmp_file.txt", "hello from zebra\n")
+            var content = File.read("test/_tmp_file.txt")
+            print content
+            var exists = File.exists("test/_tmp_file.txt")
+            print exists
+            var missing = File.exists("test/_no_such_file.txt")
+            print missing

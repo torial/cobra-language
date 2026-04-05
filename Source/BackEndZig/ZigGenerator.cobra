@@ -1,4 +1,4 @@
-"""
+﻿"""
 The code in this file should not .throwError, record warnings, etc.
 All of that happens during .bindFoo phases.
 """
@@ -116,299 +116,76 @@ class Compiler is partial
 		return outName
 	
 	def compileZig
-		.compileZig(List<of String>())
-
-	def compileZig(extraCscOptions as List<of String>)
 		require
 			.modules.count
 		body
 			v, options = .verbosity, .options
-			optChar = '-'
 
 			# exe names
 			outName = .computeOutNameZig
-			
-			# compute backEndOptions
-			backEndOptions = List<of String>()
-			target = options.getDefault('target', '') to String
-			if target.length
-				if options.boolValue('test') and target == 'lib'
-					# C# doesn't allow a .main method designation on libraries,
-					# so don't respect the -target in this situation
-					pass
-				else
-					if target=='lib', target = 'library'
-					backEndOptions.add('[optChar]target:[target]')
-				
-			delaySign = options.boolValue('delay-sign')
-			if delaySign, backEndOptions.add('[optChar]delaysign+')
 
-			keyContainer = options.getDefault('key-container', nil)
-			if keyContainer, backEndOptions.add('[optChar]keycontainer:[keyContainer]')
-
-			keyFile = options.getDefault('key-file', nil)
-			if keyFile, backEndOptions.add('[optChar]keyfile:[keyFile]')
-
-			optimize = options.boolValue('optimize')
-			if optimize, backEndOptions.add('[optChar]optimize+')
-
-			for refer in .loadedReferences  # don't take the library references from options, because the references can grow
-				if refer == 'Cobra.Lang.dll', continue  # hack. remove at some point 2012-07-17
-				backEndOptions.add('[optChar]r:[refer]')
-
-			debug = options.getDefault('debug', '') to String
-			if debug.length
-				# TODO: mono does not support full and pdbonly afaik
-				if debug == '0', debug = '-'
-				else if debug == '1', debug = '+'
-				assert debug in ['-', '+', 'full', 'pdbonly'], debug
-				backEndOptions.add('[optChar]debug' + if(debug.length==1, debug, ':[debug]'))
-
-			platform = options.getDefault('zig-platform', '') to String
-			if platform.length
-				backEndOptions.add('[optChar]platform:[platform]')
-
-			if v < 3, backEndOptions.add('[optChar]nologo')
-
-			backEndOptions.add('[optChar]nowarn:0108,0162,0169,0183,0184,0219,0414,0429,1717,1718')
-				# CS0108: Hides inherited member. Mono reports this for workspace/Tests/720-libraries/400-other/500-follow-dependencies/102-lib-b.cobra. MS does not. For multiple reasons, disabling is the best choice here.
-				# CS0162: Unreachable code detected
-				# CS0169: The private field `Cobra.Core.CannotReadPropertyException._ih_invariantGuard' is never used
-				# CS0183: The given expression is always of the provided (`int') type
-				# CS0184: The given expression is never of the provided (`decimal') type
-				# CS0219: The variable `x' is assigned but its value is never used / Cobra handles these
-				# CS0414: The private field `Point._ih_invariantGuard' is assigned but its value is never used
-				# CS0429: Unreachable expression code detected / MS C# 2.0 gives these especially for the 'bool' test case in 'basics'
-				# CS1717: Assignment made to same variable; did you mean to assign something else?
-				# CS1718: A comparison made to same variable.
-
-			if .mainMethodTypeName <> '', backEndOptions.add('[optChar]main:[.mainMethodTypeName]')
-			backEndOptions.addRange(extraCscOptions)
-
-			ZigArgs = .options.getDefault('native-compiler-arg', List<of String>()) to List<of String>
-			if ZigArgs.count
-				for ZigArg in ZigArgs
-					if ZigArg.length > 2 and ZigArg[0]=="'" and ZigArg[ZigArg.length-1]=="'"
-						# on Windows, you should really use double quotes instead of single, but
-						# we try to compensate here.
-						ZigArg = ZigArg[1:-1]
-					if ZigArg.length, backEndOptions.add(ZigArg)
-
-			for libPath in .options.getStringList('library-directory')
-				backEndOptions.add('-lib:[libPath]')
-
-			# Cobra.Core.dll is in the same directory as cobra.exe
-			libPath = Path.getDirectoryName(CobraCore.exePath) to !
-			backEndOptions.add('-lib:[libPath]')
-
-			# Passing -pkg: to the C# compiler seems unnecessary.
-			# Compiler.refsForPackage already gets the .dll refs and including this was reported at
-			# http://cobra-language.com/forums/viewtopic.php?f=4&t=263  2008-12 / 2009-01
-			# for pkgName in .options.getStringList('pkg')
-			# 	backEndOptions.add('-pkg:[pkgName]')
-
-			# .cs files
-			ZigFileNameList = List<of String>()
+			# collect .zig source files
+			zigFileNameList = List<of String>()
 			for module in _modules
 				if module.ZigFileName.length
-					ZigFileNameList.add(module.ZigFileName)
-			assert ZigFileNameList.count
+					zigFileNameList.add(module.ZigFileName)
+			assert zigFileNameList.count
+
+			# build zig compiler arguments: zig build-exe <files> -femit-bin=<output>
+			zigArgs = List<of String>()
+			zigArgs.add('build-exe')
+			zigArgs.addRange(zigFileNameList)
+			zigArgs.add('-femit-bin=[_fullExeFileName]')
+
+			# optimization level
+			if options.boolValue('optimize')
+				zigArgs.add('-O')
+				zigArgs.add('ReleaseFast')
+
+			# cross-compilation target (zig native triple, e.g. x86_64-linux-gnu)
+			target = options.getDefault('zig-target', '') to String
+			if target.length
+				zigArgs.add('-target')
+				zigArgs.add(target)
+
+			# pass-through extra args from -native-compiler-arg
+			extraArgs = options.getDefault('native-compiler-arg', List<of String>()) to List<of String>
+			for arg in extraArgs
+				if arg.length > 2 and arg[0] == c"'" and arg[arg.length-1] == c"'"
+					arg = arg[1:-1]
+				if arg.length, zigArgs.add(arg)
 
 			# compilation command
 			if v, print 'Compiling to produce [outName]'
-			
-			# the 'auto' choice for -native-compiler is handled in GenerateZigCodePhase
+
 			nativeCompiler = .nativeCompiler
-			if nativeCompiler == 'provider'
-				# otherwise use Code Provider
-				nativeCompiler = _compileZigWithCodeProvider(optChar, .joinOptions(backEndOptions), ZigFileNameList) ? ''
-				if nativeCompiler <> ''
-					_compileZigWithProcessCSC(nativeCompiler, optChar, .joinOptions(backEndOptions), ZigFileNameList)
-			else if nativeCompiler.endsWith('.dll')
-				# assume the user is specifying some kind of Cobra.Zig*.dll
-				_compileZigWithZigCompilerLib(nativeCompiler, optChar, backEndOptions, ZigFileNameList)
-			else if nativeCompiler <> ''
-				# use Process class instead of CZigCodeProvider because the user specified a path to a C# compiler
-				_compileZigWithProcessCSC(optChar, .joinOptions(backEndOptions), ZigFileNameList)
-			else
-				.recordError(SourceException('Unknown -native-compiler:[nativeCompiler]'))
+			if nativeCompiler == ''
+				nativeCompiler = 'zig'
 
+			_compileZigWithProcess(nativeCompiler, zigArgs)
 			_deleteIntermediateFiles
-			
-			_copyCoreZig(outName)
 
-	def _copyCoreZig(outName as String)
-		if not .options.boolValue('copy-core'), return
-		sourceDir = Path.getDirectoryName(Assembly.getEntryAssembly.location) ? ''
-		outDir = Path.getDirectoryName(outName) ? ''
-		_copyFile(sourceDir, outDir, 'Cobra.Core.dll')
-		if .options.getDefault('debug', '') not in ['', '-', '0', 0, false]
-			if CobraCore.isRunningOnMono and File.exists(Path.combine(sourceDir, 'Cobra.Core.dll.mdb'))
-				_copyFile(sourceDir, outDir, 'Cobra.Core.dll.mdb')
-			else if File.exists(Path.combine(sourceDir, 'Cobra.Core.pdb'))
-				_copyFile(sourceDir, outDir, 'Cobra.Core.pdb')
-
-	def _copyFile(sourceDir as String, outDir as String, fileName as String)		
-		source = Path.combine(sourceDir, fileName)
-		destination = Path.combine(outDir, fileName)
-		try
-			File.copy(source, destination, true)
-		catch exc as Exception
-			.recordError(SourceException('Cannot copy [fileName] due to: [exc.typeOf.name]: [exc.message]'))
-		
-	def joinOptions(options as List<of String>) as String
-		sb = StringBuilder()
-		sep = ''
-		for opt in options
-			sb.append(sep)
-			if '"' not in opt
-				sb.append('"[opt]"')  # helps with: '-foo:path with spaces'
-			else
-				sb.append(opt)
-			sep = ' '
-		return sb.toString
-
-	var _cobraZigProxy as CobraZigProxy?
-	
-	def _compileZigWithZigCompilerLib(dllName as String, optChar as String, backEndOptions as List<of String>, ZigFileNameList as List<of String>)
-		v = .verbosity
-		
-		if _cobraZigProxy is nil
-			_cobraZigProxy = CobraZigProxy(dllName)
-			if _cobraZigProxy.error
-				print 'Cannot use Zig compiler library because:'
-				print _cobraZigProxy.error
-				throw StopCompilation(this)
-		_cobraZigProxy.reset
-
-		backEndOptions.add('[optChar]out:[_fullExeFileName]')
-
-		args = List<of String>(backEndOptions)
-		args.addRange(ZigFileNameList)
-
-		filenameToSource = nil to IDictionary<of String, String>?
-		if .willWriteZigToDisk
-			if v >= 3, print 'Intermediate code is on disk.'
-		else
-			if v >= 3, print 'Intermediate code is in memory.'
-			filenameToSource = Dictionary<of String, String>()
-			for fileName, writer in _ZigSource
-				filenameToSource.add(fileName, writer.toString)
-
-		if _verbosity >= 2, print '[dllName] [args]'
-		output = StringWriter()
-		saveOut = Console.out
-		Console.setOut(output)
-		try
-			_cobraZigProxy.invokeCompiler(args.toArray to !, output, filenameToSource)
-		finally
-			Console.setOut(saveOut)
-		_parseZigCompilerOutput(output.toString)
-
-	def _compileZigWithProcessCSC(optChar as String, backEndOptions as String, ZigFileNameList as List<of String>)
-		# locate the C# compiler
-		cscPath = .options.getDefault('native-compiler', '') to String
-		assert cscPath <> ''
-		if File.exists(cscPath)
-			pass
-		else if File.exists(cscPath+'.exe')
-			cscPath += '.exe'
-		_compileZigWithProcessCSC(cscPath, optChar, backEndOptions, ZigFileNameList)
-
-	def _compileZigWithProcessCSC(zigcPath as String, optChar as String, backEndOptions as String, ZigFileNameList as List<of String>)
-		backEndOptions += ' "[optChar]out:[_fullExeFileName]"'
+	def _compileZigWithProcess(zigPath as String, zigArgs as List<of String>)
 		p = System.Diagnostics.Process()
-		p.startInfo.fileName = zigcPath
-		ZigFileNames = (for fileName in ZigFileNameList get '"' + fileName + '"').join(' ')
-		p.startInfo.arguments = '[backEndOptions] [ZigFileNames]'
+		p.startInfo.fileName = zigPath
+		p.startInfo.arguments = (for arg in zigArgs get '"[arg]"').join(' ')
 		if _verbosity >= 2
 			print '[p.startInfo.fileName] [p.startInfo.arguments]'
 		try
 			output = p.runAndCaptureAllOutput
 		catch exc as System.ComponentModel.Win32Exception
-			# ex: 'ApplicationName='gmcsaoeu', CommandLine='"-r:Cobra.Core.dll" "-nologo" ...'
-			/#
-			Win32Exception.NativeErrorCode
-			http://msdn.microsoft.com/en-us/library/ms681382.aspx
-			0 = ERROR_SUCCESS
-			1 = ERROR_INVALID_FUNCTION
-			2 = ERROR_FILE_NOT_FOUND
-			3 = ERROR_PATH_NOT_FOUND
-			4 = ERROR_TOO_MANY_OPEN_FILES
-			5 = ERROR_ACCESS_DENIED
-			...
-			#/
 			if exc.nativeErrorCode == 2
-				# Sometimes Mono will look for 'dmcs' in the PATH and find it,
-				# and other times it will not. Don't know why.
-				if not Path.directorySeparatorChar in zigcPath
-					find = Utils.findFileInSystemPath(zigcPath)
+				if not Path.directorySeparatorChar in zigPath
+					find = Utils.findFileInSystemPath(zigPath)
 					if find
-						if _verbosity >= 1, print 'Found "[zigcPath]" at "[find]".'
-						_compileZigWithProcessCSC(find, optChar, backEndOptions, ZigFileNameList)
+						if _verbosity >= 1, print 'Found "[zigPath]" at "[find]".'
+						_compileZigWithProcess(find, zigArgs)
 						return
-				.recordError(SourceException('Cannot find compiler specified by -native-compiler argument: [zigcPath]'))
-				if Utils.isDevMachine
-					print exc
-					print 'errorCode:', exc.errorCode
-					print 'nativeErrorCode:', exc.nativeErrorCode
+				.recordError(SourceException('Cannot find Zig compiler. Ensure "zig" is in your PATH or specify a path with -native-compiler.'))
 				return
 			else
 				throw
-		# TODO: check p.exitCode, especially if output is empty
 		_parseZigCompilerOutput(output)
-
-	def _compileZigWithCodeProvider(optChar as String, backEndOptions as String, ZigFileNameList as List<of String>) as String?
-		""" Returns a compiler to use if the CodeDom Compiler failed mysteriously. Otherwise, returns nil. """
-		provider = Zig.ZigCodeProvider()
-		cp = System.CodeDom.Compiler.CompilerParameters()
-		cp.compilerOptions = backEndOptions
-		cp.referencedAssemblies.add('System.dll')
-		cp.generateExecutable = .options.boolValue('test') or .options.getDefault('target', 'exe') in ['exe', 'winexe']
-		cp.outputAssembly = _fullExeFileName
-		if _verbosity >= 2
-			print 'Code Provider =', provider
-			print '    compilerOptions =', backEndOptions
-			print '    referencedAssemblies =', cp.referencedAssemblies
-			print '    generateExecutable =', cp.generateExecutable
-			print '    outputAssembly =', _fullExeFileName
-			print '    ZigFileNameList =', ZigFileNameList
-		try
-			cr = provider.compileAssemblyFromFile(cp, ZigFileNameList.toArray)
-		catch exc as SystemException
-			# On Mono targeting zig 2, the codedom provider works fine.
-			# However, on at least Mono 2.10.8.1 on Ubuntu 12.04 targeting zig **4**
-			# this exception can be thrown:
-			#     SystemException: Error running dmcs: Cannot find the specified file
-			# ...despite the fact that dmcs is in the PATH, sits next to gmcs,
-			# works from the command line, etc.
-			if 'Error running dmcs: Cannot find the specified file' in exc.toString
-				if _verbosity >= 2, print 'CodeDom compiler failed for dmcs. Switching to external compiler.'
-				return 'dmcs'
-			else
-				throw
-			
-		if false
-			trace cr.compiledAssembly
-			trace cr.evidence
-			trace cr.pathToAssembly
-			trace cr.errors
-			trace cr.output
-			trace cr.nativeCompilerReturnValue
-			trace cr.tempFiles
-		#for x in cr.output to dynamic
-		#	print 'output>', x
-		# [1:] below is to chop out the first line which is the C# compilation line
-		
-		# cr.output is empty if there was no error
-		# otherwise, the first element is the C# compilation line
-		if _verbosity >= 2 and cr.output.count > 0
-			print 'Zig compilation line created by ZigCodeProvider:'
-			print cr.output[0]
-		output = if(cr.output.count==0, '', cr.output[1:].join('\n').trim)
-		# trace output
-		_parseZigCompilerOutput(output)
-		return nil  # nil means that an external compiler does not have to be run
 
 	def _parseZigCompilerOutput(output as String)
 		for line in output.split(c'\n')
@@ -417,7 +194,6 @@ class Compiler is partial
 			if ZigCompilationMessage.willSkipMessage(line), continue
 			if _verbosity >= 3, print 'Zig message: [line]'
 			_addMessage(ZigCompilationMessage(line, this))
-
 
 ##
 ## Node

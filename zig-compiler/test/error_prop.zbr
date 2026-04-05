@@ -1,0 +1,8 @@
+class App
+    shared
+        def main
+            try
+                var x as int = 42
+                print x
+            catch
+                print "caught error"

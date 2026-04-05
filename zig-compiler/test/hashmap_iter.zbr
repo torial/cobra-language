@@ -1,0 +1,10 @@
+class Program
+    shared
+        def main
+            var scores as HashMap(str, int) = HashMap()
+            scores.put("alice", 10)
+            scores.put("bob", 20)
+            var total as int = 0
+            for k, v in scores
+                total = total + v
+            print total

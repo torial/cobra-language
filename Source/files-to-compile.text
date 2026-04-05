@@ -58,20 +58,16 @@ Phases/SuggestDefaultNumberPhase.cobra
 BackEndCommon/CurlyWriter
 BackEndCommon/CurlyGenerator
 
+BackEndZig/ZigProxy
+BackEndZig/ZigBackEnd
+BackEndZig/ZigType
+BackEndZig/ScanZigType
+BackEndZig/ZigGenerator
+BackEndZig/ZigCompilationMessage
+
 BackEndClr/CobraSharpProxy
 BackEndClr/ClrBackEnd
 BackEndClr/ClrType
 BackEndClr/ScanClrType
 BackEndClr/SharpGenerator
 BackEndClr/SharpCompilationMessage
-
-#BackEndClr/CobraJvmProxy
-BackEndJvm/JvmBackEnd
-BackEndJvm/JvmType
-BackEndJvm/JvmJarSig
-BackEndJvm/ScanJvmType
-BackEndJvm/JavaGenerator
-BackEndJvm/JavaCompilationMessage
-
-BackEndObjC/ObjcBackEnd
-BackEndObjC/ObjcGenerator

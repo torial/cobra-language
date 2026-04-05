@@ -1,0 +1,30 @@
+class Main
+    shared
+        def main
+            # Named aliases
+            var a as int32 = 42
+            var b as uint8 = 255
+            var c as float32 = 3.14
+            var d as byte = 200
+            var e as int64 = 9000000000
+
+            print a
+            print b
+            print c
+            print d
+            print e
+
+            # uint default (u64)
+            var f as uint = 100
+            print f
+
+            # Sized arithmetic
+            var x as int16 = 1000
+            var y as int16 = 24
+            print x + y
+
+            # Arbitrary-width via int(N) syntax
+            var p as int(8) = 127
+            var q as uint(16) = 65000
+            print p
+            print q

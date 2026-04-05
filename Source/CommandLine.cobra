@@ -99,9 +99,9 @@ class OptionSpec inherits Dictionary<of String, dynamic>
 
 	def _unpackPlatforms
 		if not .containsKey('platforms')
-			this['platforms'] = ['jvm', '.net', 'objc']
+			this['platforms'] = ['.net', 'zig']
 		for platform in this['platforms']
-			assert platform in ['jvm', '.net', 'objc']
+			assert platform in ['.net', 'zig']
 		this['platforms'] = Set<of String>(this['platforms'] to List<of String>)
 
 
@@ -142,8 +142,8 @@ class CommandLineOptionSpecs
 			'name': 'back-end',
 			'description': 'Specify the back-end of the compiler, possibly different than the build platform. Used for cross-compilation.',
 			'type': 'menu',
-			'choices': ['none', 'clr', 'jvm', 'objc'],
-			'args': 'none|clr|jvm|objc',
+			'choices': ['none', 'clr', 'zig'],
+			'args': 'none|clr|zig',
 			'default': 'none',
 		},
 		{

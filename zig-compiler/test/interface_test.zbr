@@ -1,0 +1,44 @@
+interface Greetable
+    def greet as str
+    def greetName(name as str) as str
+
+class English implements Greetable
+    def greet as str
+        return "Hello"
+
+    def greetName(name as str) as str
+        return "Hello, ".concat(name)
+
+class Spanish implements Greetable
+    def greet as str
+        return "Hola"
+
+    def greetName(name as str) as str
+        return "Hola, ".concat(name)
+
+class Counter
+    var count as int
+
+    cue init()
+        count = 0
+
+    def increment
+        count = count + 1
+
+    def value as int
+        return count
+
+class Main
+    shared
+        def main
+            var e = English()
+            var s = Spanish()
+            print e.greet()
+            print s.greet()
+            print e.greetName("Alice")
+            print s.greetName("Bob")
+            var c = Counter()
+            c.increment()
+            c.increment()
+            c.increment()
+            print c.value()

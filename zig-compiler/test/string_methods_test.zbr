@@ -1,0 +1,52 @@
+class Main
+    shared
+        def main
+            # ── len property ─────────────────────────────────────────────
+            var greeting as str = "hello"
+            print greeting.len        # 5
+
+            # ── trimLeft / trimRight ──────────────────────────────────────
+            var padded as str = "  hi  "
+            print padded.trimLeft()   # "hi  "
+            print padded.trimRight()  # "  hi"
+
+            # ── isEmpty ───────────────────────────────────────────────────
+            var empty as str = ""
+            print empty.isEmpty()     # true
+            print greeting.isEmpty()  # false
+
+            # ── count ─────────────────────────────────────────────────────
+            var sentence as str = "banana"
+            print sentence.count("an")  # 2
+
+            # ── join ──────────────────────────────────────────────────────
+            var words as List(str) = List()
+            words.add("one")
+            words.add("two")
+            words.add("three")
+            print ", ".join(words)     # "one, two, three"
+
+            # ── lines ─────────────────────────────────────────────────────
+            var text as str = "line1\nline2\nline3"
+            for line in text.lines()
+                print line
+
+            # ── reverse ───────────────────────────────────────────────────
+            print greeting.reverse()   # "olleh"
+
+            # ── toHex ─────────────────────────────────────────────────────
+            var hi as str = "hi"
+            print hi.toHex()           # "6869"
+
+            # ── padLeft / padRight with custom fill ───────────────────────
+            print greeting.padLeft(8, '*')   # "***hello"
+            print greeting.padRight(8, '-')  # "hello---"
+
+            # ── isAlpha / isNumeric ────────────────────────────────────────
+            var alpha as str = "hello"
+            var digits as str = "12345"
+            var mixed as str = "hi2"
+            print alpha.isAlpha()    # true
+            print digits.isAlpha()   # false
+            print digits.isNumeric() # true
+            print mixed.isNumeric()  # false

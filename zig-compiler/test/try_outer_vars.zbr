@@ -1,0 +1,17 @@
+class App
+    shared
+        def risky(x as int) as int throws
+            if x < 0
+                raise "negative", x
+            return x * 2
+
+        def main
+            var base as int = 10
+            var multiplier as int = 3
+            try
+                var result as int = try App.risky(base)
+                var total as int = result * multiplier
+                print total
+            catch
+                print "error"
+            print base

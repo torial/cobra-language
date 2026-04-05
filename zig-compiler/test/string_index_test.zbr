@@ -1,0 +1,9 @@
+class Main
+    shared
+        def main
+            var s as str = "hello"
+            var c = s[0]
+            print c
+            var sub = s[1..3]
+            print sub
+            print s.len

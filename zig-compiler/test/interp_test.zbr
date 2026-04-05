@@ -1,0 +1,9 @@
+class Main
+    shared
+        def main
+            var name = "world"
+            var n = 42
+            print "hello ${name}!"
+            print "n = ${n}"
+            var msg as str = "result: ${n} and ${name}"
+            print msg

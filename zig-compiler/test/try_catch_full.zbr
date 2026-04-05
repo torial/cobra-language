@@ -1,0 +1,15 @@
+class App
+    shared
+        def risky(x as int) as int throws
+            if x < 0
+                raise "negative input", x
+            return x * 2
+
+        def main
+            try
+                var result as int = try App.risky(5)
+                print result
+            catch
+                print "caught an error"
+
+            print "after try"

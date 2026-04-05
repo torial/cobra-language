@@ -1,0 +1,10 @@
+use MathUtils
+use StringHelper
+
+class App
+    shared
+        def main
+            var n as int = MathUtils.double(3)
+            print n
+            var g as str = StringHelper.greet("hello")
+            print g

@@ -1,0 +1,9 @@
+class App
+    shared
+        def risky(x as int) as int throws
+            if x < 0
+                raise "negative input", x
+            return x * 2
+
+        def main
+            print "throws annotation compiles"

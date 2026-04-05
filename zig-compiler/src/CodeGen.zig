@@ -1,0 +1,4553 @@
+//! CodeGen: emit Zig source from a Zebra AST.
+//!
+//! Pass 4 of the compiler: consumes the AST and Resolver's name-resolution
+//! tables, and emits a Zig source file to `writer`.
+//!
+//! ## Mapping rules
+//!
+//! | Zebra              | Zig                                              |
+//! |--------------------|--------------------------------------------------|
+//! | `class Foo`        | `pub const Foo = struct { ... };`                |
+//! | `interface IFoo`   | `pub fn IFoo(comptime T: type) void { ... }`     |
+//! | `mixin M`          | inlined at `adds M` sites; no standalone output  |
+//! | `struct Foo`       | `pub const Foo = struct { ... };`                |
+//! | `enum Color`       | `pub const Color = enum { ... };`                |
+//! | `namespace Ns`     | `pub const Ns = struct { ... };`                 |
+//! | `int`              | `i64`                                            |
+//! | `float`            | `f64`                                            |
+//! | `bool`             | `bool`                                           |
+//! | `char`             | `u21`                                            |
+//! | `String`           | `[]const u8`                                     |
+//! | `T?`               | `?T`                                             |
+//! | `!T`               | `anyerror!T`                                     |
+//! | `zig"..."`, `zig'...'` | inner content (inline Zig literal)           |
+//!
+//! ## Self-prefix injection
+//!
+//! Inside method bodies, `ExprIdent` nodes that resolve to `.var_` (field)
+//! symbols are emitted as `self.name`.  All other identifiers are emitted as
+//! `name`.  This uses the `exprs` map from the Resolver.
+//!
+//! ## Mixins
+//!
+//! Mixin members are inlined directly into every class that names them in an
+//! `adds` clause.  Mixins are not emitted as standalone types.
+//!
+//! ## Interfaces
+//!
+//! Interfaces are emitted as comptime checker functions:
+//! ```zig
+//! pub fn IFoo(comptime T: type) void {
+//!     comptime {
+//!         if (!@hasDecl(T, "method")) @compileError("...");
+//!     }
+//! }
+//! ```
+//! Every class that `implements IFoo` gets a `comptime { IFoo(@This()); }` block.
+//!
+//! ## Inheritance
+//!
+//! Zebra inheritance is intentionally **not** mapped to Zig.  Classes that
+//! extend other classes require manual rewrite to use composition.
+
+const std         = @import("std");
+const Ast         = @import("Ast.zig");
+const Resolver    = @import("Resolver.zig");
+const ST          = @import("SymbolTable.zig");
+const TypeChecker = @import("TypeChecker.zig");
+const Builtins    = @import("Builtins.zig");
+
+const Allocator = std.mem.Allocator;
+
+// ── Public entry point ────────────────────────────────────────────────────────
+
+/// Emit Zig source for `module` to `writer`.
+///
+/// - `resolve` — Pass-2 name-resolution tables (needed for `self.` injection).
+/// - `tc`      — Pass-3 type information.  Pass `null` to skip typed format
+///               specifiers (all `print` args fall back to `{any}`).
+/// - `alloc`   — Used for the mixin index and per-method mutation analysis.
+/// - `writer`  — Destination for the generated Zig source.
+pub fn generate(
+    module:  Ast.Module,
+    resolve: *const Resolver.ResolveResult,
+    tc:      ?*const TypeChecker.TypeCheckResult,
+    alloc:   Allocator,
+    writer:  std.io.AnyWriter,
+) anyerror!void {
+    var mixins = try collectMixins(module, alloc);
+    defer mixins.deinit();
+    var union_names = try collectUnionNames(module, alloc);
+    defer union_names.deinit();
+
+    const g = Generator{
+        .resolve   = resolve,
+        .tc        = tc,
+        .w         = writer,
+        .indent    = 0,
+        .owner     = "",
+        .in_method = false,
+        .mixins    = &mixins,
+        .alloc     = alloc,
+        .mutated        = null,
+        .closure_vars   = null,
+        .capture_fields = &.{},
+        .union_names    = &union_names,
+    };
+    try g.genModule(module);
+}
+
+// ── Mixin pre-pass ────────────────────────────────────────────────────────────
+
+fn collectMixins(
+    module: Ast.Module,
+    alloc:  Allocator,
+) !std.StringHashMap(*const Ast.DeclMixin) {
+    var map = std.StringHashMap(*const Ast.DeclMixin).init(alloc);
+    errdefer map.deinit();
+    for (module.decls) |decl| {
+        switch (decl) {
+            .mixin => |m| try map.put(m.name, m),
+            else   => {},
+        }
+    }
+    return map;
+}
+
+// ── Union pre-pass ────────────────────────────────────────────────────────────
+
+fn collectUnionNames(module: Ast.Module, alloc: Allocator) !std.StringHashMap(void) {
+    var set = std.StringHashMap(void).init(alloc);
+    errdefer set.deinit();
+    collectUnionNamesInDecls(module.decls, &set) catch {};
+    return set;
+}
+
+fn collectUnionNamesInDecls(decls: []const Ast.Decl, set: *std.StringHashMap(void)) !void {
+    for (decls) |decl| switch (decl) {
+        .union_    => |u| try set.put(u.name, {}),
+        .namespace => |n| try collectUnionNamesInDecls(n.decls, set),
+        .class     => |c| try collectUnionNamesInDecls(c.members, set),
+        else       => {},
+    };
+}
+
+// ── Free helper functions ─────────────────────────────────────────────────────
+
+/// Extract the simple name from a TypeRef, or null for compound forms.
+fn typeRefSimpleName(tr: Ast.TypeRef) ?[]const u8 {
+    return switch (tr) {
+        .named   => |n| n.name,
+        .generic => |g| g.name,
+        else     => null,
+    };
+}
+
+/// Map a Zebra primitive / built-in type name to the Zig equivalent.
+/// User-defined type names are returned unchanged.
+// Delegate to Builtins — single source of truth for type name mappings.
+const zigTypeName     = Builtins.zigTypeName;
+const isStringTypeName = Builtins.isStringTypeName;
+const zigGenericName  = Builtins.zigGenericName;
+
+fn isStringTypeRef(tr: Ast.TypeRef) bool {
+    return tr == .named and isStringTypeName(tr.named.name);
+}
+
+fn assignOpStr(op: Ast.AssignOp) []const u8 {
+    return switch (op) {
+        .assign          => "=",
+        .plus_eq         => "+=",
+        .minus_eq        => "-=",
+        .star_eq         => "*=",
+        .slash_eq        => "/=",
+        .percent_eq      => "%=",
+        .ampersand_eq    => "&=",
+        .vertical_bar_eq => "|=",
+        .caret_eq        => "^=",
+        .double_lt_eq    => "<<=",
+        .double_gt_eq    => ">>=",
+        // slashslash_eq, starstar_eq, question_eq are handled specially.
+        .slashslash_eq, .starstar_eq, .question_eq => "=",
+    };
+}
+
+fn binaryOpStr(op: Ast.BinaryOp) []const u8 {
+    return switch (op) {
+        .add     => "+",
+        .sub     => "-",
+        .mul     => "*",
+        .div     => "/",
+        .mod     => "%",
+        .bit_and => "&",
+        .bit_or  => "|",
+        .bit_xor => "^",
+        .shl     => "<<",
+        .shr     => ">>",
+        .eq      => "==",
+        .ne      => "!=",
+        .lt      => "<",
+        .le      => "<=",
+        .gt      => ">",
+        .ge      => ">=",
+        .and_    => "and",
+        .or_     => "or",
+        // int_div, pow, dotdot handled specially in genBinary.
+        .int_div, .pow, .dotdot => unreachable,
+    };
+}
+
+// ── Body reference analysis ───────────────────────────────────────────────────
+//
+// Two pre-scans are run on each method body before emitting code:
+//
+//  1. collectRefs  — which params / self are actually referenced?
+//                    Used to emit `_ = param;` only when a param is unused.
+//
+//  2. scanMutations — which local names appear as assignment targets?
+//                    Used to emit `const` vs `var` for local declarations.
+
+const Refs = struct {
+    /// True if any `ExprIdent` in the body resolves to a `.var_` (field) symbol,
+    /// meaning `self` is actually needed.
+    uses_self:    bool,
+    /// Names of parameters that are actually referenced in the body.
+    param_names: std.StringHashMap(void),
+
+    fn deinit(r: *Refs) void { r.param_names.deinit(); }
+};
+
+fn collectRefs(
+    stmts:   []const Ast.Stmt,
+    resolve: *const Resolver.ResolveResult,
+    alloc:   Allocator,
+) !Refs {
+    var out = Refs{ .uses_self = false, .param_names = std.StringHashMap(void).init(alloc) };
+    errdefer out.param_names.deinit();
+    try refsInStmts(stmts, resolve, &out);
+    return out;
+}
+
+fn refsInStmts(stmts: []const Ast.Stmt, r: *const Resolver.ResolveResult, o: *Refs) anyerror!void {
+    for (stmts) |s| try refsInStmt(s, r, o);
+}
+
+fn refsInStmt(stmt: Ast.Stmt, r: *const Resolver.ResolveResult, o: *Refs) anyerror!void {
+    switch (stmt) {
+        .var_      => |n| { if (n.init) |e| try refsInExpr(e, r, o); },
+        .assign    => |s| { try refsInExpr(s.target, r, o); try refsInExpr(s.value, r, o); },
+        .return_   => |s| { if (s.value) |v| try refsInExpr(v, r, o); },
+        .if_       => |s| {
+            try refsInExpr(s.cond, r, o);
+            try refsInStmts(s.then_body, r, o);
+            for (s.else_ifs) |ei| { try refsInExpr(ei.cond, r, o); try refsInStmts(ei.body, r, o); }
+            if (s.else_body) |eb| try refsInStmts(eb, r, o);
+        },
+        .while_    => |s| {
+            try refsInExpr(s.cond, r, o);
+            try refsInStmts(s.body, r, o);
+            if (s.post_body) |pb| try refsInStmts(pb, r, o);
+        },
+        .for_in    => |s| { try refsInExpr(s.iter, r, o); if (s.where) |w| try refsInExpr(w, r, o); try refsInStmts(s.body, r, o); },
+        .for_num   => |s| { try refsInExpr(s.start, r, o); try refsInExpr(s.stop, r, o); if (s.step) |st| try refsInExpr(st, r, o); try refsInStmts(s.body, r, o); },
+        .branch    => |s| {
+            try refsInExpr(s.expr, r, o);
+            for (s.on) |on| { for (on.values) |v| try refsInExpr(v, r, o); try refsInStmts(on.body, r, o); }
+            if (s.else_) |eb| try refsInStmts(eb, r, o);
+        },
+        .print     => |s| { for (s.args) |a|    try refsInExpr(a, r, o); },
+        .assert    => |s| { try refsInExpr(s.cond, r, o); if (s.message) |m| try refsInExpr(m, r, o); },
+        .yield     => |s| try refsInExpr(s.value, r, o),
+        .expr      => |e| try refsInExpr(e, r, o),
+        .defer_    => |s| try refsInStmt(s.body, r, o),
+        .contract  => |s| { for (s.exprs) |e| try refsInExpr(e, r, o); },
+        .with      => |s| { try refsInExpr(s.target, r, o); try refsInStmts(s.body, r, o); },
+        .var_except    => |s| { try refsInExpr(s.base, r, o); for (s.fields) |f| try refsInExpr(f.value, r, o); },
+        .assign_except => |s| { try refsInExpr(s.target, r, o); try refsInExpr(s.base, r, o); for (s.fields) |f| try refsInExpr(f.value, r, o); },
+        .raise    => |s| { if (s.message) |m| try refsInExpr(m, r, o); if (s.details) |d| try refsInExpr(d, r, o); },
+        .try_catch => |s| { try refsInStmts(s.body, r, o); for (s.clauses) |cl| try refsInStmts(cl.body, r, o); },
+        .pass, .break_, .continue_ => {},
+    }
+}
+
+/// Returns true if the method body contains a `raise` statement or a bare
+/// `try expr` (i.e., one not wrapped in a `try/catch` block).  Used to
+/// auto-emit `anyerror!` for methods that lack a `throws` annotation.
+/// Best-effort type name for `raise` details expression.
+/// Used to generate the per-type heap-alloc and shim.
+/// Falls back to "anyopaque" if the expression is too complex to name.
+fn detailsTypeName(expr: *const Ast.Expr) []const u8 {
+    return switch (expr.*) {
+        .ident  => |e| e.name,
+        .call   => |e| switch (e.callee.*) {
+            .ident  => |i| i.name,
+            .member => |m| switch (m.object.*) {
+                .ident => |i| i.name,   // ClassName.init(...) → "ClassName"
+                else   => "anyopaque",
+            },
+            else    => "anyopaque",
+        },
+        else    => "anyopaque",
+    };
+}
+
+fn bodyHasRaise(stmts: []const Ast.Stmt) bool {
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .raise   => return true,
+            .var_    => |n| { if (n.init) |e| if (exprHasTry(e)) return true; },
+            .assign  => |s| { if (exprHasTry(s.value)) return true; },
+            .return_ => |s| { if (s.value) |v| if (exprHasTry(v)) return true; },
+            .expr    => |e| if (exprHasTry(e)) return true,
+            .print   => |s| { for (s.args) |a| if (exprHasTry(a)) return true; },
+            .if_     => |s| {
+                if (exprHasTry(s.cond)) return true;
+                if (bodyHasRaise(s.then_body)) return true;
+                for (s.else_ifs) |ei| {
+                    if (exprHasTry(ei.cond)) return true;
+                    if (bodyHasRaise(ei.body)) return true;
+                }
+                if (s.else_body) |eb| if (bodyHasRaise(eb)) return true;
+            },
+            .while_  => |s| { if (exprHasTry(s.cond)) return true; if (bodyHasRaise(s.body)) return true; },
+            .for_in  => |s| if (bodyHasRaise(s.body)) return true,
+            .for_num => |s| if (bodyHasRaise(s.body)) return true,
+            .branch  => |s| {
+                for (s.on) |on| if (bodyHasRaise(on.body)) return true;
+                if (s.else_) |eb| if (bodyHasRaise(eb)) return true;
+            },
+            .with    => |s| if (bodyHasRaise(s.body)) return true,
+            .defer_  => |s| return bodyHasRaise(&.{s.body}),
+            .try_catch => {}, // try/catch absorbs raises — don't propagate
+            else => {},
+        }
+    }
+    return false;
+}
+
+/// Returns true if the try block needs a mutable `_try_err` variable — i.e., when
+/// the body contains either a `raise` statement or a `try expr` expression (both of
+/// which route errors through the tracking variable).
+/// Does not recurse into nested try/catch — inner blocks have their own variables.
+fn bodyNeedsErrVar(stmts: []const Ast.Stmt) bool {
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .raise   => return true,
+            .var_    => |n| { if (n.init) |e| if (exprHasTry(e)) return true; },
+            .assign  => |s| { if (exprHasTry(s.value)) return true; },
+            .return_ => |s| { if (s.value) |v| if (exprHasTry(v)) return true; },
+            .expr    => |e| if (exprHasTry(e)) return true,
+            .print   => |s| { for (s.args) |a| if (exprHasTry(a)) return true; },
+            .if_     => |s| {
+                if (exprHasTry(s.cond)) return true;
+                if (bodyNeedsErrVar(s.then_body)) return true;
+                for (s.else_ifs) |ei| {
+                    if (exprHasTry(ei.cond)) return true;
+                    if (bodyNeedsErrVar(ei.body)) return true;
+                }
+                if (s.else_body) |eb| if (bodyNeedsErrVar(eb)) return true;
+            },
+            .while_  => |s| { if (exprHasTry(s.cond)) return true; if (bodyNeedsErrVar(s.body)) return true; },
+            .for_in  => |s| if (bodyNeedsErrVar(s.body)) return true,
+            .for_num => |s| if (bodyNeedsErrVar(s.body)) return true,
+            .branch  => |s| {
+                for (s.on) |on| if (bodyNeedsErrVar(on.body)) return true;
+                if (s.else_) |eb| if (bodyNeedsErrVar(eb)) return true;
+            },
+            .with    => |s| if (bodyNeedsErrVar(s.body)) return true,
+            .defer_  => |s| return bodyNeedsErrVar(&.{s.body}),
+            .try_catch => {}, // inner try has its own err variable
+            else => {},
+        }
+    }
+    return false;
+}
+
+/// Returns true if `e` is a call to a `throws`-annotated method
+/// (ClassName.methodName(args) form only).
+fn exprCallIsThrows(e: *const Ast.ExprCall, resolve: *const Resolver.ResolveResult) bool {
+    if (e.callee.* != .member) return false;
+    const mem = e.callee.member;
+    if (mem.object.* != .ident) return false;
+    const sym = resolve.exprs.get(&mem.object.ident) orelse return false;
+    const members: []const Ast.Decl = switch (sym.decl) {
+        .class   => |c| c.members,
+        .struct_ => |s| s.members,
+        else     => return false,
+    };
+    for (members) |m| {
+        switch (m) {
+            .method => |md| if (std.mem.eql(u8, md.name, mem.member)) return md.throws,
+            else    => {},
+        }
+    }
+    return false;
+}
+
+/// Returns true if any statement in `stmts` is a direct call to a `throws` method.
+fn bodyHasThrowsCall(stmts: []const Ast.Stmt, resolve: *const Resolver.ResolveResult) bool {
+    for (stmts) |stmt| {
+        if (stmt == .expr and stmt.expr.* == .call) {
+            if (exprCallIsThrows(stmt.expr.call, resolve)) return true;
+        }
+    }
+    return false;
+}
+
+fn exprHasTry(expr: *const Ast.Expr) bool {
+    return switch (expr.*) {
+        .try_   => true,
+        .binary => |e| exprHasTry(e.left) or exprHasTry(e.right),
+        .unary  => |e| exprHasTry(e.operand),
+        .call   => |e| blk: {
+            if (exprHasTry(e.callee)) break :blk true;
+            for (e.args) |a| if (exprHasTry(a.value)) break :blk true;
+            break :blk false;
+        },
+        .member    => |e| exprHasTry(e.object),
+        .orelse_   => |e| exprHasTry(e.expr) or exprHasTry(e.fallback),
+        .catch_    => |e| exprHasTry(e.expr) or exprHasTry(e.fallback),
+        .to_non_nil => |e| exprHasTry(e.expr),
+        .to_nilable => |e| exprHasTry(e.expr),
+        .is_nil    => |e| exprHasTry(e.expr),
+        else => false,
+    };
+}
+
+fn refsInExpr(expr: *const Ast.Expr, r: *const Resolver.ResolveResult, o: *Refs) anyerror!void {
+    switch (expr.*) {
+        .ident => |*e| {
+            if (r.exprs.get(e)) |sym| switch (sym.kind) {
+                .var_  => o.uses_self = true,
+                .param => try o.param_names.put(e.name, {}),
+                else   => {},
+            };
+        },
+        .binary      => |e| { try refsInExpr(e.left, r, o);    try refsInExpr(e.right, r, o); },
+        .unary       => |e| try refsInExpr(e.operand, r, o),
+        .call        => |e| { try refsInExpr(e.callee, r, o);  for (e.args) |a| try refsInExpr(a.value, r, o); },
+        .member      => |e| try refsInExpr(e.object, r, o),
+        .index       => |e| { try refsInExpr(e.object, r, o);  try refsInExpr(e.index, r, o); },
+        .slice       => |e| { try refsInExpr(e.object, r, o);  if (e.start) |s| try refsInExpr(s, r, o); if (e.stop) |s| try refsInExpr(s, r, o); },
+        .if_expr     => |e| { try refsInExpr(e.cond, r, o);    try refsInExpr(e.then_expr, r, o); try refsInExpr(e.else_expr, r, o); },
+        .orelse_     => |e| { try refsInExpr(e.expr, r, o);    try refsInExpr(e.fallback, r, o); },
+        .catch_      => |e| { try refsInExpr(e.expr, r, o);    try refsInExpr(e.fallback, r, o); },
+        .to_nilable  => |e| try refsInExpr(e.expr, r, o),
+        .to_non_nil  => |e| try refsInExpr(e.expr, r, o),
+        .is_nil      => |e| try refsInExpr(e.expr, r, o),
+        .cast        => |e| try refsInExpr(e.expr, r, o),
+        .old         => |e| try refsInExpr(e.expr, r, o),
+        .list_lit    => |e| { for (e.elems) |el| try refsInExpr(el, r, o); },
+        .array_lit   => |e| { for (e.elems) |el| try refsInExpr(el, r, o); },
+        .dict_lit    => |e| { for (e.entries) |en| { try refsInExpr(en.key, r, o); try refsInExpr(en.value, r, o); } },
+        .string_interp => |e| { for (e.parts) |p| switch (p) { .expr => |ex| try refsInExpr(ex, r, o), else => {} }; },
+        .all_any     => |e| { try refsInExpr(e.iter, r, o); try refsInExpr(e.cond, r, o); },
+        .lambda      => |e| switch (e.body) {
+            .expr  => |ex| try refsInExpr(ex, r, o),
+            .stmts => |ss| try refsInStmts(ss, r, o),
+        },
+        .try_        => |e| try refsInExpr(e.expr, r, o),
+        .int_lit, .float_lit, .bool_lit, .char_lit,
+        .string_lit, .nil, .this, .zig_lit => {},
+    }
+}
+
+// ── Mutation analysis ─────────────────────────────────────────────────────────
+
+/// Return a set of every identifier name that appears as the direct target of
+/// an assignment (`ident = value`, as opposed to `obj.member = value`) inside
+/// `stmts` or any nested control-flow body.
+///
+/// Used by the CodeGen to emit `const` for locals that are never reassigned,
+/// avoiding Zig's "local variable is never mutated" compile error.
+/// Collect the names of every local variable that is directly returned (either as
+/// the sole return value or as an argument to a call in a return expression).
+/// These variables must NOT receive a `defer _allocator.free` because the caller
+/// takes ownership of the allocation.
+fn scanReturnedNames(stmts: []const Ast.Stmt, alloc: Allocator) !std.StringHashMap(void) {
+    var set = std.StringHashMap(void).init(alloc);
+    errdefer set.deinit();
+    try scanReturnedNamesInto(stmts, &set);
+    return set;
+}
+
+fn scanReturnedNamesInto(stmts: []const Ast.Stmt, set: *std.StringHashMap(void)) !void {
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .return_ => |s| if (s.value) |v| collectIdentNames(v, set) catch {},
+            .if_     => |s| {
+                try scanReturnedNamesInto(s.then_body, set);
+                for (s.else_ifs) |ei| try scanReturnedNamesInto(ei.body, set);
+                if (s.else_body) |eb| try scanReturnedNamesInto(eb, set);
+            },
+            .while_  => |s| try scanReturnedNamesInto(s.body, set),
+            .for_in  => |s| try scanReturnedNamesInto(s.body, set),
+            .for_num => |s| try scanReturnedNamesInto(s.body, set),
+            .branch  => |s| {
+                for (s.on) |on| try scanReturnedNamesInto(on.body, set);
+                if (s.else_) |eb| try scanReturnedNamesInto(eb, set);
+            },
+            .with    => |s| try scanReturnedNamesInto(s.body, set),
+            .try_catch => |s| {
+                try scanReturnedNamesInto(s.body, set);
+                for (s.clauses) |cl| try scanReturnedNamesInto(cl.body, set);
+            },
+            else => {},
+        }
+    }
+}
+
+/// Walk expr and record any .ident names into `set` (for return ownership).
+fn collectIdentNames(expr: *const Ast.Expr, set: *std.StringHashMap(void)) !void {
+    switch (expr.*) {
+        .ident => |e| try set.put(e.name, {}),
+        .call  => |e| {
+            for (e.args) |a| try collectIdentNames(a.value, set);
+        },
+        else => {},
+    }
+}
+
+fn scanMutations(stmts: []const Ast.Stmt, alloc: Allocator) !std.StringHashMap(void) {
+    var set = std.StringHashMap(void).init(alloc);
+    errdefer set.deinit();
+    try scanMutationsInto(stmts, &set);
+    return set;
+}
+
+fn scanMutationsInto(stmts: []const Ast.Stmt, set: *std.StringHashMap(void)) !void {
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .assign  => |s| switch (s.target.*) {
+                // Bare `name = value` — marks `name` as mutated.
+                .ident => |e| try set.put(e.name, {}),
+                // `obj.member = value` — field mutation, not a local.
+                else   => {},
+            },
+            .if_     => |s| {
+                try scanMutationsInto(s.then_body, set);
+                for (s.else_ifs) |ei| try scanMutationsInto(ei.body, set);
+                if (s.else_body) |eb| try scanMutationsInto(eb, set);
+            },
+            .while_  => |s| {
+                try scanMutationsInto(s.body, set);
+                if (s.post_body) |pb| try scanMutationsInto(pb, set);
+            },
+            .for_in  => |s| try scanMutationsInto(s.body, set),
+            .for_num => |s| try scanMutationsInto(s.body, set),
+            .branch  => |s| {
+                for (s.on) |on| try scanMutationsInto(on.body, set);
+                if (s.else_) |eb| try scanMutationsInto(eb, set);
+            },
+            // Scan expressions in remaining statement kinds for call-receivers.
+            .var_    => |n| { if (n.init) |e| try scanMutationsInExpr(e, set); },
+            .return_ => |s| { if (s.value) |v| try scanMutationsInExpr(v, set); },
+            .expr    => |e| try scanMutationsInExpr(e, set),
+            .print   => |s| { for (s.args) |a| try scanMutationsInExpr(a, set); },
+            // `with target` — the target variable is mutated (fields are assigned).
+            .with    => |s| {
+                if (s.target.* == .ident) try set.put(s.target.ident.name, {});
+                try scanMutationsInto(s.body, set);
+            },
+            .try_catch => |s| {
+                try scanMutationsInto(s.body, set);
+                for (s.clauses) |cl| try scanMutationsInto(cl.body, set);
+            },
+            else     => {},
+        }
+    }
+}
+
+/// Mark any local variable that is used directly as a method-call receiver as
+/// "mutated".  Zebra methods always take `self: *Owner`, so even a read-only
+/// call through a local requires that local to be declared `var`.
+fn scanMutationsInExpr(expr: *const Ast.Expr, set: *std.StringHashMap(void)) anyerror!void {
+    switch (expr.*) {
+        // obj.method(args) — if obj is a bare identifier, mark it as needing var
+        // unless the method is a non-mutating stdlib operation (strings, reads).
+        .call => |e| {
+            if (e.callee.* == .member) {
+                const obj    = e.callee.member.object;
+                const method = e.callee.member.member;
+                const non_mutating = std.StaticStringMap(void).initComptime(&.{
+                    .{ "contains",   {} }, .{ "startsWith", {} }, .{ "endsWith",   {} },
+                    .{ "trim",       {} }, .{ "trimLeft",   {} }, .{ "trimRight",  {} },
+                    .{ "concat",     {} }, .{ "toInt",      {} }, .{ "toFloat",    {} },
+                    .{ "format",     {} }, .{ "at",         {} }, .{ "fetch",      {} },
+                    .{ "count",      {} }, .{ "upper",      {} }, .{ "lower",      {} },
+                    .{ "indexOf",    {} }, .{ "replace",    {} }, .{ "repeat",     {} },
+                    .{ "split",      {} }, .{ "lines",      {} }, .{ "toString",   {} },
+                    .{ "padLeft",    {} }, .{ "padRight",   {} }, .{ "center",     {} },
+                    .{ "bytes",      {} }, .{ "isEmpty",    {} }, .{ "isAlpha",    {} },
+                    .{ "isNumeric",  {} }, .{ "join",       {} }, .{ "reverse",    {} },
+                    .{ "toHex",      {} }, .{ "fromHex",    {} },
+                    // StringBuilder read-only ops
+                    .{ "build",          {} }, .{ "len",            {} },
+                    // UTF-8 / Unicode ops
+                    .{ "chars",          {} }, .{ "isValidUtf8",    {} },
+                    .{ "codePointCount", {} },
+                    // Char predicates / transforms
+                    .{ "isAlpha",        {} }, .{ "isDigit",        {} },
+                    .{ "isWhitespace",   {} }, .{ "isUpper",        {} },
+                    .{ "isLower",        {} }, .{ "toUpper",        {} },
+                    .{ "toLower",        {} },
+                    // TCP / UDP — don't reassign the handle, so the variable stays const
+                    .{ "write",          {} }, .{ "read",           {} },
+                    .{ "send",           {} }, .{ "recv",           {} },
+                    .{ "close",          {} },
+                    // Regex — all methods are non-mutating
+                    .{ "match",          {} }, .{ "find",           {} },
+                    .{ "findAll",        {} }, .{ "replace",        {} },
+                });
+                if (non_mutating.get(method) == null and obj.* == .ident)
+                    try set.put(obj.ident.name, {});
+            }
+            // Recurse into args.
+            for (e.args) |a| try scanMutationsInExpr(a.value, set);
+        },
+        .binary   => |e| { try scanMutationsInExpr(e.left, set); try scanMutationsInExpr(e.right, set); },
+        .unary    => |e| try scanMutationsInExpr(e.operand, set),
+        .member   => |e| try scanMutationsInExpr(e.object, set),
+        .index    => |e| { try scanMutationsInExpr(e.object, set); try scanMutationsInExpr(e.index, set); },
+        .if_expr  => |e| { try scanMutationsInExpr(e.cond, set); try scanMutationsInExpr(e.then_expr, set); try scanMutationsInExpr(e.else_expr, set); },
+        .orelse_  => |e| { try scanMutationsInExpr(e.expr, set); try scanMutationsInExpr(e.fallback, set); },
+        .catch_   => |e| { try scanMutationsInExpr(e.expr, set); try scanMutationsInExpr(e.fallback, set); },
+        else      => {},
+    }
+}
+
+/// True if `name` appears as an identifier anywhere in `stmts`.
+fn nameUsedInStmts(name: []const u8, stmts: []const Ast.Stmt) bool {
+    for (stmts) |s| if (nameUsedInStmt(name, s)) return true;
+    return false;
+}
+fn nameUsedInStmt(name: []const u8, stmt: Ast.Stmt) bool {
+    return switch (stmt) {
+        .var_    => |n| { if (n.init) |e| return nameUsedInExpr(name, e); return false; },
+        .assign  => |s| nameUsedInExpr(name, s.target) or nameUsedInExpr(name, s.value),
+        .return_ => |s| if (s.value) |v| nameUsedInExpr(name, v) else false,
+        .print   => |s| blk: { for (s.args) |a| if (nameUsedInExpr(name, a)) break :blk true; break :blk false; },
+        .expr    => |e| nameUsedInExpr(name, e),
+        .if_     => |s| blk: {
+            if (nameUsedInExpr(name, s.cond)) break :blk true;
+            if (nameUsedInStmts(name, s.then_body)) break :blk true;
+            for (s.else_ifs) |ei| if (nameUsedInExpr(name, ei.cond) or nameUsedInStmts(name, ei.body)) break :blk true;
+            if (s.else_body) |eb| if (nameUsedInStmts(name, eb)) break :blk true;
+            break :blk false;
+        },
+        .while_  => |s| nameUsedInExpr(name, s.cond) or nameUsedInStmts(name, s.body),
+        .for_in  => |s| nameUsedInExpr(name, s.iter) or nameUsedInStmts(name, s.body),
+        .for_num => |s| nameUsedInExpr(name, s.start) or nameUsedInExpr(name, s.stop) or nameUsedInStmts(name, s.body),
+        else     => false,
+    };
+}
+fn nameUsedInExpr(name: []const u8, expr: *const Ast.Expr) bool {
+    return switch (expr.*) {
+        .ident  => |e| std.mem.eql(u8, e.name, name),
+        .call   => |e| nameUsedInExpr(name, e.callee) or blk: {
+            for (e.args) |a| if (nameUsedInExpr(name, a.value)) break :blk true;
+            break :blk false;
+        },
+        .member => |e| nameUsedInExpr(name, e.object),
+        .binary => |e| nameUsedInExpr(name, e.left) or nameUsedInExpr(name, e.right),
+        .unary  => |e| nameUsedInExpr(name, e.operand),
+        .index  => |e| nameUsedInExpr(name, e.object) or nameUsedInExpr(name, e.index),
+        else    => false,
+    };
+}
+
+// ── Generator ─────────────────────────────────────────────────────────────────
+
+const Generator = struct {
+    resolve:   *const Resolver.ResolveResult,
+    /// Pass-3 type map.  Null when called from tests that don't run TypeChecker.
+    tc:        ?*const TypeChecker.TypeCheckResult,
+    /// Output writer.  `AnyWriter` is a fat pointer; copying it is cheap and
+    /// both copies still target the same underlying output stream.
+    w:         std.io.AnyWriter,
+    /// Current indentation depth (4 spaces per level).
+    indent:    u32,
+    /// Name of the enclosing type (class / struct / enum / mixin).
+    /// Empty string when at module scope.
+    owner:     []const u8,
+    /// True when generating the body of a method, property accessor, or
+    /// constructor.  Enables `self.` prefix injection for field identifiers.
+    in_method: bool,
+    /// All mixin declarations in the module, keyed by name.
+    mixins:    *const std.StringHashMap(*const Ast.DeclMixin),
+    /// Allocator used for per-method mutation analysis.
+    alloc:     Allocator,
+    /// Names of local variables that are assigned to somewhere in the current
+    /// method body.  Null at module scope.  Used to emit `const` vs `var`.
+    mutated:   ?*const std.StringHashMap(void),
+    /// Names of locals that are lambdas with capture blocks (struct-instance
+    /// closures).  Call sites emit `name.call(args)` instead of `name(args)`.
+    /// Populated lazily as `genLocalVar` processes capture-lambda var decls.
+    closure_vars: ?*std.StringHashMap(void),
+    /// Capture field names in scope when generating a lambda body that has a
+    /// `capture` block.  Ident refs to these names become `self.name`.
+    capture_fields: []const []const u8,
+    /// Names of all union types declared in the current module.
+    /// Used to detect union construction calls: `Type.variant(value)`.
+    union_names: *const std.StringHashMap(void),
+    /// When non-null, we are inside a `try` block.  `raise` breaks the labeled
+    /// block (name = try_block_label) and records the error into this variable
+    /// instead of returning from the enclosing method.
+    try_block_label: ?[]const u8 = null,
+    /// Name of the `?anyerror` variable that records the error in the current
+    /// try block.  Always set together with `try_block_label`.
+    try_err_var: ?[]const u8 = null,
+    /// Name of the catch clause binding variable (e.g. "e" in `catch e`).
+    /// Non-empty only when generating a catch clause body.
+    /// `e.message` → `_error_ctx.message`, `e.details` → fat-pointer dispatch.
+    catch_var: []const u8 = "",
+    /// Names of local variables that appear directly in `return` expressions
+    /// (or as arguments to calls in return expressions) in the current body.
+    /// When a name is in this set, we skip emitting `defer _allocator.free(name)`
+    /// because the caller takes ownership of the allocated string.
+    returned_names: ?*const std.StringHashMap(void) = null,
+
+    // ── Context-adjustment helpers ────────────────────────────────────────────
+
+    fn withOwner(g: Generator, new_owner: []const u8) Generator {
+        var c = g; c.owner = new_owner; return c;
+    }
+    fn asMethod(g: Generator) Generator {
+        var c = g; c.in_method = true; return c;
+    }
+    fn indented(g: Generator) Generator {
+        var c = g; c.indent += 1; return c;
+    }
+    fn withMutated(g: Generator, m: *const std.StringHashMap(void)) Generator {
+        var c = g; c.mutated = m; return c;
+    }
+    fn withClosureVars(g: Generator, cv: *std.StringHashMap(void)) Generator {
+        var c = g; c.closure_vars = cv; return c;
+    }
+    fn withCatchVar(g: Generator, name: []const u8) Generator {
+        var c = g; c.catch_var = name; return c;
+    }
+    fn withCaptureFields(g: Generator, fields: []const []const u8) Generator {
+        var c = g; c.capture_fields = fields; return c;
+    }
+    fn withTryLabel(g: Generator, label: []const u8, err_var: []const u8) Generator {
+        var c = g; c.try_block_label = label; c.try_err_var = err_var; return c;
+    }
+    fn withReturnedNames(g: Generator, rn: *const std.StringHashMap(void)) Generator {
+        var c = g; c.returned_names = rn; return c;
+    }
+
+    // ── Low-level output ──────────────────────────────────────────────────────
+
+    fn writeIndent(g: Generator) anyerror!void {
+        var i: u32 = 0;
+        while (i < g.indent) : (i += 1) try g.w.writeAll("    ");
+    }
+
+    /// Write an indented line (adds trailing newline).
+    fn line(g: Generator, s: []const u8) anyerror!void {
+        try g.writeIndent();
+        try g.w.writeAll(s);
+        try g.w.writeAll("\n");
+    }
+
+    // ── Module ────────────────────────────────────────────────────────────────
+
+    fn genModule(g: Generator, module: Ast.Module) anyerror!void {
+        try g.w.writeAll("// Generated by the Zebra compiler.\n// Source: ");
+        try g.w.writeAll(module.file);
+        try g.w.writeAll("\n\nconst std = @import(\"std\");\n\n");
+        // Global allocator — used by List, HashMap, and allocating string ops.
+        try g.w.writeAll("var _gpa = std.heap.GeneralPurposeAllocator(.{}){};\n");
+        try g.w.writeAll("const _allocator = _gpa.allocator();\n\n");
+        // Thread-local error context — populated by `raise` statements.
+        try g.w.writeAll("const _Stringable = struct {\n");
+        try g.w.writeAll("    ptr:         *anyopaque,\n");
+        try g.w.writeAll("    toString_fn: *const fn (*anyopaque) []const u8,\n");
+        try g.w.writeAll("    pub fn toString(self: _Stringable) []const u8 {\n");
+        try g.w.writeAll("        return self.toString_fn(self.ptr);\n");
+        try g.w.writeAll("    }\n");
+        try g.w.writeAll("};\n");
+        try g.w.writeAll("const _ZebraErrorCtx = struct { message: []const u8 = \"\", details: ?_Stringable = null };\n");
+        try g.w.writeAll("threadlocal var _error_ctx: _ZebraErrorCtx = .{};\n");
+        // ── String padding helpers ──────────────────────────────────────────
+        try g.w.writeAll("fn _pad_left(s: []const u8, width: usize, fill: u8, alloc: std.mem.Allocator) []const u8 {\n");
+        try g.w.writeAll("    if (s.len >= width) return s;\n");
+        try g.w.writeAll("    const buf = alloc.alloc(u8, width) catch @panic(\"OOM\");\n");
+        try g.w.writeAll("    @memset(buf[0 .. width - s.len], fill);\n");
+        try g.w.writeAll("    @memcpy(buf[width - s.len ..], s);\n");
+        try g.w.writeAll("    return buf;\n}\n");
+        try g.w.writeAll("fn _pad_right(s: []const u8, width: usize, fill: u8, alloc: std.mem.Allocator) []const u8 {\n");
+        try g.w.writeAll("    if (s.len >= width) return s;\n");
+        try g.w.writeAll("    const buf = alloc.alloc(u8, width) catch @panic(\"OOM\");\n");
+        try g.w.writeAll("    @memcpy(buf[0 .. s.len], s);\n");
+        try g.w.writeAll("    @memset(buf[s.len ..], fill);\n");
+        try g.w.writeAll("    return buf;\n}\n");
+        try g.w.writeAll("fn _pad_center(s: []const u8, width: usize, fill: u8, alloc: std.mem.Allocator) []const u8 {\n");
+        try g.w.writeAll("    if (s.len >= width) return s;\n");
+        try g.w.writeAll("    const pad = width - s.len;\n");
+        try g.w.writeAll("    const lpad = pad / 2;\n");
+        try g.w.writeAll("    const buf = alloc.alloc(u8, width) catch @panic(\"OOM\");\n");
+        try g.w.writeAll("    @memset(buf[0 .. lpad], fill);\n");
+        try g.w.writeAll("    @memcpy(buf[lpad .. lpad + s.len], s);\n");
+        try g.w.writeAll("    @memset(buf[lpad + s.len ..], fill);\n");
+        try g.w.writeAll("    return buf;\n}\n\n");
+        // ── HTTP networking helpers ─────────────────────────────────────────
+        // HttpResponse text is heap-allocated for program duration (page_allocator avoids GPA leak tracking).
+        try g.w.writeAll("const HttpResponse = struct { status: u16, text: []const u8 };\n");
+        try g.w.writeAll("fn _http_request(method: std.http.Method, url: []const u8, payload: ?[]const u8) HttpResponse {\n");
+        try g.w.writeAll("    var _hc = std.http.Client{ .allocator = _allocator };\n");
+        try g.w.writeAll("    defer _hc.deinit();\n");
+        try g.w.writeAll("    var _hb = std.io.Writer.Allocating.init(std.heap.page_allocator);\n");
+        try g.w.writeAll("    const _hr = _hc.fetch(.{ .location = .{ .url = url }, .method = method, .payload = payload, .response_writer = &_hb.writer }) catch |e| @panic(@errorName(e));\n");
+        try g.w.writeAll("    return .{ .status = @intFromEnum(_hr.status), .text = _hb.written() };\n");
+        try g.w.writeAll("}\n");
+        try g.w.writeAll("fn _http_get(url: []const u8) HttpResponse { return _http_request(.GET, url, null); }\n");
+        try g.w.writeAll("fn _http_post(url: []const u8, payload: []const u8) HttpResponse { return _http_request(.POST, url, payload); }\n");
+        // ── HTTP server ─────────────────────────────────────────────────────
+        try g.w.writeAll("const HttpRequest = struct { method: []const u8, path: []const u8, content: []const u8 };\n");
+        try g.w.writeAll(
+            \\fn _http_serve(port: u16, handler: anytype) void {
+            \\    const _alloc = std.heap.page_allocator;
+            \\    var _srv = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port).listen(.{ .reuse_address = true }) catch |e| @panic(@errorName(e));
+            \\    defer _srv.deinit();
+            \\    while (true) {
+            \\        var _conn = _srv.accept() catch continue;
+            \\        defer _conn.stream.close();
+            \\        // Read request head using recv (works on Windows sockets).
+            \\        // We read into a large buffer and scan for \r\n\r\n.
+            \\        var _hd: [16384]u8 = undefined;
+            \\        var _hl: usize = 0;
+            \\        while (_hl < _hd.len - 4096) {
+            \\            const _n = std.posix.recv(_conn.stream.handle, _hd[_hl..@min(_hl+4096, _hd.len)], 0) catch break;
+            \\            if (_n == 0) break;
+            \\            _hl += _n;
+            \\            if (std.mem.indexOf(u8, _hd[0.._hl], "\r\n\r\n") != null) break;
+            \\        }
+            \\        const _hdrs_end = (std.mem.indexOf(u8, _hd[0.._hl], "\r\n\r\n") orelse (_hl -| 4)) + 4;
+            \\        const _head = _hd[0.._hdrs_end];
+            \\        // Bytes already read after the headers (peeked body).
+            \\        var _peeked: usize = if (_hl > _hdrs_end) _hl - _hdrs_end else 0;
+            \\        // Parse request line: METHOD PATH VERSION
+            \\        const _rl_end = std.mem.indexOf(u8, _head, "\r\n") orelse _hl;
+            \\        var _rp = std.mem.splitScalar(u8, _head[0.._rl_end], ' ');
+            \\        const _method = _rp.next() orelse "GET";
+            \\        const _raw_path = _rp.next() orelse "/";
+            \\        const _path = _raw_path[0 .. (std.mem.indexOfScalar(u8, _raw_path, '?') orelse _raw_path.len)];
+            \\        // Parse Content-Length for request body.
+            \\        var _cl: usize = 0;
+            \\        var _hdr_it = std.mem.splitSequence(u8, _head, "\r\n");
+            \\        _ = _hdr_it.next();
+            \\        while (_hdr_it.next()) |_hl_| {
+            \\            if (_hl_.len == 0) break;
+            \\            const _cp = std.mem.indexOfScalar(u8, _hl_, ':') orelse continue;
+            \\            const _hn = std.mem.trim(u8, _hl_[0.._cp], " ");
+            \\            const _hv = std.mem.trim(u8, _hl_[_cp+1..], " ");
+            \\            if (std.ascii.eqlIgnoreCase(_hn, "content-length"))
+            \\                _cl = std.fmt.parseInt(usize, _hv, 10) catch 0;
+            \\        }
+            \\        var _body: []const u8 = "";
+            \\        if (_cl > 0) {
+            \\            const _bb = _alloc.alloc(u8, _cl) catch @panic("OOM");
+            \\            // Copy any body bytes already read with the headers.
+            \\            const _pre = @min(_peeked, _cl);
+            \\            if (_pre > 0) @memcpy(_bb[0.._pre], _hd[_hdrs_end.._hdrs_end+_pre]);
+            \\            var _bi: usize = _pre;
+            \\            while (_bi < _cl) {
+            \\                const _rn = std.posix.recv(_conn.stream.handle, _bb[_bi..], 0) catch break;
+            \\                if (_rn == 0) break;
+            \\                _bi += _rn;
+            \\            }
+            \\            _body = _bb[0.._bi];
+            \\            _ = &_peeked; // suppress unused warning
+            \\        }
+            \\        // Invoke handler and write response.
+            \\        const _req = HttpRequest{ .method = _method, .path = _path, .content = _body };
+            \\        const _resp = if (comptime @typeInfo(@TypeOf(handler)) == .@"fn") handler(_req) else handler.call(_req);
+            \\        const _st: []const u8 = switch (_resp.status) {
+            \\            200 => "OK", 201 => "Created", 204 => "No Content",
+            \\            301 => "Moved Permanently", 302 => "Found",
+            \\            400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
+            \\            404 => "Not Found", 405 => "Method Not Allowed",
+            \\            500 => "Internal Server Error",
+            \\            else => "Unknown",
+            \\        };
+            \\        const _out = std.fmt.allocPrint(_alloc,
+            \\            "HTTP/1.1 {d} {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
+            \\            .{ _resp.status, _st, _resp.text.len, _resp.text }) catch @panic("OOM");
+            \\        _conn.stream.writeAll(_out) catch {};
+            \\    }
+            \\}
+            \\
+        );
+        try g.w.writeAll("\n");
+        // ── TCP helpers ────────────────────────────────────────────────────
+        try g.w.writeAll("const TcpConn = struct { stream: std.net.Stream };\n");
+        try g.w.writeAll("fn _tcp_connect(host: []const u8, port: u16) TcpConn {\n");
+        try g.w.writeAll("    const s = std.net.tcpConnectToHost(_allocator, host, port) catch |e| @panic(@errorName(e));\n");
+        try g.w.writeAll("    return .{ .stream = s };\n");
+        try g.w.writeAll("}\n");
+        try g.w.writeAll("fn _tcp_write(conn: TcpConn, data: []const u8) void {\n");
+        try g.w.writeAll("    conn.stream.writeAll(data) catch |e| @panic(@errorName(e));\n");
+        try g.w.writeAll("}\n");
+        try g.w.writeAll("fn _tcp_read(conn: TcpConn) []const u8 {\n");
+        try g.w.writeAll("    var _rb: [65536]u8 = undefined;\n");
+        try g.w.writeAll("    var _rd = conn.stream.reader(&_rb);\n");
+        try g.w.writeAll("    var _hb = std.io.Writer.Allocating.init(std.heap.page_allocator);\n");
+        try g.w.writeAll("    _ = _rd.interface().streamRemaining(&_hb.writer) catch |e| @panic(@errorName(e));\n");
+        try g.w.writeAll("    return _hb.written();\n");
+        try g.w.writeAll("}\n");
+        try g.w.writeAll("fn _tcp_close(conn: TcpConn) void { conn.stream.close(); }\n\n");
+        // ── UDP helpers ────────────────────────────────────────────────────
+        try g.w.writeAll("const UdpSocket = struct { handle: std.posix.socket_t };\n");
+        try g.w.writeAll("fn _udp_socket() UdpSocket {\n");
+        try g.w.writeAll("    const s = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0) catch |e| @panic(@errorName(e));\n");
+        try g.w.writeAll("    return .{ .handle = s };\n");
+        try g.w.writeAll("}\n");
+        try g.w.writeAll("fn _udp_send(sock: UdpSocket, host: []const u8, port: u16, data: []const u8) void {\n");
+        try g.w.writeAll("    const dest = std.net.Address.parseIp4(host, port) catch |e| @panic(@errorName(e));\n");
+        try g.w.writeAll("    _ = std.posix.sendto(sock.handle, data, 0, &dest.any, dest.getOsSockLen()) catch |e| @panic(@errorName(e));\n");
+        try g.w.writeAll("}\n");
+        try g.w.writeAll("fn _udp_recv(sock: UdpSocket, max_bytes: usize) []const u8 {\n");
+        try g.w.writeAll("    const buf = std.heap.page_allocator.alloc(u8, max_bytes) catch @panic(\"OOM\");\n");
+        try g.w.writeAll("    const n = std.posix.recv(sock.handle, buf, 0) catch |e| @panic(@errorName(e));\n");
+        try g.w.writeAll("    return buf[0..n];\n");
+        try g.w.writeAll("}\n");
+        try g.w.writeAll("fn _udp_close(sock: UdpSocket) void { std.posix.close(sock.handle); }\n\n");
+        // ── Regex (Thompson NFA) helpers ───────────────────────────────────
+        try g.w.writeAll(
+            \\// ─── Thompson NFA regex engine ───────────────────────────────────────────────
+            \\const _RNodeKind = enum(u8) { match, lit, dot, cls, split, save };
+            \\const _RNode = struct {
+            \\    kind: _RNodeKind, c: u8 = 0, bits: [32]u8 = [_]u8{0} ** 32,
+            \\    neg: bool = false, slot: u8 = 0, out1: u32 = 0xFFFF_FFFF, out2: u32 = 0xFFFF_FFFF,
+            \\};
+            \\const _RFrag = struct {
+            \\    start: u32, outs: [64]u32 = [_]u32{0xFFFF_FFFF} ** 64, n: u8 = 0,
+            \\    fn one(s: u32, d: u32) _RFrag { var f = _RFrag{ .start = s }; f.outs[0] = d; f.n = 1; return f; }
+            \\    fn two(s: u32, d1: u32, d2: u32) _RFrag { var f = _RFrag{ .start = s }; f.outs[0] = d1; f.outs[1] = d2; f.n = 2; return f; }
+            \\    fn merge(a: _RFrag, b: _RFrag) _RFrag {
+            \\        var f = _RFrag{ .start = a.start }; var i: u8 = 0;
+            \\        for (a.outs[0..a.n]) |o| { f.outs[i] = o; i += 1; }
+            \\        for (b.outs[0..b.n]) |o| { f.outs[i] = o; i += 1; }
+            \\        f.n = i; return f;
+            \\    }
+            \\};
+            \\const _RC = struct {
+            \\    pat: []const u8, pos: usize = 0,
+            \\    nodes: std.ArrayListUnmanaged(_RNode) = .{}, alloc: std.mem.Allocator, n_caps: u8 = 0,
+            \\    fn addNode(c: *_RC, n: _RNode) error{OutOfMemory}!u32 {
+            \\        const idx: u32 = @intCast(c.nodes.items.len);
+            \\        try c.nodes.append(c.alloc, n); return idx;
+            \\    }
+            \\    fn patch(c: *_RC, f: _RFrag, t: u32) void {
+            \\        for (f.outs[0..f.n]) |i| c.nodes.items[i & 0x7FFF_FFFF].out1 = t;
+            \\    }
+            \\    fn patchFrag(c: *_RC, f: _RFrag, t: u32) void {
+            \\        for (f.outs[0..f.n]) |i| {
+            \\            if (i & 0x8000_0000 != 0) c.nodes.items[i & 0x7FFF_FFFF].out2 = t
+            \\            else c.nodes.items[i].out1 = t;
+            \\        }
+            \\    }
+            \\    fn peek(c: *_RC) ?u8 { return if (c.pos < c.pat.len) c.pat[c.pos] else null; }
+            \\    fn eat(c: *_RC) ?u8 { if (c.pos < c.pat.len) { defer c.pos += 1; return c.pat[c.pos]; } return null; }
+            \\    fn expect(c: *_RC, ch: u8) bool { if (c.peek() == ch) { c.pos += 1; return true; } return false; }
+            \\    fn parseClass(c: *_RC) error{OutOfMemory}![32]u8 {
+            \\        var bits = [_]u8{0} ** 32;
+            \\        while (c.peek()) |ch| {
+            \\            if (ch == ']') break; _ = c.eat();
+            \\            if (ch == '\\') { const esc = c.eat() orelse break; _rSetEsc(&bits, esc); }
+            \\            else if (c.peek() == '-' and c.pos + 1 < c.pat.len and c.pat[c.pos + 1] != ']') {
+            \\                _ = c.eat(); const hi = c.eat() orelse ch;
+            \\                var i: u8 = ch; while (true) : (i += 1) { _rSetBit(&bits, i); if (i == hi) break; }
+            \\            } else _rSetBit(&bits, ch);
+            \\        } return bits;
+            \\    }
+            \\    fn parseAtom(c: *_RC) error{OutOfMemory}!?_RFrag {
+            \\        const ch = c.peek() orelse return null;
+            \\        switch (ch) {
+            \\            '(' => {
+            \\                _ = c.eat(); const slot: u8 = c.n_caps * 2; c.n_caps += 1;
+            \\                const open = try c.addNode(.{ .kind = .save, .slot = slot });
+            \\                if (try c.parseAlt()) |inner| {
+            \\                    c.patch(inner, try c.addNode(.{ .kind = .save, .slot = slot + 1 }));
+            \\                    _ = c.expect(')');
+            \\                    const close: u32 = @intCast(c.nodes.items.len - 1);
+            \\                    c.nodes.items[open].out1 = inner.start;
+            \\                    return _RFrag.one(open, close);
+            \\                }
+            \\                _ = c.expect(')'); return _RFrag.one(open, open);
+            \\            },
+            \\            ')', '|' => return null,
+            \\            '[' => {
+            \\                _ = c.eat(); const neg = c.expect('^');
+            \\                const bits = try c.parseClass(); _ = c.expect(']');
+            \\                const idx = try c.addNode(.{ .kind = .cls, .bits = bits, .neg = neg });
+            \\                return _RFrag.one(idx, idx);
+            \\            },
+            \\            '.' => { _ = c.eat(); const _di = try c.addNode(.{ .kind = .dot }); return _RFrag.one(_di, _di); },
+            \\            '\\' => {
+            \\                _ = c.eat(); const esc = c.eat() orelse return null;
+            \\                var bits = [_]u8{0} ** 32;
+            \\                const neg = std.ascii.isUpper(esc) and esc != 'B';
+            \\                if (neg) { _rSetEsc(&bits, std.ascii.toLower(esc)); const pb = bits; bits = [_]u8{0} ** 32; for (&bits, pb) |*b, p| b.* = ~p; }
+            \\                else _rSetEsc(&bits, esc);
+            \\                const _ci = try c.addNode(.{ .kind = .cls, .bits = bits, .neg = false });
+            \\                return _RFrag.one(_ci, _ci);
+            \\            },
+            \\            else => { _ = c.eat(); const idx = try c.addNode(.{ .kind = .lit, .c = ch }); return _RFrag.one(idx, idx); },
+            \\        }
+            \\    }
+            \\    fn parsePieceFixed(c: *_RC) error{OutOfMemory}!?_RFrag {
+            \\        const atom = try c.parseAtom() orelse return null;
+            \\        const q = c.peek() orelse return atom;
+            \\        switch (q) {
+            \\            '*' => {
+            \\                _ = c.eat();
+            \\                const sp = try c.addNode(.{ .kind = .split, .out1 = atom.start, .out2 = 0xFFFF_FFFF });
+            \\                c.patch(atom, sp);
+            \\                var f = _RFrag{ .start = sp }; f.outs[0] = sp | 0x8000_0000; f.n = 1; return f;
+            \\            },
+            \\            '+' => {
+            \\                _ = c.eat();
+            \\                const sp = try c.addNode(.{ .kind = .split, .out1 = atom.start, .out2 = 0xFFFF_FFFF });
+            \\                c.patch(atom, sp);
+            \\                var f = _RFrag{ .start = atom.start }; f.outs[0] = sp | 0x8000_0000; f.n = 1; return f;
+            \\            },
+            \\            '?' => {
+            \\                _ = c.eat();
+            \\                const sp = try c.addNode(.{ .kind = .split, .out1 = atom.start, .out2 = 0xFFFF_FFFF });
+            \\                return _RFrag.two(sp, atom.outs[0], sp | 0x8000_0000);
+            \\            },
+            \\            else => return atom,
+            \\        }
+            \\    }
+            \\    fn parsePiece(c: *_RC) error{OutOfMemory}!?_RFrag { return c.parsePieceFixed(); }
+            \\    fn parseCat(c: *_RC) error{OutOfMemory}!?_RFrag {
+            \\        var result: ?_RFrag = try c.parsePiece();
+            \\        while (result != null) {
+            \\            const next = try c.parsePiece() orelse break;
+            \\            c.patchFrag(result.?, next.start);
+            \\            result = _RFrag{ .start = result.?.start, .outs = next.outs, .n = next.n };
+            \\        }
+            \\        return result;
+            \\    }
+            \\    fn parseAlt(c: *_RC) error{OutOfMemory}!?_RFrag {
+            \\        const left = try c.parseCat() orelse return null;
+            \\        if (c.peek() != '|') return left;
+            \\        _ = c.eat();
+            \\        const right = try c.parseAlt() orelse return left;
+            \\        const sp = try c.addNode(.{ .kind = .split, .out1 = left.start, .out2 = right.start });
+            \\        return _RFrag.merge(_RFrag{ .start = sp, .outs = left.outs, .n = left.n }, right);
+            \\    }
+            \\};
+            \\const Regex = struct {
+            \\    nodes: []_RNode, start: u32, alloc: std.mem.Allocator,
+            \\    fn closure(re: *const Regex, cur: *std.ArrayListUnmanaged(u32), vis: []bool, alloc: std.mem.Allocator, idx: u32) error{OutOfMemory}!void {
+            \\        if (idx == 0xFFFF_FFFF or vis[idx]) return;
+            \\        vis[idx] = true;
+            \\        switch (re.nodes[idx].kind) {
+            \\            .split => { try re.closure(cur, vis, alloc, re.nodes[idx].out1); try re.closure(cur, vis, alloc, re.nodes[idx].out2); },
+            \\            .save  => try re.closure(cur, vis, alloc, re.nodes[idx].out1),
+            \\            else   => try cur.append(alloc, idx),
+            \\        }
+            \\    }
+            \\    fn matchAt(re: *const Regex, input: []const u8, from: usize) error{OutOfMemory}!?usize {
+            \\        const alloc = re.alloc;
+            \\        var cur: std.ArrayListUnmanaged(u32) = .{}; var nxt: std.ArrayListUnmanaged(u32) = .{};
+            \\        defer cur.deinit(alloc); defer nxt.deinit(alloc);
+            \\        const vis = try alloc.alloc(bool, re.nodes.len); defer alloc.free(vis);
+            \\        @memset(vis, false); try re.closure(&cur, vis, alloc, re.start);
+            \\        var last: ?usize = null;
+            \\        for (cur.items) |si| if (re.nodes[si].kind == .match) { last = from; break; };
+            \\        var pos = from;
+            \\        while (pos < input.len and cur.items.len > 0) : (pos += 1) {
+            \\            const ch = input[pos]; nxt.clearRetainingCapacity(); @memset(vis, false);
+            \\            for (cur.items) |si| {
+            \\                const nd = &re.nodes[si];
+            \\                const ok = switch (nd.kind) { .lit => nd.c == ch, .dot => ch != '\n', .cls => _rClsMatch(nd, ch), else => false };
+            \\                if (ok) try re.closure(&nxt, vis, alloc, nd.out1);
+            \\            }
+            \\            std.mem.swap(std.ArrayListUnmanaged(u32), &cur, &nxt);
+            \\            for (cur.items) |si| if (re.nodes[si].kind == .match) { last = pos + 1; break; };
+            \\        }
+            \\        return last;
+            \\    }
+            \\};
+            \\fn _rSetBit(bits: *[32]u8, c: u8) void { bits[c >> 3] |= @as(u8, 1) << @intCast(c & 7); }
+            \\fn _rGetBit(bits: *const [32]u8, c: u8) bool { return (bits[c >> 3] >> @intCast(c & 7)) & 1 != 0; }
+            \\fn _rClsMatch(nd: *const _RNode, c: u8) bool { const h = _rGetBit(&nd.bits, c); return if (nd.neg) !h else h; }
+            \\fn _rSetEsc(bits: *[32]u8, esc: u8) void {
+            \\    switch (std.ascii.toLower(esc)) {
+            \\        'd' => { var i: u16 = '0'; while (i <= '9') : (i += 1) _rSetBit(bits, @intCast(i)); },
+            \\        'w' => { var i: u16 = 'a'; while (i <= 'z') : (i += 1) _rSetBit(bits, @intCast(i)); i = 'A'; while (i <= 'Z') : (i += 1) _rSetBit(bits, @intCast(i)); i = '0'; while (i <= '9') : (i += 1) _rSetBit(bits, @intCast(i)); _rSetBit(bits, '_'); },
+            \\        's' => { for (" \t\n\r") |c| _rSetBit(bits, c); },
+            \\        'n' => _rSetBit(bits, '\n'), 'r' => _rSetBit(bits, '\r'), 't' => _rSetBit(bits, '\t'),
+            \\        else => _rSetBit(bits, esc),
+            \\    }
+            \\}
+            \\fn _regex_compile(pattern: []const u8) Regex {
+            \\    const alloc = std.heap.page_allocator;
+            \\    var c = _RC{ .pat = pattern, .alloc = alloc };
+            \\    const frag_opt = c.parseAlt() catch @panic("regex OOM");
+            \\    const match_idx = c.addNode(.{ .kind = .match }) catch @panic("regex OOM");
+            \\    if (frag_opt) |frag| {
+            \\        c.patchFrag(frag, match_idx);
+            \\        return .{ .nodes = c.nodes.toOwnedSlice(alloc) catch @panic("regex OOM"), .start = frag.start, .alloc = alloc };
+            \\    }
+            \\    return .{ .nodes = c.nodes.toOwnedSlice(alloc) catch @panic("regex OOM"), .start = match_idx, .alloc = alloc };
+            \\}
+            \\fn _regex_match(re: Regex, input: []const u8) bool {
+            \\    const end = re.matchAt(input, 0) catch return false;
+            \\    return end != null and end.? == input.len;
+            \\}
+            \\fn _regex_find(re: Regex, input: []const u8) []const u8 {
+            \\    var i: usize = 0;
+            \\    while (i <= input.len) : (i += 1) {
+            \\        if (re.matchAt(input, i) catch null) |e| return input[i..e];
+            \\    }
+            \\    return "";
+            \\}
+            \\fn _regex_find_all(re: Regex, input: []const u8) []const []const u8 {
+            \\    var out: std.ArrayListUnmanaged([]const u8) = .{};
+            \\    var i: usize = 0;
+            \\    while (i < input.len) {
+            \\        if (re.matchAt(input, i) catch null) |e| {
+            \\            out.append(std.heap.page_allocator, input[i..e]) catch @panic("OOM");
+            \\            i = if (e > i) e else i + 1;
+            \\        } else i += 1;
+            \\    }
+            \\    return out.toOwnedSlice(std.heap.page_allocator) catch @panic("OOM");
+            \\}
+            \\fn _regex_replace(re: Regex, input: []const u8, sub: []const u8) []const u8 {
+            \\    var out: std.ArrayListUnmanaged(u8) = .{};
+            \\    var i: usize = 0;
+            \\    while (i < input.len) {
+            \\        if (re.matchAt(input, i) catch null) |e| {
+            \\            out.appendSlice(std.heap.page_allocator, sub) catch @panic("OOM");
+            \\            i = if (e > i) e else i + 1;
+            \\        } else {
+            \\            out.append(std.heap.page_allocator, input[i]) catch @panic("OOM");
+            \\            i += 1;
+            \\        }
+            \\    }
+            \\    return out.toOwnedSlice(std.heap.page_allocator) catch @panic("OOM");
+            \\}
+            \\
+        );
+
+        for (module.decls) |decl| try g.genTopDecl(decl);
+
+        // Emit a top-level `pub fn main()` thunk if any class has a
+        // `shared def main`.  Zig's startup code looks for `root.main`.
+        if (try findMainClass(module.decls, g.alloc, "")) |class_name| {
+            defer g.alloc.free(class_name);
+            // If the main method throws, call it with `try`.
+            const main_throws = findMainMethod(module.decls) != null and blk: {
+                const m = findMainMethod(module.decls).?;
+                break :blk m.throws or (m.body != null and bodyHasRaise(m.body.?));
+            };
+            const call_prefix: []const u8 = if (main_throws) "try " else "";
+            try g.w.print(
+                "pub fn main() !void {{\n    defer _ = _gpa.deinit();\n    {s}{s}.main();\n}}\n",
+                .{ call_prefix, class_name },
+            );
+        }
+    }
+
+    fn genTopDecl(g: Generator, decl: Ast.Decl) anyerror!void {
+        switch (decl) {
+            .use       => |n| try g.genUse(n),
+            .namespace => |n| try g.genNamespace(n),
+            .class     => |n| try g.genClass(n),
+            .interface => |n| try g.genInterface(n),
+            .struct_   => |n| try g.genStruct(n),
+            .mixin     => {},   // never emitted standalone; inlined at `adds` sites
+            .enum_     => |n| try g.genEnum(n),
+            .extend    => |n| try g.genExtend(n),
+            .method    => |n| try g.genMethod(n),
+            .property  => |n| try g.genProperty(n),
+            .var_      => |n| try g.genTopVar(n),
+            .init      => {},   // top-level constructor makes no sense
+            .union_    => |n| try g.genUnion(n),
+        }
+    }
+
+    // ── use ───────────────────────────────────────────────────────────────────
+
+    fn genUse(g: Generator, n: *Ast.DeclUse) anyerror!void {
+        try g.writeIndent();
+        // Alias = last segment of dotted path:  "Math.Utils" → "Utils"
+        const last_dot = std.mem.lastIndexOf(u8, n.path, ".");
+        const alias = if (last_dot) |d| n.path[d + 1..] else n.path;
+        // Import path: replace '.' with '/' and append ".zig".
+        // Always use forward slashes — Zig @import accepts them on all platforms.
+        const import_rel = try std.mem.replaceOwned(u8, g.alloc, n.path, ".", "/");
+        defer g.alloc.free(import_rel);
+        // Directly unwrap the named class from the module file so that
+        //   Utils.double(5)  in Zebra  →  Utils.double(5)  in Zig
+        // (otherwise it would be Utils.Utils.double(5), which is awkward).
+        // Convention: every .zbr file exports a type with the same name as
+        // the last path segment.
+        try g.w.print("const {s} = @import(\"{s}.zig\").{s};\n", .{ alias, import_rel, alias });
+    }
+
+    // ── namespace ─────────────────────────────────────────────────────────────
+
+    fn genNamespace(g: Generator, n: *Ast.DeclNamespace) anyerror!void {
+        try g.writeIndent();
+        try g.w.print("pub const {s} = struct {{\n", .{n.name});
+        const ig = g.indented();
+        for (n.decls) |decl| try ig.genTopDecl(decl);
+        try g.writeIndent();
+        try g.w.writeAll("};\n\n");
+    }
+
+    // ── class ─────────────────────────────────────────────────────────────────
+
+    fn genClass(g: Generator, n: *Ast.DeclClass) anyerror!void {
+        const cg = g.withOwner(n.name);
+
+        try g.writeIndent();
+        try g.w.print("pub const {s} = struct {{\n", .{n.name});
+
+        const ig = cg.indented();
+
+        // ① Inline mixin members before class members (fields first in Zig
+        //    struct layout).
+        for (n.adds) |tr| {
+            const mname = typeRefSimpleName(tr) orelse continue;
+            if (g.mixins.get(mname)) |mx| {
+                try ig.writeIndent();
+                try ig.w.print("// mixin: {s}\n", .{mname});
+                for (mx.members) |decl| try ig.genMember(decl);
+            }
+        }
+
+        // ② Regular class members.
+        for (n.members) |decl| try ig.genMember(decl);
+
+        // ③ Interface conformance checks.
+        //    `class Foo implements IBar` → `comptime { IBar(@This()); }`
+        if (n.implements.len > 0) {
+            try ig.w.writeAll("\n");
+            try ig.writeIndent();
+            try ig.w.writeAll("comptime {\n");
+            const cig = ig.indented();
+            for (n.implements) |tr| {
+                const iname = typeRefSimpleName(tr) orelse continue;
+                try cig.writeIndent();
+                try cig.w.print("{s}(@This());\n", .{iname});
+            }
+            try ig.writeIndent();
+            try ig.w.writeAll("}\n");
+        }
+
+        try g.writeIndent();
+        try g.w.writeAll("};\n\n");
+    }
+
+    // ── Member dispatch ───────────────────────────────────────────────────────
+
+    fn genMember(g: Generator, decl: Ast.Decl) anyerror!void {
+        switch (decl) {
+            .var_     => |n| try g.genFieldDecl(n),
+            .method   => |n| try g.genMethod(n),
+            .property => |n| try g.genProperty(n),
+            .init     => |n| try g.genInit(n),
+            else      => {},
+        }
+    }
+
+    // ── Field declaration ─────────────────────────────────────────────────────
+
+    fn genFieldDecl(g: Generator, n: *Ast.DeclVar) anyerror!void {
+        try g.writeIndent();
+        if (n.mods.shared) {
+            // `shared var` → Zig namespace-level declaration inside the struct.
+            // Accessed as StructName.field, not instance.field.
+            const kw: []const u8 = if (n.mods.readonly or n.is_const) "const" else "var";
+            try g.w.writeAll("pub ");
+            try g.w.writeAll(kw);
+            try g.w.writeAll(" ");
+            try g.w.writeAll(n.name);
+            if (n.type_) |tr| { try g.w.writeAll(": "); try g.genType(tr); }
+            if (n.init) |e| { try g.w.writeAll(" = "); try g.genExpr(e); }
+            else try g.w.writeAll(" = undefined");
+            try g.w.writeAll(";\n");
+        } else {
+            try g.w.writeAll(n.name);
+            try g.w.writeAll(": ");
+            if (n.type_) |tr| try g.genType(tr) else try g.w.writeAll("anytype");
+            if (n.init) |e| { try g.w.writeAll(" = "); try g.genExpr(e); }
+            else try g.w.writeAll(" = undefined");
+            try g.w.writeAll(",\n");
+        }
+    }
+
+    // ── interface ─────────────────────────────────────────────────────────────
+
+    fn genInterface(g: Generator, n: *Ast.DeclInterface) anyerror!void {
+        try g.writeIndent();
+        try g.w.print("pub fn {s}(comptime T: type) void {{\n", .{n.name});
+
+        const ig = g.indented();
+        try ig.writeIndent();
+        try ig.w.writeAll("comptime {\n");
+
+        const iig = ig.indented();
+        for (n.members) |m| {
+            const req_name: ?[]const u8 = switch (m) {
+                .method   => |meth| meth.name,
+                .property => |prop| prop.name,
+                else      => null,
+            };
+            if (req_name) |mname| {
+                try iig.writeIndent();
+                try iig.w.print(
+                    "if (!@hasDecl(T, \"{s}\")) @compileError(" ++
+                    "\"type \" ++ @typeName(T) ++ \" does not implement {s}.{s}\");\n",
+                    .{ mname, n.name, mname },
+                );
+            }
+        }
+
+        try ig.writeIndent();
+        try ig.w.writeAll("}\n");
+        try g.writeIndent();
+        try g.w.writeAll("}\n\n");
+    }
+
+    // ── struct ────────────────────────────────────────────────────────────────
+
+    fn genStruct(g: Generator, n: *Ast.DeclStruct) anyerror!void {
+        const sg = g.withOwner(n.name);
+        try g.writeIndent();
+        try g.w.print("pub const {s} = struct {{\n", .{n.name});
+        const ig = sg.indented();
+        for (n.members) |decl| try ig.genMember(decl);
+        if (n.implements.len > 0) {
+            try ig.w.writeAll("\n");
+            try ig.writeIndent();
+            try ig.w.writeAll("comptime {\n");
+            const cig = ig.indented();
+            for (n.implements) |tr| {
+                const iname = typeRefSimpleName(tr) orelse continue;
+                try cig.writeIndent();
+                try cig.w.print("{s}(@This());\n", .{iname});
+            }
+            try ig.writeIndent();
+            try ig.w.writeAll("}\n");
+        }
+        try g.writeIndent();
+        try g.w.writeAll("};\n\n");
+    }
+
+    // ── enum ──────────────────────────────────────────────────────────────────
+
+    fn genEnum(g: Generator, n: *Ast.DeclEnum) anyerror!void {
+        try g.writeIndent();
+        try g.w.print("pub const {s} = enum", .{n.name});
+        if (n.base) |base| {
+            try g.w.writeAll("(");
+            try g.genType(base);
+            try g.w.writeAll(")");
+        }
+        try g.w.writeAll(" {\n");
+        const ig = g.indented();
+        for (n.members) |m| {
+            try ig.writeIndent();
+            try ig.w.writeAll(m.name);
+            if (m.value) |v| {
+                try ig.w.writeAll(" = ");
+                try ig.genExpr(v);
+            }
+            try ig.w.writeAll(",\n");
+        }
+        try g.writeIndent();
+        try g.w.writeAll("};\n\n");
+    }
+
+    // ── union ─────────────────────────────────────────────────────────────────
+
+    fn genUnion(g: Generator, n: *Ast.DeclUnion) anyerror!void {
+        // Emit a Zig tagged union: pub const Name = union(enum) { ... };
+        try g.writeIndent();
+        const pub_str: []const u8 = if (n.mods.public or n.mods.shared) "pub " else "";
+        try g.w.print("{s}const {s} = union(enum) {{\n", .{pub_str, n.name});
+        const ig = g.indented();
+        for (n.variants) |v| {
+            try ig.writeIndent();
+            if (v.payload) |pl| {
+                try ig.w.print("{s}: ", .{v.name});
+                try ig.genType(pl);
+                try ig.w.writeAll(",\n");
+            } else {
+                try ig.w.print("{s},\n", .{v.name});
+            }
+        }
+        try g.writeIndent();
+        try g.w.writeAll("};\n\n");
+    }
+
+    // ── extend ────────────────────────────────────────────────────────────────
+
+    fn genExtend(g: Generator, n: *Ast.DeclExtend) anyerror!void {
+        const tname = typeRefSimpleName(n.target) orelse "Unknown";
+        const eg = g.withOwner(tname);
+        try g.writeIndent();
+        try g.w.print("// extend {s}\n", .{tname});
+        for (n.members) |decl| try eg.genMember(decl);
+        try g.w.writeAll("\n");
+    }
+
+    // ── Top-level var / const ─────────────────────────────────────────────────
+
+    fn genTopVar(g: Generator, n: *Ast.DeclVar) anyerror!void {
+        try g.writeIndent();
+        const kw: []const u8 = if (n.is_const) "const" else "var";
+        try g.w.print("pub {s} {s}", .{ kw, n.name });
+        if (n.type_) |tr| {
+            try g.w.writeAll(": ");
+            try g.genType(tr);
+        }
+        if (n.init) |e| {
+            try g.w.writeAll(" = ");
+            try g.genExpr(e);
+        }
+        try g.w.writeAll(";\n\n");
+    }
+
+    // ── method ────────────────────────────────────────────────────────────────
+
+    fn genMethod(g: Generator, n: *Ast.DeclMethod) anyerror!void {
+        const mg = g.asMethod();
+
+        try g.writeIndent();
+        try g.w.print("pub fn {s}(", .{n.name});
+
+        // Instance methods inside a type get `self: *Owner`.
+        // `shared` methods (type-level, not instance) omit self.
+        const has_self = g.owner.len > 0 and !n.mods.shared;
+        if (has_self) {
+            try g.w.print("self: *{s}", .{g.owner});
+            if (n.params.len > 0) try g.w.writeAll(", ");
+        }
+
+        for (n.params, 0..) |p, i| {
+            if (i > 0) try g.w.writeAll(", ");
+            try g.w.writeAll(p.name);
+            try g.w.writeAll(": ");
+            if (p.type_) |tr| try g.genType(tr) else try g.w.writeAll("anytype");
+        }
+        try g.w.writeAll(") ");
+
+        // Emit anyerror! if explicitly annotated OR if the body contains raise/try.
+        const needs_error = n.throws or
+            (n.body != null and bodyHasRaise(n.body.?));
+        if (needs_error) try g.w.writeAll("anyerror!");
+        if (n.return_type) |rt| try g.genType(rt) else try g.w.writeAll("void");
+
+        if (n.body) |body| {
+            // Pre-scan 1: which params / self are actually referenced?
+            var refs = try collectRefs(body, g.resolve, g.alloc);
+            defer refs.deinit();
+            // Pre-scan 2: which locals are mutated? (var vs const)
+            var mut_set = try scanMutations(body, g.alloc);
+            defer mut_set.deinit();
+            // Pre-scan 3: which locals appear in return expressions?
+            // Those must NOT get defer-free (caller takes ownership).
+            var ret_set = try scanReturnedNames(body, g.alloc);
+            defer ret_set.deinit();
+            // Mutable map of closure-var names (populated lazily during genStmts)
+            var cv_map = std.StringHashMap(void).init(g.alloc);
+            defer cv_map.deinit();
+            const bg = mg.indented().withMutated(&mut_set).withClosureVars(&cv_map).withReturnedNames(&ret_set);
+
+            try g.w.writeAll(" {\n");
+            // Emit `_ = x;` only for params that are NOT referenced in the body.
+            // Emitting it for a used param would be a "pointless discard" error.
+            if (has_self and !refs.uses_self) try bg.line("_ = self;");
+            for (n.params) |p| {
+                if (!refs.param_names.contains(p.name)) {
+                    try bg.writeIndent();
+                    try bg.w.print("_ = {s};\n", .{p.name});
+                }
+            }
+            try bg.genStmts(body);
+            try g.writeIndent();
+            try g.w.writeAll("}\n\n");
+        } else {
+            // Abstract method — emit a stub body.
+            try g.w.writeAll(" {\n");
+            try mg.indented().line("unreachable; // abstract");
+            try g.writeIndent();
+            try g.w.writeAll("}\n\n");
+        }
+    }
+
+    // ── property ──────────────────────────────────────────────────────────────
+
+    fn genProperty(g: Generator, n: *Ast.DeclProperty) anyerror!void {
+        const pg = g.asMethod();
+
+        // Getter — named after the property itself.
+        if (n.getter) |body| {
+            var refs = try collectRefs(body, g.resolve, g.alloc);
+            defer refs.deinit();
+            var mut_set = try scanMutations(body, g.alloc);
+            defer mut_set.deinit();
+            var cv_map = std.StringHashMap(void).init(g.alloc);
+            defer cv_map.deinit();
+            const pbg = pg.indented().withMutated(&mut_set).withClosureVars(&cv_map);
+            try g.writeIndent();
+            try g.w.print("pub fn {s}(", .{n.name});
+            if (g.owner.len > 0) try g.w.print("self: *{s}", .{g.owner});
+            try g.w.writeAll(") ");
+            if (n.type_) |tr| try g.genType(tr) else try g.w.writeAll("anytype");
+            try g.w.writeAll(" {\n");
+            if (g.owner.len > 0 and !refs.uses_self) try pbg.line("_ = self;");
+            try pbg.genStmts(body);
+            try g.writeIndent();
+            try g.w.writeAll("}\n\n");
+        }
+
+        // Setter — prefixed with `set_`.
+        if (n.setter) |body| {
+            var refs = try collectRefs(body, g.resolve, g.alloc);
+            defer refs.deinit();
+            var mut_set = try scanMutations(body, g.alloc);
+            defer mut_set.deinit();
+            var cv_map2 = std.StringHashMap(void).init(g.alloc);
+            defer cv_map2.deinit();
+            const pbg = pg.indented().withMutated(&mut_set).withClosureVars(&cv_map2);
+            try g.writeIndent();
+            try g.w.print("pub fn set_{s}(", .{n.name});
+            if (g.owner.len > 0) {
+                try g.w.print("self: *{s}, ", .{g.owner});
+            }
+            try g.w.writeAll("value: ");
+            if (n.type_) |tr| try g.genType(tr) else try g.w.writeAll("anytype");
+            try g.w.writeAll(") void {\n");
+            if (g.owner.len > 0 and !refs.uses_self) try pbg.line("_ = self;");
+            if (!refs.param_names.contains("value")) try pbg.line("_ = value;");
+            try pbg.genStmts(body);
+            try g.writeIndent();
+            try g.w.writeAll("}\n\n");
+        }
+    }
+
+    // ── constructor ───────────────────────────────────────────────────────────
+
+    fn genInit(g: Generator, n: *Ast.DeclInit) anyerror!void {
+        const mg = g.asMethod();
+        try g.writeIndent();
+        try g.w.writeAll("pub fn init(");
+        for (n.params, 0..) |p, i| {
+            if (i > 0) try g.w.writeAll(", ");
+            try g.w.writeAll(p.name);
+            try g.w.writeAll(": ");
+            if (p.type_) |tr| try g.genType(tr) else try g.w.writeAll("anytype");
+        }
+        try g.w.print(") {s} {{\n", .{g.owner});
+        const body = n.body orelse &[_]Ast.Stmt{};
+        var refs = try collectRefs(body, g.resolve, g.alloc);
+        defer refs.deinit();
+        var mut_set = try scanMutations(body, g.alloc);
+        defer mut_set.deinit();
+        var cv_map = std.StringHashMap(void).init(g.alloc);
+        defer cv_map.deinit();
+        const bg = mg.indented().withMutated(&mut_set).withClosureVars(&cv_map);
+        try bg.writeIndent();
+        try bg.w.print("var self: {s} = undefined;\n", .{g.owner});
+        for (n.params) |p| {
+            if (!refs.param_names.contains(p.name)) {
+                try bg.writeIndent();
+                try bg.w.print("_ = {s};\n", .{p.name});
+            }
+        }
+        try bg.genStmts(body);
+        try bg.writeIndent();
+        try bg.w.writeAll("return self;\n");
+        try g.writeIndent();
+        try g.w.writeAll("}\n\n");
+    }
+
+    // ── Statements ────────────────────────────────────────────────────────────
+
+    fn genStmts(g: Generator, stmts: []const Ast.Stmt) anyerror!void {
+        for (stmts) |stmt| try g.genStmt(stmt);
+    }
+
+    fn genStmt(g: Generator, stmt: Ast.Stmt) anyerror!void {
+        switch (stmt) {
+            .var_      => |n| try g.genLocalVar(n),
+            .assign    => |s| try g.genAssign(s),
+            .return_   => |s| try g.genReturn(s),
+            .if_       => |s| try g.genIf(s),
+            .while_    => |s| try g.genWhile(s),
+            .for_in    => |s| try g.genForIn(s),
+            .for_num   => |s| try g.genForNum(s),
+            .branch    => |s| try g.genBranch(s),
+            .print     => |s| try g.genPrint(s),
+            .assert    => |s| try g.genAssert(s),
+            .yield     => |s| {
+                try g.writeIndent();
+                try g.w.writeAll("// yield ");
+                try g.genExpr(s.value);
+                try g.w.writeAll(";\n");
+            },
+            .expr      => |e| {
+                try g.writeIndent();
+                try g.genExpr(e);
+                // Inside a try block, a call to a `throws` method must have its
+                // error captured and redirected to the block's tracking variable.
+                if (e.* == .call and g.try_block_label != null and
+                    exprCallIsThrows(e.call, g.resolve))
+                {
+                    const ev  = g.try_err_var.?;
+                    const lbl = g.try_block_label.?;
+                    try g.w.print(" catch |_e| {{ {s} = _e; break :{s}; }}", .{ev, lbl});
+                }
+                try g.w.writeAll(";\n");
+            },
+            .pass      => try g.line("// pass"),
+            .break_    => try g.line("break;"),
+            .continue_ => try g.line("continue;"),
+            .defer_    => |s| try g.genDefer(s),
+            .contract  => {}, // contracts not emitted (runtime verification out of scope)
+            .with      => |s| try g.genWith(s),
+            .var_except    => |s| try g.genVarExcept(s),
+            .assign_except => |s| try g.genAssignExcept(s),
+            .raise         => |s| try g.genRaise(s),
+            .try_catch     => |s| try g.genTryCatch(s),
+        }
+    }
+
+    fn genLocalVar(g: Generator, n: *Ast.DeclVar) anyerror!void {
+        try g.writeIndent();
+        // Use `const` unless the variable is actually reassigned somewhere in
+        // the body (Zig treats `var` that is never mutated as a compile error).
+        const is_mutated = if (g.mutated) |m| m.contains(n.name) else false;
+        const kw: []const u8 = if (n.is_const or !is_mutated) "const" else "var";
+
+        // StringBuilder constructor: `var sb as StringBuilder = StringBuilder()`
+        if (n.init) |e| {
+            if (n.type_) |tr| {
+                if (tr == .named and std.mem.eql(u8, tr.named.name, "StringBuilder")) {
+                    if (e.* == .call and e.call.args.len == 0 and
+                        e.call.callee.* == .ident and
+                        std.mem.eql(u8, e.call.callee.ident.name, "StringBuilder"))
+                    {
+                        // Always var: ArrayList.appendSlice takes *Self.
+                        try g.w.print("var {s} = std.ArrayList(u8){{}};\n", .{n.name});
+                        try g.writeIndent();
+                        try g.w.print("defer {s}.deinit(_allocator);\n", .{n.name});
+                        return;
+                    }
+                }
+            }
+        }
+        // Stdlib constructor: `var x as List(T) = List()` or `HashMap(K,V) = HashMap()`
+        if (n.init) |e| {
+            if (n.type_) |tr| {
+                if (tr == .generic) {
+                    const gtr = tr.generic;
+                    // Check if init is a zero-arg call to the same type name
+                    if (e.* == .call and e.call.args.len == 0 and
+                        e.call.callee.* == .ident and
+                        std.mem.eql(u8, e.call.callee.ident.name, gtr.name))
+                    {
+                        try g.w.writeAll(kw);
+                        try g.w.writeAll(" ");
+                        try g.w.writeAll(n.name);
+                        try g.w.writeAll(" = ");
+                        try g.genStdlibInit(gtr);
+                        try g.w.writeAll(";\n");
+                        // Emit cleanup defer so memory is returned to the GPA.
+                        try g.writeIndent();
+                        if (std.mem.eql(u8, gtr.name, "List")) {
+                            try g.w.print("defer {s}.deinit(_allocator);\n", .{n.name});
+                        } else {
+                            try g.w.print("defer {s}.deinit();\n", .{n.name});
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Lambda with a capture block — emit as a struct instance, not a fn ptr.
+        // Register the name so call sites use `name.call(args)`.
+        if (n.init) |e| {
+            if (e.* == .lambda and e.lambda.capture.len > 0) {
+                if (g.closure_vars) |cv| try cv.put(n.name, {});
+                try g.w.writeAll(kw);
+                try g.w.writeAll(" ");
+                try g.w.writeAll(n.name);
+                try g.w.writeAll(" = ");
+                try g.genCaptureClosureStruct(e.lambda);
+                try g.w.writeAll(";\n");
+                return;
+            }
+        }
+
+        try g.w.writeAll(kw);
+        try g.w.writeAll(" ");
+        try g.w.writeAll(n.name);
+        if (n.type_) |tr| {
+            try g.w.writeAll(": ");
+            try g.genType(tr);
+        }
+        if (n.init) |e| {
+            try g.w.writeAll(" = ");
+            try g.genExpr(e);
+        } else {
+            try g.w.writeAll(" = undefined");
+        }
+        try g.w.writeAll(";\n");
+        // Allocated string vars (concat, format) need explicit free —
+        // unless the variable is returned from this function (caller takes ownership).
+        if (n.init) |e| {
+            const is_returned = if (g.returned_names) |rn| rn.contains(n.name) else false;
+            if (!is_returned and isAllocatingStringInit(e, g.tc)) {
+                try g.writeIndent();
+                try g.w.print("defer _allocator.free({s});\n", .{n.name});
+            }
+        }
+    }
+
+    /// True when `expr` is a call that allocates a heap-owned string.
+    fn isAllocatingStringInit(e: *const Ast.Expr, tc_opt: ?*const TypeChecker.TypeCheckResult) bool {
+        // String interpolation allocates via allocPrint.
+        if (e.* == .string_interp) return true;
+        if (e.* != .call) return false;
+        const callee = e.call.callee;
+        if (callee.* != .member) return false;
+        const obj = callee.member.object;
+        const m   = callee.member.member;
+        // Methods that allocate a new string via _allocator.
+        const str_allocating = std.StaticStringMap(void).initComptime(&.{
+            .{ "concat",   {} }, .{ "format",   {} }, .{ "upper",    {} },
+            .{ "lower",    {} }, .{ "replace",  {} }, .{ "repeat",   {} },
+            .{ "toString", {} }, .{ "padLeft",  {} }, .{ "padRight", {} },
+            .{ "center",   {} }, .{ "join",     {} }, .{ "reverse",  {} },
+            .{ "toHex",    {} }, .{ "fromHex",  {} },
+        });
+        if (str_allocating.get(m) != null) {
+            // Exclude regex/network method calls — they use page_allocator, not _allocator.
+            if (tc_opt) |tc| {
+                const recv = tc.expr_types.get(obj) orelse .unknown;
+                if (recv == .regex or recv == .tcp_conn or recv == .udp_socket) return false;
+            }
+            return true;
+        }
+        // File.read and File.readLines allocate.
+        if (obj.* == .ident and std.mem.eql(u8, obj.ident.name, "File")) {
+            if (std.mem.eql(u8, m, "read") or std.mem.eql(u8, m, "readLines")) return true;
+        }
+        return false;
+    }
+
+    // ── Stdlib type initialisation ────────────────────────────────────────────
+
+    /// Emit the Zig init expression for a stdlib generic type.
+    ///   List(int)       → std.ArrayList(i64){}   (Zig 0.15: unmanaged, alloc per-op)
+    ///   HashMap(str, T) → std.StringHashMap(T).init(_allocator)
+    ///   HashMap(K, V)   → std.AutoHashMap(K, V).init(_allocator)
+    fn genStdlibInit(g: Generator, gtr: Ast.GenericTypeRef) anyerror!void {
+        if (std.mem.eql(u8, gtr.name, "List")) {
+            // Zig 0.15 ArrayList is unmanaged: initialise with {}
+            try g.genType(.{ .generic = gtr });
+            try g.w.writeAll("{}");
+        } else {
+            try g.genType(.{ .generic = gtr });
+            try g.w.writeAll(".init(_allocator)");
+        }
+    }
+
+    // ── Stdlib method / property dispatch ────────────────────────────────────
+    //
+    // Returns true and emits code if `method` on a value of type `tr` is a
+    // known stdlib operation.  Returns false and emits nothing otherwise.
+
+    fn genStdlibMethod(
+        g:      Generator,
+        object: *const Ast.Expr,
+        tr:     Ast.TypeRef,
+        method: []const u8,
+        args:   []const Ast.Arg,
+    ) anyerror!bool {
+        switch (tr) {
+            .generic => |gtr| {
+                if (std.mem.eql(u8, gtr.name, "List")) {
+                    return g.genListMethod(object, method, args);
+                }
+                if (std.mem.eql(u8, gtr.name, "HashMap")) {
+                    const key_is_str = gtr.args.len >= 1 and isStringTypeRef(gtr.args[0]);
+                    return g.genHashMapMethod(object, key_is_str, method, args);
+                }
+            },
+            .named => |n| {
+                if (isStringTypeName(n.name)) return g.genStringMethod(object, method, args);
+                if (std.mem.eql(u8, n.name, "StringBuilder")) return g.genStringBuilderMethod(object, method, args);
+                if (std.mem.eql(u8, n.name, "char")) return g.genCharMethod(object, method, args);
+                if (std.mem.eql(u8, n.name, "TcpConn"))   return g.genTcpMethod(object, method, args);
+                if (std.mem.eql(u8, n.name, "UdpSocket"))  return g.genUdpMethod(object, method, args);
+                if (std.mem.eql(u8, n.name, "Regex"))      return g.genRegexMethod(object, method, args);
+                // toString() on int/float/bool — format as string.
+                if (std.mem.eql(u8, method, "toString")) {
+                    const fmt = if (std.mem.eql(u8, n.name, "float") or
+                                    std.mem.eql(u8, n.name, "num")   or
+                                    std.mem.eql(u8, n.name, "decimal")) "{d}" else "{}";
+                    try g.w.print("(std.fmt.allocPrint(_allocator, \"{s}\", .{{", .{fmt});
+                    try g.genExpr(object);
+                    try g.w.writeAll("}) catch unreachable)");
+                    return true;
+                }
+            },
+            else => {
+                // Unknown type — try toString via TC inferred type.
+                if (std.mem.eql(u8, method, "toString")) {
+                    const tc_type = if (g.tc) |tc| tc.expr_types.get(object) orelse .unknown else .unknown;
+                    const fmt: []const u8 = switch (tc_type) {
+                        .float => "{d}",
+                        else   => "{}",
+                    };
+                    try g.w.print("(std.fmt.allocPrint(_allocator, \"{s}\", .{{", .{fmt});
+                    try g.genExpr(object);
+                    try g.w.writeAll("}) catch unreachable)");
+                    return true;
+                }
+                // Unknown type — try List dispatch for known list method names.
+                // This handles e.g. sys.args() which is inferred as .unknown but
+                // holds a std.ArrayList at runtime.
+                const list_methods = std.StaticStringMap(void).initComptime(&.{
+                    .{ "add", {} }, .{ "at", {} }, .{ "remove", {} },
+                    .{ "clear", {} }, .{ "contains", {} }, .{ "count", {} },
+                });
+                if (list_methods.get(method) != null) {
+                    return g.genListMethod(object, method, args);
+                }
+            },
+        }
+        return false;
+    }
+
+    fn genStdlibProp(
+        g:      Generator,
+        object: *const Ast.Expr,
+        tr:     Ast.TypeRef,
+        prop:   []const u8,
+    ) anyerror!bool {
+        switch (tr) {
+            .generic => |gtr| {
+                if (std.mem.eql(u8, gtr.name, "List")) {
+                    if (std.mem.eql(u8, prop, "len") or std.mem.eql(u8, prop, "count")) {
+                        try g.genExpr(object);
+                        try g.w.writeAll(".items.len");
+                        return true;
+                    }
+                }
+                if (std.mem.eql(u8, gtr.name, "HashMap")) {
+                    if (std.mem.eql(u8, prop, "len") or std.mem.eql(u8, prop, "count")) {
+                        try g.genExpr(object);
+                        try g.w.writeAll(".count()");
+                        return true;
+                    }
+                }
+            },
+            .named => |n| {
+                if (isStringTypeName(n.name) and std.mem.eql(u8, prop, "len")) {
+                    try g.genExpr(object);
+                    try g.w.writeAll(".len");
+                    return true;
+                }
+            },
+            else => {
+                // Unknown type — treat len/count as ArrayList .items.len fallback.
+                if (std.mem.eql(u8, prop, "len") or std.mem.eql(u8, prop, "count")) {
+                    try g.genExpr(object);
+                    try g.w.writeAll(".items.len");
+                    return true;
+                }
+            },
+        }
+        return false;
+    }
+
+    // ── File I/O static methods ───────────────────────────────────────────────
+
+    /// Emit a static `File.*` call.
+    ///
+    ///   File.read(path)            → []u8  (allocates; call in throws context)
+    ///   File.write(path, content)  → void
+    ///   File.exists(path)          → bool  (no allocation, no error)
+    ///   File.readLines(path)       → List(str) — convenience wrapper
+    fn genFileCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "read")) {
+            // File.read(path) → std.fs.cwd().readFileAlloc(_allocator, path, max)
+            try g.w.writeAll("(std.fs.cwd().readFileAlloc(_allocator, ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(", std.math.maxInt(usize)) catch @panic(\"File.read error\"))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "write")) {
+            // File.write(path, content) → std.fs.cwd().writeFile(...)
+            try g.w.writeAll("(std.fs.cwd().writeFile(.{ .sub_path = ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(", .data = ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(" }) catch @panic(\"File.write error\"))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "exists")) {
+            // File.exists(path) → labelled block: access → true, else false
+            try g.w.writeAll("(blk: { std.fs.cwd().access(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(", .{}) catch break :blk false; break :blk true; })");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "readLines")) {
+            // File.readLines(path) → read whole file and split on newlines into ArrayList
+            // Emits a block that builds an ArrayList([]const u8).
+            try g.w.writeAll("(blk: {\n");
+            const bg = g.indented();
+            try bg.writeIndent();
+            try bg.w.writeAll("const _fl_content = std.fs.cwd().readFileAlloc(_allocator, ");
+            if (args.len >= 1) try bg.genExpr(args[0].value) else try bg.w.writeAll("\"\"");
+            try bg.w.writeAll(", std.math.maxInt(usize)) catch @panic(\"File.readLines error\");\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("var _fl_list = std.ArrayList([]const u8){};\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("var _fl_it = std.mem.splitScalar(u8, _fl_content, '\\n');\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("while (_fl_it.next()) |_fl_line| {\n");
+            try bg.indented().writeIndent();
+            try bg.indented().w.writeAll("_fl_list.append(_allocator, _fl_line) catch unreachable;\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("}\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("break :blk _fl_list;\n");
+            try g.writeIndent();
+            try g.w.writeAll("})");
+            return true;
+        }
+        return false;
+    }
+
+    // ── sys static methods ────────────────────────────────────────────────────
+
+    /// Emit a static `sys.*` call.
+    ///
+    ///   sys.args()          → ArrayList([]const u8) of command-line args (alloc'd)
+    ///   sys.exit(code)      → std.process.exit(code)  — noreturn
+    ///   sys.err(msg)        → write msg to stderr (no newline)
+    ///   sys.errln(msg)      → write msg + newline to stderr
+    ///   sys.getenv(name)    → ?[]const u8 via std.posix.getenv
+    fn genSysCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "args")) {
+            // sys.args() → build an ArrayList from argsAlloc result
+            try g.w.writeAll("(blk: {\n");
+            const bg = g.indented();
+            try bg.writeIndent();
+            try bg.w.writeAll("const _sa_raw = std.process.argsAlloc(_allocator) catch @panic(\"sys.args OOM\");\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("var _sa_list = std.ArrayList([]const u8){};\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("for (_sa_raw) |_sa_arg| _sa_list.append(_allocator, _sa_arg) catch unreachable;\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("break :blk _sa_list;\n");
+            try g.writeIndent();
+            try g.w.writeAll("})");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "exit")) {
+            try g.w.writeAll("std.process.exit(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "err")) {
+            try g.w.writeAll("std.debug.print(\"{s}\", .{");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll("})");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "errln")) {
+            try g.w.writeAll("std.debug.print(\"{s}\\n\", .{");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll("})");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "getenv")) {
+            try g.w.writeAll("std.posix.getenv(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    // ── Http static methods ───────────────────────────────────────────────────
+
+    /// Emit a static `Http.*` call.
+    ///
+    ///   Http.get(url)           → _HttpResponse via _http_get(url)
+    ///   Http.post(url, payload) → _HttpResponse via _http_post(url, payload)
+    fn genHttpCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "get")) {
+            try g.w.writeAll("_http_get(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "post")) {
+            try g.w.writeAll("_http_post(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(", ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "serve")) {
+            try g.w.writeAll("_http_serve(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("8080");
+            try g.w.writeAll(", ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("undefined");
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    // ── HttpResponse factory methods ─────────────────────────────────────────
+
+    fn genHttpResponseFactory(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "ok")) {
+            try g.w.writeAll("HttpResponse{ .status = 200, .text = ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(" }");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "notFound")) {
+            try g.w.writeAll("HttpResponse{ .status = 404, .text = ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"Not Found\"");
+            try g.w.writeAll(" }");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "err")) {
+            try g.w.writeAll("HttpResponse{ .status = 500, .text = ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"Internal Server Error\"");
+            try g.w.writeAll(" }");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "new")) {
+            try g.w.writeAll("HttpResponse{ .status = @intCast(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("200");
+            try g.w.writeAll("), .text = ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(" }");
+            return true;
+        }
+        return false;
+    }
+
+    // ── Tcp static + instance methods ────────────────────────────────────────
+
+    fn genTcpCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "connect")) {
+            try g.w.writeAll("_tcp_connect(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(", ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("0");
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    fn genTcpMethod(g: Generator, obj: *const Ast.Expr, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "write")) {
+            try g.w.writeAll("_tcp_write(");
+            try g.genExpr(obj);
+            try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "read")) {
+            try g.w.writeAll("_tcp_read(");
+            try g.genExpr(obj);
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "close")) {
+            try g.w.writeAll("_tcp_close(");
+            try g.genExpr(obj);
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    // ── Udp static + instance methods ────────────────────────────────────────
+
+    fn genUdpCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "socket")) {
+            _ = args;
+            try g.w.writeAll("_udp_socket()");
+            return true;
+        }
+        return false;
+    }
+
+    // ── Regex static + instance methods ─────────────────────────────────────
+
+    fn genRegexCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "compile")) {
+            try g.w.writeAll("_regex_compile(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    fn genRegexMethod(g: Generator, obj: *const Ast.Expr, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "match")) {
+            try g.w.writeAll("_regex_match(");
+            try g.genExpr(obj);
+            try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "find")) {
+            try g.w.writeAll("_regex_find(");
+            try g.genExpr(obj);
+            try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "findAll")) {
+            try g.w.writeAll("_regex_find_all(");
+            try g.genExpr(obj);
+            try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "replace")) {
+            try g.w.writeAll("_regex_replace(");
+            try g.genExpr(obj);
+            try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(", ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    fn genUdpMethod(g: Generator, obj: *const Ast.Expr, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "send")) {
+            try g.w.writeAll("_udp_send(");
+            try g.genExpr(obj);
+            try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(", ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("0");
+            try g.w.writeAll(", ");
+            if (args.len >= 3) try g.genExpr(args[2].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "recv")) {
+            try g.w.writeAll("_udp_recv(");
+            try g.genExpr(obj);
+            try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("4096");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "close")) {
+            try g.w.writeAll("_udp_close(");
+            try g.genExpr(obj);
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    // ── List methods ──────────────────────────────────────────────────────────
+
+    fn genListMethod(g: Generator, obj: *const Ast.Expr, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "add")) {
+            // list.add(x) → list.append(_allocator, x) catch unreachable  (Zig 0.15)
+            try g.genExpr(obj);
+            try g.w.writeAll(".append(_allocator, ");
+            if (args.len > 0) try g.genExpr(args[0].value);
+            try g.w.writeAll(") catch unreachable");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "at")) {
+            // list.at(i) → list.items[i]   (use 'at' since 'get' is a keyword)
+            try g.genExpr(obj);
+            try g.w.writeAll(".items[");
+            if (args.len > 0) try g.genExpr(args[0].value);
+            try g.w.writeAll("]");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "remove")) {
+            // list.remove(i) → _ = list.orderedRemove(i)
+            try g.w.writeAll("_ = ");
+            try g.genExpr(obj);
+            try g.w.writeAll(".orderedRemove(");
+            if (args.len > 0) try g.genExpr(args[0].value);
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "clear")) {
+            try g.genExpr(obj);
+            try g.w.writeAll(".clearRetainingCapacity()");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "contains")) {
+            // list.contains(x) → std.mem.indexOfScalar(T, list.items, x) != null
+            try g.w.writeAll("(std.mem.indexOfScalar(@TypeOf(");
+            try g.genExpr(obj);
+            try g.w.writeAll(".items[0]), ");
+            try g.genExpr(obj);
+            try g.w.writeAll(".items, ");
+            if (args.len > 0) try g.genExpr(args[0].value);
+            try g.w.writeAll(") != null)");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "count")) {
+            try g.genExpr(obj);
+            try g.w.writeAll(".items.len");
+            return true;
+        }
+        return false;
+    }
+
+    // ── HashMap methods ───────────────────────────────────────────────────────
+
+    fn genHashMapMethod(g: Generator, obj: *const Ast.Expr, key_is_str: bool, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        _ = key_is_str;
+        if (std.mem.eql(u8, method, "put")) {
+            // map.put(k, v) — note: 'set' is a keyword, use 'put'
+            try g.genExpr(obj);
+            try g.w.writeAll(".put(");
+            for (args, 0..) |a, i| {
+                if (i > 0) try g.w.writeAll(", ");
+                try g.genExpr(a.value);
+            }
+            try g.w.writeAll(") catch unreachable");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "fetch")) {
+            // map.fetch(k) — note: 'get' is a keyword, use 'fetch'
+            // Returns the value or undefined if missing.
+            try g.w.writeAll("(");
+            try g.genExpr(obj);
+            try g.w.writeAll(".get(");
+            if (args.len > 0) try g.genExpr(args[0].value);
+            try g.w.writeAll(") orelse undefined)");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "contains")) {
+            // map.contains(k) — note: 'has' is a keyword, use 'contains'
+            try g.genExpr(obj);
+            try g.w.writeAll(".contains(");
+            if (args.len > 0) try g.genExpr(args[0].value);
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "remove")) {
+            try g.w.writeAll("_ = ");
+            try g.genExpr(obj);
+            try g.w.writeAll(".remove(");
+            if (args.len > 0) try g.genExpr(args[0].value);
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "count")) {
+            try g.genExpr(obj);
+            try g.w.writeAll(".count()");
+            return true;
+        }
+        return false;
+    }
+
+    // ── String methods ────────────────────────────────────────────────────────
+
+    fn genStringMethod(g: Generator, obj: *const Ast.Expr, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "contains")) {
+            try g.w.writeAll("(std.mem.indexOf(u8, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(", ");
+            if (args.len > 0) try g.genExpr(args[0].value);
+            try g.w.writeAll(") != null)");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "startsWith")) {
+            try g.w.writeAll("std.mem.startsWith(u8, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(", ");
+            if (args.len > 0) try g.genExpr(args[0].value);
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "endsWith")) {
+            try g.w.writeAll("std.mem.endsWith(u8, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(", ");
+            if (args.len > 0) try g.genExpr(args[0].value);
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "trim")) {
+            try g.w.writeAll("std.mem.trim(u8, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(", &std.ascii.whitespace)");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "trimLeft")) {
+            try g.w.writeAll("std.mem.trimLeft(u8, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(", &std.ascii.whitespace)");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "trimRight")) {
+            try g.w.writeAll("std.mem.trimRight(u8, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(", &std.ascii.whitespace)");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "isEmpty")) {
+            try g.genExpr(obj);
+            try g.w.writeAll(".len == 0");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "count")) {
+            // str.count(substr) → count non-overlapping occurrences
+            try g.w.writeAll("std.mem.count(u8, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(", ");
+            if (args.len > 0) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "join")) {
+            // sep.join(list) → std.mem.join(_allocator, sep, list.items)
+            try g.w.writeAll("(std.mem.join(_allocator, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(", ");
+            if (args.len > 0) try g.genExpr(args[0].value) else try g.w.writeAll("&.{}");
+            try g.w.writeAll(".items) catch @panic(\"OOM\"))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "lines")) {
+            // s.lines() → splitScalar iterator on '\n'; used in for-in via genForInLines
+            try g.w.writeAll("std.mem.splitScalar(u8, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(", '\\n')");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "reverse")) {
+            // str.reverse() → allocate copy and reverse it
+            try g.w.writeAll("(blk: { const _rbuf = _allocator.alloc(u8, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(".len) catch @panic(\"OOM\"); @memcpy(_rbuf, ");
+            try g.genExpr(obj);
+            try g.w.writeAll("); std.mem.reverse(u8, _rbuf); break :blk _rbuf; })");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "toHex")) {
+            // str.toHex() → lower-case hex encoding; one byte → two hex digits
+            try g.w.writeAll("(blk: { const _hx_s = ");
+            try g.genExpr(obj);
+            try g.w.writeAll("; const _hx_buf = _allocator.alloc(u8, _hx_s.len * 2) catch @panic(\"OOM\"); ");
+            try g.w.writeAll("for (_hx_s, 0..) |_hx_b, _hx_i| { _ = std.fmt.bufPrint(_hx_buf[_hx_i * 2 .. _hx_i * 2 + 2], \"{x:0>2}\", .{_hx_b}) catch unreachable; } ");
+            try g.w.writeAll("break :blk _hx_buf; })");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "fromHex")) {
+            // str.fromHex() → decode hex string to bytes; returns ?str (null on bad input)
+            try g.w.writeAll("(blk: { if (");
+            try g.genExpr(obj);
+            try g.w.writeAll(".len % 2 != 0) break :blk @as(?[]const u8, null); ");
+            try g.w.writeAll("const _hbuf = _allocator.alloc(u8, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(".len / 2) catch @panic(\"OOM\"); ");
+            try g.w.writeAll("std.fmt.hexToBytes(_hbuf, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(") catch { _allocator.free(_hbuf); break :blk @as(?[]const u8, null); }; ");
+            try g.w.writeAll("break :blk @as(?[]const u8, _hbuf); })");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "isAlpha")) {
+            // str.isAlpha() → all bytes are ASCII alphabetic (ASCII-aware)
+            try g.w.writeAll("(blk: { if (");
+            try g.genExpr(obj);
+            try g.w.writeAll(".len == 0) break :blk false; for (");
+            try g.genExpr(obj);
+            try g.w.writeAll(") |_ac| { if (!std.ascii.isAlphabetic(_ac)) break :blk false; } break :blk true; })");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "isNumeric")) {
+            // str.isNumeric() → all bytes are ASCII digits (ASCII-aware)
+            try g.w.writeAll("(blk: { if (");
+            try g.genExpr(obj);
+            try g.w.writeAll(".len == 0) break :blk false; for (");
+            try g.genExpr(obj);
+            try g.w.writeAll(") |_nc| { if (!std.ascii.isDigit(_nc)) break :blk false; } break :blk true; })");
+            return true;
+        }
+        // ── UTF-8 / Unicode methods ───────────────────────────────────────────
+        if (std.mem.eql(u8, method, "isValidUtf8")) {
+            try g.w.writeAll("std.unicode.utf8ValidateSlice(");
+            try g.genExpr(obj);
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "codePointCount")) {
+            // Returns the number of Unicode codepoints (not bytes).
+            // utf8CountCodepoints returns an error on invalid UTF-8; we catch and return 0.
+            try g.w.writeAll("(std.unicode.utf8CountCodepoints(");
+            try g.genExpr(obj);
+            try g.w.writeAll(") catch 0)");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "chars")) {
+            // chars() as a standalone expression returns the string unchanged.
+            // Actual codepoint iteration is handled in genForIn → genForInChars.
+            try g.genExpr(obj);
+            return true;
+        }
+        if (std.mem.eql(u8, method, "concat")) {
+            try g.w.writeAll("(std.mem.concat(_allocator, u8, &.{ ");
+            try g.genExpr(obj);
+            for (args) |a| {
+                try g.w.writeAll(", ");
+                try g.genExpr(a.value);
+            }
+            try g.w.writeAll(" }) catch unreachable)");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "toInt")) {
+            try g.w.writeAll("(std.fmt.parseInt(i64, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(", 10) catch 0)");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "toFloat")) {
+            try g.w.writeAll("(std.fmt.parseFloat(f64, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(") catch 0.0)");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "format")) {
+            // str.format(val) — delegates to std.fmt.allocPrint
+            try g.w.writeAll("(std.fmt.allocPrint(_allocator, ");
+            try g.genExpr(obj);
+            for (args) |a| {
+                try g.w.writeAll(", .{ ");
+                try g.genExpr(a.value);
+                try g.w.writeAll(" }");
+            }
+            try g.w.writeAll(") catch unreachable)");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "upper")) {
+            // str.upper() → std.ascii.allocUpperString(_allocator, str) catch unreachable
+            try g.w.writeAll("(std.ascii.allocUpperString(_allocator, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(") catch unreachable)");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "lower")) {
+            // str.lower() → std.ascii.allocLowerString(_allocator, str) catch unreachable
+            try g.w.writeAll("(std.ascii.allocLowerString(_allocator, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(") catch unreachable)");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "indexOf")) {
+            // str.indexOf(sub) → index as i64, or -1 if not found
+            try g.w.writeAll("(if (std.mem.indexOf(u8, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(", ");
+            if (args.len > 0) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")) |_i| @as(i64, @intCast(_i)) else @as(i64, -1))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "replace")) {
+            // str.replace(old, new) → std.mem.replaceOwned(u8, _allocator, str, old, new)
+            try g.w.writeAll("(std.mem.replaceOwned(u8, _allocator, ");
+            try g.genExpr(obj);
+            for (args) |a| {
+                try g.w.writeAll(", ");
+                try g.genExpr(a.value);
+            }
+            try g.w.writeAll(") catch unreachable)");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "repeat")) {
+            // str.repeat(n) → allocate n concatenated copies
+            try g.w.writeAll("(blk: { var _rep = std.ArrayList([]const u8){}; ");
+            try g.w.writeAll("defer _rep.deinit(_allocator); ");
+            try g.w.writeAll("var _ri: i64 = 0; while (_ri < ");
+            if (args.len > 0) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeAll(") : (_ri += 1) _rep.append(_allocator, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(") catch unreachable; ");
+            try g.w.writeAll("break :blk std.mem.concat(_allocator, u8, _rep.items) catch unreachable; })");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "split")) {
+            // str.split(delim) → returns a splitSequence iterator; use in for loops
+            try g.w.writeAll("std.mem.splitSequence(u8, ");
+            try g.genExpr(obj);
+            try g.w.writeAll(", ");
+            if (args.len > 0) try g.genExpr(args[0].value) else try g.w.writeAll("\" \"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        // ── Padding / alignment methods ──────────────────────────────────────
+        if (std.mem.eql(u8, method, "padLeft")) {
+            // str.padLeft(n [, fill]) → right-align in width n
+            try g.w.writeAll("_pad_left(");
+            try g.genExpr(obj);
+            try g.w.writeAll(", @as(usize, @intCast(");
+            if (args.len > 0) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeAll(")), ");
+            if (args.len > 1) try g.genExpr(args[1].value) else try g.w.writeAll("' '");
+            try g.w.writeAll(", _allocator)");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "padRight")) {
+            // str.padRight(n [, fill]) → left-align in width n
+            try g.w.writeAll("_pad_right(");
+            try g.genExpr(obj);
+            try g.w.writeAll(", @as(usize, @intCast(");
+            if (args.len > 0) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeAll(")), ");
+            if (args.len > 1) try g.genExpr(args[1].value) else try g.w.writeAll("' '");
+            try g.w.writeAll(", _allocator)");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "center")) {
+            // str.center(n [, fill]) → center in width n
+            try g.w.writeAll("_pad_center(");
+            try g.genExpr(obj);
+            try g.w.writeAll(", @as(usize, @intCast(");
+            if (args.len > 0) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeAll(")), ");
+            if (args.len > 1) try g.genExpr(args[1].value) else try g.w.writeAll("' '");
+            try g.w.writeAll(", _allocator)");
+            return true;
+        }
+        // ── bytes() — iterate raw bytes of a string ───────────────────────────
+        // Used in `for b in s.bytes()` → `for (s) |b|` in Zig (b is u8).
+        // Note: chars() is reserved for future Unicode codepoint iteration.
+        if (std.mem.eql(u8, method, "bytes")) {
+            try g.genExpr(obj);
+            return true;
+        }
+        return false;
+    }
+
+    /// Emit a struct-instance literal for a lambda that has a `capture` block.
+    /// The result is a value of an anonymous struct type; call sites use `.call()`.
+    fn genCaptureClosureStruct(g: Generator, e: *Ast.ExprLambda) anyerror!void {
+        // Collect capture field names so body idents use `self.name`
+        var field_names = std.ArrayList([]const u8){};
+        defer field_names.deinit(g.alloc);
+        for (e.capture) |cv| try field_names.append(g.alloc, cv.name);
+
+        try g.w.writeAll("struct {\n");
+        const fg = g.indented();
+
+        // Emit capture fields
+        for (e.capture) |cv| {
+            try fg.writeIndent();
+            try fg.w.writeAll(cv.name);
+            try fg.w.writeAll(": ");
+            if (cv.type_) |tr| try fg.genType(tr) else try fg.w.writeAll("anytype");
+            try fg.w.writeAll(",\n");
+        }
+
+        // Emit call method — self by value (read-only captures)
+        try fg.writeIndent();
+        try fg.w.writeAll("fn call(self: @This()");
+        for (e.params) |p| {
+            try fg.w.writeAll(", ");
+            try fg.w.writeAll(p.name);
+            try fg.w.writeAll(": ");
+            if (p.type_) |tr| try fg.genType(tr) else try fg.w.writeAll("anytype");
+        }
+        try fg.w.writeAll(") ");
+        if (e.return_type) |rt| {
+            try fg.genType(rt);
+        } else {
+            switch (e.body) {
+                .expr => |ex| {
+                    try fg.w.writeAll("@TypeOf(");
+                    try fg.genExpr(ex);
+                    try fg.w.writeAll(")");
+                },
+                .stmts => try fg.w.writeAll("void"),
+            }
+        }
+        try fg.w.writeAll(" {\n");
+
+        // Body: idents matching capture names resolve to self.name
+        // Pre-scan returned names so deferred frees are skipped for returned strings.
+        var ret_set_capture = try scanReturnedNames(
+            if (e.body == .stmts) e.body.stmts else &.{}, g.alloc);
+        defer ret_set_capture.deinit();
+        const base_bg = fg.indented().withCaptureFields(field_names.items);
+        const bg = if (e.body == .stmts) base_bg.withReturnedNames(&ret_set_capture) else base_bg;
+        switch (e.body) {
+            .expr => |ex| {
+                try bg.writeIndent();
+                try bg.w.writeAll("return ");
+                try bg.genExpr(ex);
+                try bg.w.writeAll(";\n");
+            },
+            .stmts => |ss| {
+                try bg.genStmts(ss);
+            },
+        }
+        try fg.writeIndent();
+        try fg.w.writeAll("}\n");
+        try g.writeIndent();
+        try g.w.writeAll("}{ ");
+        for (e.capture) |cv| {
+            try g.w.writeAll(".");
+            try g.w.writeAll(cv.name);
+            try g.w.writeAll(" = ");
+            if (cv.init) |init| try g.genExpr(init) else try g.w.writeAll("undefined");
+            try g.w.writeAll(", ");
+        }
+        try g.w.writeAll("}");
+    }
+
+    fn genAssign(g: Generator, s: *Ast.StmtAssign) anyerror!void {
+        try g.writeIndent();
+        switch (s.op) {
+            .slashslash_eq => {
+                // x //= y  →  x = @divTrunc(x, y)
+                try g.genExpr(s.target);
+                try g.w.writeAll(" = @divTrunc(");
+                try g.genExpr(s.target);
+                try g.w.writeAll(", ");
+                try g.genExpr(s.value);
+                try g.w.writeAll(")");
+            },
+            .starstar_eq => {
+                // x **= y  →  x = std.math.pow(f64, x, y)
+                try g.genExpr(s.target);
+                try g.w.writeAll(" = std.math.pow(f64, ");
+                try g.genExpr(s.target);
+                try g.w.writeAll(", ");
+                try g.genExpr(s.value);
+                try g.w.writeAll(")");
+            },
+            .question_eq => {
+                // x ?= y  →  x = x orelse y
+                try g.genExpr(s.target);
+                try g.w.writeAll(" = ");
+                try g.genExpr(s.target);
+                try g.w.writeAll(" orelse ");
+                try g.genExpr(s.value);
+            },
+            else => {
+                try g.genExpr(s.target);
+                try g.w.writeAll(" ");
+                try g.w.writeAll(assignOpStr(s.op));
+                try g.w.writeAll(" ");
+                try g.genExpr(s.value);
+            },
+        }
+        try g.w.writeAll(";\n");
+    }
+
+    fn genReturn(g: Generator, s: *Ast.StmtReturn) anyerror!void {
+        try g.writeIndent();
+        if (s.value) |v| {
+            try g.w.writeAll("return ");
+            try g.genExpr(v);
+            try g.w.writeAll(";\n");
+        } else {
+            try g.w.writeAll("return;\n");
+        }
+    }
+
+    fn genIf(g: Generator, s: *Ast.StmtIf) anyerror!void {
+        try g.writeIndent();
+        try g.w.writeAll("if (");
+        try g.genExpr(s.cond);
+        try g.w.writeAll(") {\n");
+        try g.indented().genStmts(s.then_body);
+        try g.writeIndent();
+        try g.w.writeAll("}");
+        for (s.else_ifs) |ei| {
+            try g.w.writeAll(" else if (");
+            try g.genExpr(ei.cond);
+            try g.w.writeAll(") {\n");
+            try g.indented().genStmts(ei.body);
+            try g.writeIndent();
+            try g.w.writeAll("}");
+        }
+        if (s.else_body) |eb| {
+            try g.w.writeAll(" else {\n");
+            try g.indented().genStmts(eb);
+            try g.writeIndent();
+            try g.w.writeAll("}");
+        }
+        try g.w.writeAll("\n");
+    }
+
+    fn genWhile(g: Generator, s: *Ast.StmtWhile) anyerror!void {
+        try g.writeIndent();
+        try g.w.writeAll("while (");
+        try g.genExpr(s.cond);
+        try g.w.writeAll(") {\n");
+        const bg = g.indented();
+        try bg.genStmts(s.body);
+        if (s.post_body) |pb| {
+            // Zig has no built-in post-body; emit as a trailing comment block.
+            try bg.line("// post:");
+            try bg.genStmts(pb);
+        }
+        try g.writeIndent();
+        try g.w.writeAll("}\n");
+    }
+
+    // ── Char methods (ASCII-aware; full Unicode case/category deferred) ───────
+
+    fn genCharMethod(
+        g:      Generator,
+        object: *const Ast.Expr,
+        method: []const u8,
+        args:   []const Ast.Arg,
+    ) anyerror!bool {
+        _ = args;
+        // All char predicates cast to u8 for std.ascii — valid for ASCII range (0..127).
+        // Non-ASCII codepoints will return false for isAlpha/isDigit/isWhitespace.
+        if (std.mem.eql(u8, method, "isAlpha")) {
+            try g.w.writeAll("std.ascii.isAlphabetic(@as(u8, @truncate(");
+            try g.genExpr(object);
+            try g.w.writeAll(")))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "isDigit")) {
+            try g.w.writeAll("std.ascii.isDigit(@as(u8, @truncate(");
+            try g.genExpr(object);
+            try g.w.writeAll(")))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "isWhitespace")) {
+            try g.w.writeAll("std.ascii.isWhitespace(@as(u8, @truncate(");
+            try g.genExpr(object);
+            try g.w.writeAll(")))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "isUpper")) {
+            try g.w.writeAll("std.ascii.isUpper(@as(u8, @truncate(");
+            try g.genExpr(object);
+            try g.w.writeAll(")))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "isLower")) {
+            try g.w.writeAll("std.ascii.isLower(@as(u8, @truncate(");
+            try g.genExpr(object);
+            try g.w.writeAll(")))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "toUpper")) {
+            try g.w.writeAll("@as(u21, std.ascii.toUpper(@as(u8, @truncate(");
+            try g.genExpr(object);
+            try g.w.writeAll("))))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "toLower")) {
+            try g.w.writeAll("@as(u21, std.ascii.toLower(@as(u8, @truncate(");
+            try g.genExpr(object);
+            try g.w.writeAll("))))");
+            return true;
+        }
+        return false;
+    }
+
+    // ── StringBuilder methods ─────────────────────────────────────────────────
+
+    fn genStringBuilderMethod(
+        g:      Generator,
+        object: *const Ast.Expr,
+        method: []const u8,
+        args:   []const Ast.Arg,
+    ) anyerror!bool {
+        if (std.mem.eql(u8, method, "append")) {
+            // sb.append(s) → sb.appendSlice(_allocator, s) catch @panic("OOM")
+            try g.genExpr(object);
+            try g.w.writeAll(".appendSlice(_allocator, ");
+            if (args.len > 0) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(") catch @panic(\"OOM\")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "appendChar")) {
+            // sb.appendChar(c) → sb.append(_allocator, @as(u8, @intCast(c))) catch @panic("OOM")
+            try g.genExpr(object);
+            try g.w.writeAll(".append(_allocator, @as(u8, @intCast(");
+            if (args.len > 0) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeAll("))) catch @panic(\"OOM\")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "build")) {
+            // sb.build() → sb.items  (non-allocating slice into the buffer)
+            try g.genExpr(object);
+            try g.w.writeAll(".items");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "clear")) {
+            // sb.clear() → sb.clearRetainingCapacity()
+            try g.genExpr(object);
+            try g.w.writeAll(".clearRetainingCapacity()");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "len")) {
+            // sb.len() → sb.items.len
+            try g.genExpr(object);
+            try g.w.writeAll(".items.len");
+            return true;
+        }
+        return false;
+    }
+
+    fn genForIn(g: Generator, s: *Ast.StmtForIn) anyerror!void {
+        // for c in str.chars() — Unicode codepoint iteration via Utf8Iterator
+        if (g.isCharsCallOnString(s.iter)) return g.genForInChars(s);
+
+        // for x in str.split(delim) — emit while loop over splitSequence iterator
+        if (g.isSplitCallOnString(s.iter)) return g.genForInSplit(s);
+
+        // Detect stdlib container types for special iteration patterns.
+        if (g.getExprDeclaredType(s.iter)) |tr| {
+            if (tr == .generic) {
+                if (std.mem.eql(u8, tr.generic.name, "HashMap"))
+                    return g.genForInHashMap(s);
+                if (std.mem.eql(u8, tr.generic.name, "List"))
+                    return g.genForInList(s);
+            }
+        }
+
+        // Default: standard Zig for-loop over a slice / range.
+        try g.writeIndent();
+        try g.w.writeAll("for (");
+        try g.genExpr(s.iter);
+        try g.w.writeAll(") |");
+        for (s.vars, 0..) |v, i| {
+            if (i > 0) try g.w.writeAll(", ");
+            try g.w.writeAll(v);
+        }
+        try g.w.writeAll("| {\n");
+        const bg = g.indented();
+        if (s.where) |w| {
+            try bg.writeIndent();
+            try bg.w.writeAll("if (!(");
+            try bg.genExpr(w);
+            try bg.w.writeAll(")) continue;\n");
+        }
+        try bg.genStmts(s.body);
+        try g.writeIndent();
+        try g.w.writeAll("}\n");
+    }
+
+    /// `for x in list` — auto-deref to `.items` so bare List vars work without `.items`.
+    fn genForInList(g: Generator, s: *Ast.StmtForIn) anyerror!void {
+        try g.writeIndent();
+        try g.w.writeAll("for (");
+        try g.genExpr(s.iter);
+        try g.w.writeAll(".items) |");
+        for (s.vars, 0..) |v, i| {
+            if (i > 0) try g.w.writeAll(", ");
+            try g.w.writeAll(v);
+        }
+        try g.w.writeAll("| {\n");
+        const bg = g.indented();
+        if (s.where) |w| {
+            try bg.writeIndent();
+            try bg.w.writeAll("if (!(");
+            try bg.genExpr(w);
+            try bg.w.writeAll(")) continue;\n");
+        }
+        try bg.genStmts(s.body);
+        try g.writeIndent();
+        try g.w.writeAll("}\n");
+    }
+
+    /// `for k, v in map` or `for k in map` — Zig HashMap iterator pattern.
+    fn genForInHashMap(g: Generator, s: *Ast.StmtForIn) anyerror!void {
+        const first_var = if (s.vars.len > 0) s.vars[0] else "_k";
+        const iter_var   = try std.fmt.allocPrint(g.alloc, "_it_{s}",  .{first_var});
+        defer g.alloc.free(iter_var);
+
+        try g.writeIndent();
+        if (s.vars.len >= 2) {
+            // Two-variable form: unpack key and value from iterator entry.
+            const entry_var = try std.fmt.allocPrint(g.alloc, "_e_{s}", .{first_var});
+            defer g.alloc.free(entry_var);
+
+            try g.w.print("var {s} = ", .{iter_var});
+            try g.genExpr(s.iter);
+            try g.w.writeAll(".iterator();\n");
+            try g.writeIndent();
+            try g.w.print("while ({s}.next()) |{s}| {{\n", .{iter_var, entry_var});
+            const bg = g.indented();
+            try bg.writeIndent();
+            try bg.w.print("const {s} = {s}.key_ptr.*;\n",   .{s.vars[0], entry_var});
+            if (!nameUsedInStmts(s.vars[0], s.body)) {
+                try bg.writeIndent();
+                try bg.w.print("_ = {s};\n", .{s.vars[0]});
+            }
+            try bg.writeIndent();
+            try bg.w.print("const {s} = {s}.value_ptr.*;\n", .{s.vars[1], entry_var});
+            if (!nameUsedInStmts(s.vars[1], s.body)) {
+                try bg.writeIndent();
+                try bg.w.print("_ = {s};\n", .{s.vars[1]});
+            }
+            if (s.where) |w| {
+                try bg.writeIndent();
+                try bg.w.writeAll("if (!(");
+                try bg.genExpr(w);
+                try bg.w.writeAll(")) continue;\n");
+            }
+            try bg.genStmts(s.body);
+        } else {
+            // Single-variable form: iterate keys only.
+            const kptr_var = try std.fmt.allocPrint(g.alloc, "_kp_{s}", .{first_var});
+            defer g.alloc.free(kptr_var);
+
+            try g.w.print("var {s} = ", .{iter_var});
+            try g.genExpr(s.iter);
+            try g.w.writeAll(".keyIterator();\n");
+            try g.writeIndent();
+            try g.w.print("while ({s}.next()) |{s}| {{\n", .{iter_var, kptr_var});
+            const bg = g.indented();
+            try bg.writeIndent();
+            try bg.w.print("const {s} = {s}.*;\n", .{first_var, kptr_var});
+            if (!nameUsedInStmts(first_var, s.body)) {
+                try bg.writeIndent();
+                try bg.w.print("_ = {s};\n", .{first_var});
+            }
+            if (s.where) |w| {
+                try bg.writeIndent();
+                try bg.w.writeAll("if (!(");
+                try bg.genExpr(w);
+                try bg.w.writeAll(")) continue;\n");
+            }
+            try bg.genStmts(s.body);
+        }
+        try g.writeIndent();
+        try g.w.writeAll("}\n");
+    }
+
+    /// `for x in str.split(delim)` / `for x in str.lines()` — while-loop pattern.
+    fn genForInSplit(g: Generator, s: *Ast.StmtForIn) anyerror!void {
+        const var_name = if (s.vars.len > 0) s.vars[0] else "_part";
+        const iter_var = try std.fmt.allocPrint(g.alloc, "_it_{s}", .{var_name});
+        defer g.alloc.free(iter_var);
+
+        const recv   = s.iter.call.callee.member.object;
+        const method = s.iter.call.callee.member.member;
+        const s_args = s.iter.call.args;
+        const is_lines = std.mem.eql(u8, method, "lines");
+
+        try g.writeIndent();
+        if (is_lines) {
+            // lines() splits on '\n' using the scalar splitter (no allocation)
+            try g.w.print("var {s} = std.mem.splitScalar(u8, ", .{iter_var});
+            try g.genExpr(recv);
+            try g.w.writeAll(", '\\n');\n");
+        } else {
+            try g.w.print("var {s} = std.mem.splitSequence(u8, ", .{iter_var});
+            try g.genExpr(recv);
+            try g.w.writeAll(", ");
+            if (s_args.len > 0) try g.genExpr(s_args[0].value) else try g.w.writeAll("\" \"");
+            try g.w.writeAll(");\n");
+        }
+        try g.writeIndent();
+        try g.w.print("while ({s}.next()) |{s}| {{\n", .{iter_var, var_name});
+        const bg = g.indented();
+        if (s.where) |w| {
+            try bg.writeIndent();
+            try bg.w.writeAll("if (!(");
+            try bg.genExpr(w);
+            try bg.w.writeAll(")) continue;\n");
+        }
+        try bg.genStmts(s.body);
+        try g.writeIndent();
+        try g.w.writeAll("}\n");
+    }
+
+    /// True when `expr` is a call to `str.chars()` on a string — codepoint iteration.
+    fn isCharsCallOnString(g: Generator, expr: *const Ast.Expr) bool {
+        if (expr.* != .call) return false;
+        const callee = expr.call.callee;
+        if (callee.* != .member) return false;
+        if (!std.mem.eql(u8, callee.member.member, "chars")) return false;
+        if (g.getExprDeclaredType(callee.member.object)) |tr| {
+            return tr == .named and isStringTypeName(tr.named.name);
+        }
+        if (g.tc) |tc| {
+            const obj_type = tc.expr_types.get(callee.member.object) orelse return false;
+            return obj_type == .string;
+        }
+        return false;
+    }
+
+    /// `for c in str.chars()` — iterate Unicode codepoints via Utf8View.
+    /// Emits a while loop using `std.unicode.Utf8View.initUnchecked().iterator()`.
+    fn genForInChars(g: Generator, s: *Ast.StmtForIn) anyerror!void {
+        const var_name = if (s.vars.len > 0) s.vars[0] else "_cp";
+        const iter_var = try std.fmt.allocPrint(g.alloc, "_cp_it_{s}", .{var_name});
+        defer g.alloc.free(iter_var);
+
+        const recv = s.iter.call.callee.member.object;
+
+        try g.writeIndent();
+        try g.w.print("var {s} = std.unicode.Utf8View.initUnchecked(", .{iter_var});
+        try g.genExpr(recv);
+        try g.w.writeAll(").iterator();\n");
+        try g.writeIndent();
+        try g.w.print("while ({s}.nextCodepoint()) |{s}| {{\n", .{iter_var, var_name});
+        const bg = g.indented();
+        if (s.where) |w| {
+            try bg.writeIndent();
+            try bg.w.writeAll("if (!(");
+            try bg.genExpr(w);
+            try bg.w.writeAll(")) continue;\n");
+        }
+        try bg.genStmts(s.body);
+        try g.writeIndent();
+        try g.w.writeAll("}\n");
+    }
+
+    /// True when `expr` is a call to `str.split(delim)` or `str.lines()` on a string.
+    fn isSplitCallOnString(g: Generator, expr: *const Ast.Expr) bool {
+        if (expr.* != .call) return false;
+        const callee = expr.call.callee;
+        if (callee.* != .member) return false;
+        const m = callee.member.member;
+        if (!std.mem.eql(u8, m, "split") and !std.mem.eql(u8, m, "lines")) return false;
+        if (g.getExprDeclaredType(callee.member.object)) |tr| {
+            return tr == .named and isStringTypeName(tr.named.name);
+        }
+        // Also accept when the TC inferred string type for the object.
+        if (g.tc) |tc| {
+            const obj_type = tc.expr_types.get(callee.member.object) orelse return false;
+            return obj_type == .string;
+        }
+        return false;
+    }
+
+    fn genForNum(g: Generator, s: *Ast.StmtForNum) anyerror!void {
+        // `for i in start : stop : step` → Zig while loop with explicit counter.
+        try g.writeIndent();
+        try g.w.print("var {s}: i64 = ", .{s.var_});
+        try g.genExpr(s.start);
+        try g.w.writeAll(";\n");
+        try g.writeIndent();
+        try g.w.print("while ({s} < ", .{s.var_});
+        try g.genExpr(s.stop);
+        try g.w.print(") : ({s} += ", .{s.var_});
+        if (s.step) |step| try g.genExpr(step) else try g.w.writeAll("1");
+        try g.w.writeAll(") {\n");
+        try g.indented().genStmts(s.body);
+        try g.writeIndent();
+        try g.w.writeAll("}\n");
+    }
+
+    fn genBranch(g: Generator, s: *Ast.StmtBranch) anyerror!void {
+        // Detect union dispatch: any on-clause has a binding name.
+        const is_union = for (s.on) |on| { if (on.binding != null) break true; } else false;
+
+        try g.writeIndent();
+        try g.w.writeAll("switch (");
+        try g.genExpr(s.expr);
+        try g.w.writeAll(") {\n");
+        const bg = g.indented();
+        for (s.on) |on| {
+            try bg.writeIndent();
+            for (on.values, 0..) |v, i| {
+                if (i > 0) try bg.w.writeAll(", ");
+                if (is_union) {
+                    // Emit `.variant_name` — extract member part of `Type.variant` expr.
+                    if (v.* == .member) {
+                        try bg.w.print(".{s}", .{v.member.member});
+                    } else {
+                        try bg.genExpr(v);
+                    }
+                } else {
+                    try bg.genExpr(v);
+                }
+            }
+            if (is_union) {
+                if (on.binding) |bname| {
+                    try bg.w.print(" => |{s}| {{\n", .{bname});
+                } else {
+                    try bg.w.writeAll(" => {\n");
+                }
+            } else {
+                try bg.w.writeAll(" => {\n");
+            }
+            try bg.indented().genStmts(on.body);
+            try bg.writeIndent();
+            try bg.w.writeAll("},\n");
+        }
+        if (s.else_) |eb| {
+            try bg.writeIndent();
+            try bg.w.writeAll("else => {\n");
+            try bg.indented().genStmts(eb);
+            try bg.writeIndent();
+            try bg.w.writeAll("},\n");
+        }
+        try g.writeIndent();
+        try g.w.writeAll("}\n");
+    }
+
+    fn genPrint(g: Generator, s: *Ast.StmtPrint) anyerror!void {
+        try g.writeIndent();
+        if (s.args.len == 0) {
+            try g.w.writeAll("std.debug.print(\"\\n\", .{});\n");
+            return;
+        }
+
+        // If any arg is an allocating string call (including interp), emit each
+        // such arg into a named temp so we can defer-free it and avoid GPA leaks.
+        var any_alloc = false;
+        for (s.args) |a| {
+            if (isAllocatingStringInit(a, g.tc) or a.* == .string_interp) {
+                any_alloc = true; break;
+            }
+        }
+
+        if (!any_alloc) {
+            // Fast path: no temporaries needed.
+            try g.w.writeAll("std.debug.print(\"");
+            for (s.args, 0..) |a, i| {
+                if (i > 0) try g.w.writeAll(" ");
+                try g.w.writeAll(printFmt(g.tc, g.catch_var, a));
+            }
+            try g.w.writeAll("\\n\", .{");
+            for (s.args, 0..) |a, i| {
+                if (i > 0) try g.w.writeAll(", ");
+                try g.genExpr(a);
+            }
+            try g.w.writeAll("});\n");
+            return;
+        }
+
+        // Slow path: wrap in a block, emit temp + defer for each allocating arg.
+        try g.w.writeAll("{\n");
+        const bg = g.indented();
+        // Collect temp-var names (null = not a temp).
+        var tmp_names = std.ArrayList(?[]const u8){};
+        try tmp_names.ensureTotalCapacity(g.alloc, s.args.len);
+        defer {
+            for (tmp_names.items) |tn| if (tn) |n| g.alloc.free(n);
+            tmp_names.deinit(g.alloc);
+        }
+        for (s.args, 0..) |a, i| {
+            if (isAllocatingStringInit(a, g.tc) or a.* == .string_interp) {
+                const tname = try std.fmt.allocPrint(g.alloc, "_pt{d}", .{i});
+                try tmp_names.append(g.alloc, tname);
+                try bg.writeIndent();
+                try bg.w.print("const {s} = ", .{tname});
+                try bg.genExpr(a);
+                try bg.w.writeAll(";\n");
+                if (isAllocatingStringInit(a, g.tc) or a.* == .string_interp) {
+                    try bg.writeIndent();
+                    try bg.w.print("defer _allocator.free({s});\n", .{tname});
+                }
+            } else {
+                try tmp_names.append(g.alloc, null);
+            }
+        }
+        try bg.writeIndent();
+        try bg.w.writeAll("std.debug.print(\"");
+        for (s.args, 0..) |a, i| {
+            if (i > 0) try bg.w.writeAll(" ");
+            if (tmp_names.items[i] != null) {
+                try bg.w.writeAll("{s}");
+            } else {
+                try bg.w.writeAll(printFmt(g.tc, g.catch_var, a));
+            }
+        }
+        try bg.w.writeAll("\\n\", .{");
+        for (s.args, 0..) |a, i| {
+            if (i > 0) try bg.w.writeAll(", ");
+            if (tmp_names.items[i]) |tn| {
+                try bg.w.writeAll(tn);
+            } else {
+                try bg.genExpr(a);
+            }
+        }
+        try bg.w.writeAll("});\n");
+        try g.writeIndent();
+        try g.w.writeAll("}\n");
+    }
+
+    fn genAssert(g: Generator, s: *Ast.StmtAssert) anyerror!void {
+        try g.writeIndent();
+        if (s.message != null) {
+            try g.w.writeAll("if (!(");
+            try g.genExpr(s.cond);
+            try g.w.writeAll(")) {\n");
+            try g.indented().line("std.debug.print(\"assertion failed\\n\", .{});");
+            try g.indented().line("unreachable;");
+            try g.writeIndent();
+            try g.w.writeAll("}\n");
+        } else {
+            try g.w.writeAll("std.debug.assert(");
+            try g.genExpr(s.cond);
+            try g.w.writeAll(");\n");
+        }
+    }
+
+    fn genDefer(g: Generator, s: *Ast.StmtDefer) anyerror!void {
+        try g.writeIndent();
+        try g.w.writeAll(if (s.is_err) "errdefer " else "defer ");
+        switch (s.body) {
+            .expr => |e| {
+                try g.genExpr(e);
+                try g.w.writeAll(";\n");
+            },
+            else => {
+                try g.w.writeAll("{\n");
+                try g.indented().genStmt(s.body);
+                try g.writeIndent();
+                try g.w.writeAll("}\n");
+            },
+        }
+    }
+
+    /// `with target eol Block` — emit a plain block where bare-name assignments
+    /// were desugared by AstBuilder to `target.name = value`.
+    /// At CodeGen level the body is already correct; just emit a scoped block.
+    fn genWith(g: Generator, s: *Ast.StmtWith) anyerror!void {
+        try g.writeIndent();
+        try g.w.writeAll("{ // with ");
+        try g.genExpr(s.target);
+        try g.w.writeAll("\n");
+        try g.indented().genStmts(s.body);
+        try g.writeIndent();
+        try g.w.writeAll("}\n");
+    }
+
+    /// `var name [: T] = base except field=val ...`
+    /// Emits: `const name [: T] = blk: { var _tmp = base; _tmp.f = v; break :blk _tmp; };`
+    fn genVarExcept(g: Generator, s: *Ast.StmtVarExcept) anyerror!void {
+        try g.writeIndent();
+        try g.w.writeAll("const ");
+        try g.w.writeAll(s.name);
+        if (s.type_ref) |tr| {
+            try g.w.writeAll(": ");
+            try g.genType(tr);
+        }
+        try g.w.writeAll(" = blk: {\n");
+        const ig = g.indented();
+        try ig.writeIndent();
+        try ig.w.writeAll("var _tmp = ");
+        try ig.genExpr(s.base);
+        try ig.w.writeAll(";\n");
+        for (s.fields) |f| {
+            try ig.writeIndent();
+            try ig.w.writeAll("_tmp.");
+            try ig.w.writeAll(f.name);
+            try ig.w.writeAll(" = ");
+            try ig.genExpr(f.value);
+            try ig.w.writeAll(";\n");
+        }
+        try ig.writeIndent();
+        try ig.w.writeAll("break :blk _tmp;\n");
+        try g.writeIndent();
+        try g.w.writeAll("};\n");
+    }
+
+    /// `target = base except field=val ...`
+    /// Emits: `target = blk: { var _tmp = base; _tmp.f = v; break :blk _tmp; };`
+    fn genAssignExcept(g: Generator, s: *Ast.StmtAssignExcept) anyerror!void {
+        try g.writeIndent();
+        try g.genExpr(s.target);
+        try g.w.writeAll(" = blk: {\n");
+        const ig = g.indented();
+        try ig.writeIndent();
+        try ig.w.writeAll("var _tmp = ");
+        try ig.genExpr(s.base);
+        try ig.w.writeAll(";\n");
+        for (s.fields) |f| {
+            try ig.writeIndent();
+            try ig.w.writeAll("_tmp.");
+            try ig.w.writeAll(f.name);
+            try ig.w.writeAll(" = ");
+            try ig.genExpr(f.value);
+            try ig.w.writeAll(";\n");
+        }
+        try ig.writeIndent();
+        try ig.w.writeAll("break :blk _tmp;\n");
+        try g.writeIndent();
+        try g.w.writeAll("};\n");
+    }
+
+    // ── raise / try-catch ─────────────────────────────────────────────────────
+
+    fn genRaise(g: Generator, s: *Ast.StmtRaise) anyerror!void {
+        // Map to Zebra's thread-local error context + Zig error return.
+        try g.writeIndent();
+        if (s.message) |msg| {
+            if (s.details) |det| {
+                // Two-arg form: `raise "msg", details_obj`
+                // Determine details type from TypeChecker to pick the right shim.
+                const det_type = if (g.tc) |tc| tc.expr_types.get(det) orelse .unknown else .unknown;
+                // Unique label from AST pointer so multiple raises don't collide.
+                const uid = @intFromPtr(s) & 0xFFFF;
+
+                if (det_type == .string) {
+                    // String details: heap-alloc the slice header so the pointer is stable.
+                    try g.w.print("{{ const _rdet_{x}: []const u8 = ", .{uid});
+                    try g.genExpr(det);
+                    try g.w.print(";\n", .{});
+                    try g.writeIndent();
+                    try g.w.print("  const _rdet_ptr_{x} = _allocator.create([]const u8) catch @panic(\"OOM\");\n", .{uid});
+                    try g.writeIndent();
+                    try g.w.print("  _rdet_ptr_{x}.* = _rdet_{x};\n", .{uid, uid});
+                    try g.writeIndent();
+                    try g.w.print("  const _rshim_{x} = struct {{ fn call(p: *anyopaque) []const u8 {{\n", .{uid});
+                    try g.writeIndent();
+                    try g.w.writeAll("      return @as(*[]const u8, @alignCast(@ptrCast(p))).*;\n");
+                    try g.writeIndent();
+                    try g.w.print("  }} }};\n", .{});
+                    try g.writeIndent();
+                    try g.w.writeAll("  _error_ctx = .{ .message = ");
+                    try g.genExpr(msg);
+                    try g.w.print(", .details = .{{ .ptr = @ptrCast(_rdet_ptr_{x}), .toString_fn = _rshim_{x}.call }} }};\n", .{ uid, uid });
+                    try g.writeIndent();
+                    try g.w.writeAll("}\n");
+                } else {
+                    // Object details: heap-alloc the object, generate type-specific shim.
+                    // The type name is inferred from the expression (best-effort: use ident or call callee name).
+                    const type_name = detailsTypeName(det);
+                    try g.w.print("{{ const _rdet_{x} = _allocator.create({s}) catch @panic(\"OOM\");\n", .{ uid, type_name });
+                    try g.writeIndent();
+                    try g.w.print("  _rdet_{x}.* = ", .{uid});
+                    try g.genExpr(det);
+                    try g.w.writeAll(";\n");
+                    try g.writeIndent();
+                    try g.w.print("  const _rshim_{x} = struct {{ fn call(p: *anyopaque) []const u8 {{\n", .{uid});
+                    try g.writeIndent();
+                    try g.w.print("      return @as(*{s}, @alignCast(@ptrCast(p))).toString();\n", .{type_name});
+                    try g.writeIndent();
+                    try g.w.print("  }} }};\n", .{});
+                    try g.writeIndent();
+                    try g.w.writeAll("  _error_ctx = .{ .message = ");
+                    try g.genExpr(msg);
+                    try g.w.print(", .details = .{{ .ptr = @ptrCast(_rdet_{x}), .toString_fn = _rshim_{x}.call }} }};\n", .{ uid, uid });
+                    try g.writeIndent();
+                    try g.w.writeAll("}\n");
+                }
+            } else {
+                // Simple form: message only, no details.
+                try g.w.writeAll("_error_ctx = .{ .message = ");
+                try g.genExpr(msg);
+                try g.w.writeAll(", .details = null };\n");
+            }
+            try g.writeIndent();
+        }
+        if (g.try_block_label) |lbl| {
+            // Inside a `try` block: record the error into the tracking variable
+            // then break out of the labeled block (does not return from the method).
+            const ev = g.try_err_var.?;
+            try g.w.print("{s} = error.ZebraError;\n", .{ev});
+            try g.writeIndent();
+            try g.w.print("break :{s};\n", .{lbl});
+        } else {
+            try g.w.writeAll("return error.ZebraError;\n");
+        }
+    }
+
+    fn genTryCatch(g: Generator, s: *Ast.StmtTryCatch) anyerror!void {
+        // Emit try/catch using an inline labeled block + a ?anyerror tracking variable.
+        // This keeps all outer-scope variables accessible (no anonymous function barrier).
+        //
+        //   var _try_err_XXXX: ?anyerror = null;
+        //   _try_blk_XXXX: {
+        //       // body — `raise` emits:
+        //       //   _error_ctx = ...; _try_err_XXXX = error.ZebraError; break :_try_blk_XXXX;
+        //       break :_try_blk_XXXX;  // normal exit
+        //   }
+        //   if (_try_err_XXXX != null) {
+        //       // catch body
+        //   }
+        //
+        // Label/var names are unique-per-try-block via the AST node pointer address.
+        const ptr_id = @intFromPtr(s) & 0xFFFF;
+        const blk_label = try std.fmt.allocPrint(g.alloc, "_try_blk_{x}", .{ptr_id});
+        const err_var   = try std.fmt.allocPrint(g.alloc, "_try_err_{x}", .{ptr_id});
+        defer g.alloc.free(blk_label);
+        defer g.alloc.free(err_var);
+
+        // var/const _try_err_XXXX: ?anyerror = null;
+        // Use `var` only when the body may mutate the err variable (via `raise` or
+        // `try expr`); otherwise `const` avoids Zig's "never mutated" diagnostic.
+        const has_raise = bodyNeedsErrVar(s.body) or bodyHasThrowsCall(s.body, g.resolve);
+        try g.writeIndent();
+        try g.w.print("{s} {s}: ?anyerror = null;\n", .{
+            if (has_raise) "var" else "const", err_var,
+        });
+
+        // _try_blk_XXXX: {
+        try g.writeIndent();
+        try g.w.print("{s}: {{\n", .{blk_label});
+
+        // Body — `raise` breaks the block and sets err_var.
+        const tg = g.indented().withTryLabel(blk_label, err_var);
+        try tg.genStmts(s.body);
+
+        // Normal-exit break (no error) — skip if the body's last statement
+        // already unconditionally breaks (raise, or throws-call with its own break).
+        const body_ends_in_break = blk: {
+            if (s.body.len == 0) break :blk false;
+            break :blk s.body[s.body.len - 1] == .raise;
+        };
+        if (!body_ends_in_break) {
+            try g.indented().writeIndent();
+            try g.w.print("break :{s};\n", .{blk_label});
+        }
+        try g.writeIndent();
+        try g.w.writeAll("}\n");
+
+        // Catch clause(s).
+        if (s.clauses.len == 0) return;
+
+        const first = s.clauses[0];
+        const catch_name = first.binding orelse "";
+        try g.writeIndent();
+        try g.w.print("if ({s} != null) {{\n", .{err_var});
+        // Generate catch body with the binding name wired to _error_ctx.
+        try g.indented().withCatchVar(catch_name).genStmts(first.body);
+        try g.writeIndent();
+        try g.w.writeAll("}\n");
+
+        for (s.clauses[1..]) |extra| {
+            try g.writeIndent();
+            try g.w.writeAll("// (additional catch clause — typed dispatch not yet implemented)\n");
+            _ = extra;
+        }
+    }
+
+    // ── Expressions ───────────────────────────────────────────────────────────
+
+    fn genExpr(g: Generator, expr: *const Ast.Expr) anyerror!void {
+        sw: switch (expr.*) {
+            .int_lit       => |e| try g.w.writeAll(e.text),
+            .float_lit     => |e| try g.w.writeAll(e.text),
+            .bool_lit      => |e| try g.w.writeAll(if (e.value) "true" else "false"),
+            .char_lit      => |e| {
+                // Zebra char literals: c'A' or c"A" → strip 'c' prefix; Zig uses 'A'
+                // Also convert c"A" double-quote form to single-quote form.
+                const inner = e.text[1..]; // strip leading 'c'
+                if (inner.len >= 2 and inner[0] == '"') {
+                    // c"A" → 'A' (swap delimiters)
+                    try g.w.writeByte('\'');
+                    try g.w.writeAll(inner[1 .. inner.len - 1]);
+                    try g.w.writeByte('\'');
+                } else {
+                    try g.w.writeAll(inner); // c'A' → 'A'
+                }
+            },
+            .string_lit    => |e| try g.genStringLit(e),
+            .string_interp => |e| try g.genStringInterp(e),
+            .nil  => try g.w.writeAll("null"),
+            .this => try g.w.writeAll(if (g.in_method) "self" else "undefined"),
+
+            .ident  => |*e| try g.genIdent(e),
+            .member => |e| {
+                // Catch-variable member access: e.message → _error_ctx.message,
+                //                               e.details → _error_ctx.details
+                if (g.catch_var.len > 0 and e.object.* == .ident and
+                    std.mem.eql(u8, e.object.ident.name, g.catch_var))
+                {
+                    if (std.mem.eql(u8, e.member, "message")) {
+                        try g.w.writeAll("_error_ctx.message");
+                        break :sw;
+                    }
+                    if (std.mem.eql(u8, e.member, "details")) {
+                        try g.w.writeAll("_error_ctx.details");
+                        break :sw;
+                    }
+                }
+                // Stdlib property access: list.len → list.items.len, etc.
+                if (g.getExprDeclaredType(e.object)) |tr| {
+                    if (try g.genStdlibProp(e.object, tr, e.member)) break :sw;
+                }
+                try g.genExpr(e.object);
+                try g.w.writeAll(".");
+                try g.w.writeAll(e.member);
+            },
+            .call  => |e| try g.genCall(e),
+
+            .index => |e| {
+                try g.genExpr(e.object);
+                try g.w.writeAll("[");
+                try g.genExpr(e.index);
+                try g.w.writeAll("]");
+            },
+            .slice => |e| {
+                try g.genExpr(e.object);
+                try g.w.writeAll("[");
+                if (e.start) |s| try g.genExpr(s) else try g.w.writeAll("0");
+                try g.w.writeAll("..");
+                if (e.stop) |s| try g.genExpr(s);
+                try g.w.writeAll("]");
+            },
+
+            .binary => |e| try g.genBinary(e),
+            .unary  => |e| try g.genUnary(e),
+
+            .cast => |e| {
+                try g.w.writeAll("@as(");
+                try g.genType(e.target);
+                try g.w.writeAll(", ");
+                try g.genExpr(e.expr);
+                try g.w.writeAll(")");
+            },
+            .to_nilable => |e| {
+                // `expr to?` — we don't know the target type here; pass through.
+                try g.genExpr(e.expr);
+            },
+            .to_non_nil => |e| {
+                try g.genExpr(e.expr);
+                try g.w.writeAll(".?");
+            },
+            .is_nil => |e| {
+                try g.w.writeAll("(");
+                try g.genExpr(e.expr);
+                try g.w.writeAll(" == null)");
+            },
+            .orelse_ => |e| {
+                try g.genExpr(e.expr);
+                try g.w.writeAll(" orelse ");
+                try g.genExpr(e.fallback);
+            },
+            .catch_ => |e| {
+                try g.genExpr(e.expr);
+                if (e.err_var) |ev| {
+                    try g.w.print(" catch |{s}| ", .{ev});
+                } else {
+                    try g.w.writeAll(" catch ");
+                }
+                try g.genExpr(e.fallback);
+            },
+            .if_expr => |e| {
+                try g.w.writeAll("if (");
+                try g.genExpr(e.cond);
+                try g.w.writeAll(") ");
+                try g.genExpr(e.then_expr);
+                try g.w.writeAll(" else ");
+                try g.genExpr(e.else_expr);
+            },
+            .lambda   => |e| try g.genLambda(e),
+            .list_lit => |e| {
+                // Emit as a comptime slice literal.
+                try g.w.writeAll("&.{");
+                for (e.elems, 0..) |el, i| {
+                    if (i > 0) try g.w.writeAll(", ");
+                    try g.genExpr(el);
+                }
+                try g.w.writeAll("}");
+            },
+            .dict_lit => {
+                try g.w.writeAll(
+                    "@compileError(\"dict literal: use std.AutoHashMap\")",
+                );
+            },
+            .array_lit => |e| {
+                try g.w.writeAll(".{");
+                for (e.elems, 0..) |el, i| {
+                    if (i > 0) try g.w.writeAll(", ");
+                    try g.genExpr(el);
+                }
+                try g.w.writeAll("}");
+            },
+            .all_any => {
+                try g.w.writeAll("@compileError(\"all/any: rewrite as a loop\")");
+            },
+            .old     => |e| try g.genExpr(e.expr), // contract pre-value → pass through
+            .zig_lit => |e| try g.genZigLit(e),
+            .try_ => |e| {
+                if (g.try_block_label) |lbl| {
+                    // Inside a try/catch block: redirect errors to the block's
+                    // tracking variable and break out, rather than propagating
+                    // to the enclosing method.
+                    //   expr catch |_c| { _try_err_XXXX = _c; break :blk; }
+                    const ev  = g.try_err_var.?;
+                    const tmp = try std.fmt.allocPrint(g.alloc, "_tc_{x}", .{@intFromPtr(e)});
+                    defer g.alloc.free(tmp);
+                    try g.genExpr(e.expr);
+                    try g.w.print(" catch |{s}| {{ {s} = {s}; break :{s}; }}", .{ tmp, ev, tmp, lbl });
+                } else {
+                    try g.w.writeAll("try ");
+                    try g.genExpr(e.expr);
+                }
+            },
+        }
+    }
+
+    /// Emit an identifier, injecting `self.` when the resolved symbol is a
+    /// field and we are inside a method body.
+    /// Look up the declared type of an expression.  Only works for direct
+    /// identifier references (local vars and parameters that have a type
+    /// annotation).  Returns null for everything else.
+    fn getExprDeclaredType(g: Generator, expr: *const Ast.Expr) ?Ast.TypeRef {
+        if (expr.* != .ident) return null;
+        const sym = g.resolve.exprs.get(&expr.ident) orelse return null;
+        return switch (sym.decl) {
+            .var_  => |v| v.type_,
+            .param => |p| p.type_,
+            else   => null,
+        };
+    }
+
+    fn genIdent(g: Generator, e: *const Ast.ExprIdent) anyerror!void {
+        // Inside a lambda body: captured vars become self.name
+        for (g.capture_fields) |cf| {
+            if (std.mem.eql(u8, cf, e.name)) {
+                try g.w.print("self.{s}", .{e.name});
+                return;
+            }
+        }
+        if (g.in_method) {
+            if (g.resolve.exprs.get(e)) |sym| {
+                if (sym.kind == .var_) {
+                    try g.w.print("self.{s}", .{e.name});
+                    return;
+                }
+            }
+        }
+        try g.w.writeAll(e.name);
+    }
+
+    fn genCall(g: Generator, e: *Ast.ExprCall) anyerror!void {
+        // Union construction: TypeName.variant(value) → TypeName{ .variant = value }
+        // or TypeName.variant() → TypeName{ .variant = {} } for unit variants.
+        // e.details.toString() inside a catch block →
+        //   if (_error_ctx.details) |_d| _d.toString() else ""
+        if (e.callee.* == .member and g.catch_var.len > 0) {
+            const mem = e.callee.member;
+            if (std.mem.eql(u8, mem.member, "toString") and
+                mem.object.* == .member)
+            {
+                const inner = mem.object.member;
+                if (std.mem.eql(u8, inner.member, "details") and
+                    inner.object.* == .ident and
+                    std.mem.eql(u8, inner.object.ident.name, g.catch_var))
+                {
+                    try g.w.writeAll("(if (_error_ctx.details) |_det| _det.toString() else \"\")");
+                    return;
+                }
+            }
+        }
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident) {
+                const type_name = mem.object.ident.name;
+                if (g.union_names.contains(type_name)) {
+                    try g.w.print("{s}{{ .{s} = ", .{type_name, mem.member});
+                    if (e.args.len == 1) {
+                        try g.genExpr(e.args[0].value);
+                    } else {
+                        try g.w.writeAll("{}");
+                    }
+                    try g.w.writeAll(" }");
+                    return;
+                }
+            }
+        }
+        // Constructor call: ClassName(args) → ClassName.init(args) if class has `cue init`,
+        // else ClassName{} for zero-value construction.
+        if (e.callee.* == .ident) {
+            const ident = &e.callee.ident;
+            if (g.resolve.exprs.get(ident)) |sym| {
+                if (sym.kind == .class or sym.kind == .struct_) {
+                    const class_name = ident.name;
+                    // Scan AST members for a `cue init` declaration (DeclInit).
+                    const members: []const Ast.Decl = switch (sym.decl) {
+                        .class   => |c| c.members,
+                        .struct_ => |s| s.members,
+                        else     => &[_]Ast.Decl{},
+                    };
+                    var has_cue_init = false;
+                    for (members) |m| {
+                        if (m == .init) { has_cue_init = true; break; }
+                    }
+                    if (has_cue_init) {
+                        try g.w.print("{s}.init(", .{class_name});
+                        for (e.args, 0..) |a, i| {
+                            if (i > 0) try g.w.writeAll(", ");
+                            try g.genExpr(a.value);
+                        }
+                        try g.w.writeAll(")");
+                    } else {
+                        // No `cue init`: emit a zero-initialised struct literal.
+                        try g.w.print("{s}{{}}", .{class_name});
+                    }
+                    return;
+                }
+            }
+        }
+        // File I/O static calls: File.read(path), File.write(path, data), etc.
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "File")) {
+                if (try g.genFileCall(mem.member, e.args)) return;
+            }
+        }
+        // Http static calls: Http.get(url), Http.post(url, body), Http.serve(port, handler).
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Http")) {
+                if (try g.genHttpCall(mem.member, e.args)) return;
+            }
+        }
+        // HttpResponse factory: HttpResponse.ok(body), HttpResponse.notFound(body), etc.
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "HttpResponse")) {
+                if (try g.genHttpResponseFactory(mem.member, e.args)) return;
+            }
+        }
+        // Tcp static call: Tcp.connect(host, port).
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Tcp")) {
+                if (try g.genTcpCall(mem.member, e.args)) return;
+            }
+        }
+        // Udp static call: Udp.socket().
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Udp")) {
+                if (try g.genUdpCall(mem.member, e.args)) return;
+            }
+        }
+        // Regex static call: Regex.compile(pattern).
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Regex")) {
+                if (try g.genRegexCall(mem.member, e.args)) return;
+            }
+        }
+        // sys static calls: sys.args(), sys.exit(n), sys.err("msg"), etc.
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "sys")) {
+                if (try g.genSysCall(mem.member, e.args)) return;
+            }
+        }
+        // toString() on any value — use TC-inferred type for format specifier.
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (std.mem.eql(u8, mem.member, "toString")) {
+                const obj_tc = if (g.tc) |tc| tc.expr_types.get(mem.object) orelse .unknown else .unknown;
+                const fmt: []const u8 = switch (obj_tc) {
+                    .float => "{d}",
+                    else   => "{}",
+                };
+                try g.w.print("(std.fmt.allocPrint(_allocator, \"{s}\", .{{", .{fmt});
+                try g.genExpr(mem.object);
+                try g.w.writeAll("}) catch unreachable)");
+                return;
+            }
+        }
+        // Stdlib method call: obj.method(args) where obj has a known stdlib type.
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (g.getExprDeclaredType(mem.object)) |tr| {
+                if (try g.genStdlibMethod(mem.object, tr, mem.member, e.args)) return;
+            } else {
+                // No declared type annotation — fall back on TC-inferred type.
+                // This handles string literals ("hello".method()) and
+                // unannotated vars inferred from sys.args() etc.
+                // Skip fallback for .named types (user-defined class methods go
+                // through genExpr → user struct method call below).
+                const tc_type = if (g.tc) |tc| tc.expr_types.get(mem.object) orelse .unknown else .unknown;
+                switch (tc_type) {
+                    .string     => if (try g.genStringMethod(mem.object, mem.member, e.args)) return,
+                    .tcp_conn   => if (try g.genTcpMethod(mem.object, mem.member, e.args)) return,
+                    .udp_socket => if (try g.genUdpMethod(mem.object, mem.member, e.args)) return,
+                    .regex      => if (try g.genRegexMethod(mem.object, mem.member, e.args)) return,
+                    .unknown    => if (try g.genListMethod(mem.object, mem.member, e.args)) return,
+                    else        => {},
+                }
+            }
+        }
+        // Closure vars (lambdas with capture blocks) are struct instances;
+        // call them via .call() instead of direct invocation.
+        if (e.callee.* == .ident) {
+            if (g.closure_vars) |cv| {
+                if (cv.contains(e.callee.ident.name)) {
+                    try g.w.writeAll(e.callee.ident.name);
+                    try g.w.writeAll(".call(");
+                    for (e.args, 0..) |a, i| {
+                        if (i > 0) try g.w.writeAll(", ");
+                        try g.genExpr(a.value);
+                    }
+                    try g.w.writeAll(")");
+                    return;
+                }
+            }
+        }
+        try g.genExpr(e.callee);
+        try g.w.writeAll("(");
+        for (e.args, 0..) |a, i| {
+            if (i > 0) try g.w.writeAll(", ");
+            try g.genExpr(a.value);
+        }
+        try g.w.writeAll(")");
+    }
+
+    fn genBinary(g: Generator, e: *Ast.ExprBinary) anyerror!void {
+        switch (e.op) {
+            .int_div => {
+                try g.w.writeAll("@divTrunc(");
+                try g.genExpr(e.left);
+                try g.w.writeAll(", ");
+                try g.genExpr(e.right);
+                try g.w.writeAll(")");
+            },
+            .pow => {
+                try g.w.writeAll("std.math.pow(f64, ");
+                try g.genExpr(e.left);
+                try g.w.writeAll(", ");
+                try g.genExpr(e.right);
+                try g.w.writeAll(")");
+            },
+            .dotdot => {
+                try g.genExpr(e.left);
+                try g.w.writeAll("..");
+                try g.genExpr(e.right);
+            },
+            .eq, .ne => {
+                // For string == / != use std.mem.eql rather than the raw == operator,
+                // which Zig does not support on slices.
+                const left_is_str = blk: {
+                    if (g.tc) |tc| {
+                        const t = tc.expr_types.get(e.left) orelse .unknown;
+                        break :blk t == .string;
+                    }
+                    break :blk false;
+                };
+                if (left_is_str) {
+                    if (e.op == .ne) try g.w.writeAll("!");
+                    try g.w.writeAll("std.mem.eql(u8, ");
+                    try g.genExpr(e.left);
+                    try g.w.writeAll(", ");
+                    try g.genExpr(e.right);
+                    try g.w.writeAll(")");
+                } else {
+                    try g.w.writeAll("(");
+                    try g.genExpr(e.left);
+                    try g.w.writeAll(" ");
+                    try g.w.writeAll(binaryOpStr(e.op));
+                    try g.w.writeAll(" ");
+                    try g.genExpr(e.right);
+                    try g.w.writeAll(")");
+                }
+            },
+            else => {
+                try g.w.writeAll("(");
+                try g.genExpr(e.left);
+                try g.w.writeAll(" ");
+                try g.w.writeAll(binaryOpStr(e.op));
+                try g.w.writeAll(" ");
+                try g.genExpr(e.right);
+                try g.w.writeAll(")");
+            },
+        }
+    }
+
+    fn genUnary(g: Generator, e: *Ast.ExprUnary) anyerror!void {
+        switch (e.op) {
+            .neg     => { try g.w.writeAll("(-"); try g.genExpr(e.operand); try g.w.writeAll(")"); },
+            .not_    => { try g.w.writeAll("(!"); try g.genExpr(e.operand); try g.w.writeAll(")"); },
+            .bit_not => { try g.w.writeAll("(~"); try g.genExpr(e.operand); try g.w.writeAll(")"); },
+            .old     => try g.genExpr(e.operand), // contract pre-value → pass through
+        }
+    }
+
+    fn genStringLit(g: Generator, e: Ast.ExprStringLit) anyerror!void {
+        switch (e.kind) {
+            .plain => try g.w.writeAll(e.text),
+            .raw   => {
+                // r"..." → strip the 'r' prefix; Zig double-quoted strings work here.
+                try g.w.writeAll(e.text[1..]);
+            },
+            .nosub => {
+                // ns"..." → strip 'ns' prefix.
+                try g.w.writeAll(e.text[2..]);
+            },
+            .zig => {
+                // zig"..." → strip 'zig' prefix and surrounding quotes; emit inner content.
+                if (e.text.len >= 5) try g.w.writeAll(e.text[4 .. e.text.len - 1]);
+            },
+        }
+    }
+
+    /// Emit `try std.fmt.allocPrint(_allocator, "fmt", .{args...})`.
+    ///
+    /// Format string construction rules:
+    ///   - literal parts: `{` → `{{`, `}` → `}}`, rest verbatim
+    ///   - expr parts: `{s}` / `{}` / `{u}` / `{any}` based on type; or `{fmt}`
+    ///     if a `.format` part immediately follows
+    fn genStringInterp(g: Generator, e: Ast.ExprStringInterp) anyerror!void {
+        // ── Build format string ──────────────────────────────────────────────
+        var fmt_buf = std.ArrayList(u8){};
+        defer fmt_buf.deinit(g.alloc);
+
+        // Per-arg unsigned cast type (null = no cast needed).
+        // Needed when a bit-repr spec (x/X/o/b) is applied to a signed integer:
+        // Zig prepends '+' for positive signed ints, which is wrong for hex dumps.
+        var cast_types = std.ArrayList(?[]const u8){};
+        defer cast_types.deinit(g.alloc);
+
+        var i: usize = 0;
+        while (i < e.parts.len) : (i += 1) {
+            switch (e.parts[i]) {
+                .literal => |lit| {
+                    // Escape `{` and `}` so they don't confuse std.fmt.
+                    for (lit) |c| {
+                        if (c == '{' or c == '}') {
+                            try fmt_buf.writer(g.alloc).writeByte(c);
+                            try fmt_buf.writer(g.alloc).writeByte(c);
+                        } else {
+                            try fmt_buf.writer(g.alloc).writeByte(c);
+                        }
+                    }
+                },
+                .expr => |ex| {
+                    // Check if next part is a format spec.
+                    const has_fmt = (i + 1 < e.parts.len) and
+                        switch (e.parts[i + 1]) { .format => true, else => false };
+                    if (has_fmt) {
+                        const raw_spec = switch (e.parts[i + 1]) { .format => |s| s, else => unreachable };
+                        const ex_type = if (g.tc) |tc| tc.expr_types.get(ex) orelse .unknown else .unknown;
+                        try fmt_buf.writer(g.alloc).writeByte('{');
+                        try writeZigFmtSpec(fmt_buf.writer(g.alloc), raw_spec, ex_type);
+                        try fmt_buf.writer(g.alloc).writeByte('}');
+                        try cast_types.append(g.alloc, castTypeForBitSpec(raw_spec, ex_type));
+                        i += 1; // skip the consumed format part
+                    } else {
+                        const spec = printFmt(g.tc, g.catch_var, ex);
+                        try fmt_buf.writer(g.alloc).writeAll(spec);
+                        try cast_types.append(g.alloc, null);
+                    }
+                },
+                .format => unreachable, // consumed above
+            }
+        }
+
+        // ── Emit call ────────────────────────────────────────────────────────
+        try g.w.writeAll("(std.fmt.allocPrint(_allocator, \"");
+        // Write the format string with escaped backslashes and double-quotes.
+        for (fmt_buf.items) |c| {
+            if (c == '"')  { try g.w.writeAll("\\\""); }
+            else if (c == '\\') { try g.w.writeAll("\\\\"); }
+            else try g.w.writeByte(c);
+        }
+        try g.w.writeAll("\", .{");
+
+        // Emit the expression arguments (only .expr parts).
+        var first = true;
+        var arg_idx: usize = 0;
+        for (e.parts) |part| {
+            switch (part) {
+                .expr => |ex| {
+                    if (!first) try g.w.writeAll(", ");
+                    first = false;
+                    const cast = if (arg_idx < cast_types.items.len) cast_types.items[arg_idx] else null;
+                    if (cast) |ut| {
+                        try g.w.print("@as({s}, @bitCast(", .{ut});
+                        try g.genExpr(ex);
+                        try g.w.writeAll("))");
+                    } else {
+                        try g.genExpr(ex);
+                    }
+                    arg_idx += 1;
+                },
+                else => {},
+            }
+        }
+        try g.w.writeAll("}) catch @panic(\"OOM\"))");
+    }
+
+    fn genZigLit(g: Generator, e: Ast.ExprZigLit) anyerror!void {
+        // e.text is "zig\"...\"" or "zig'...'" (raw source).
+        // Layout: z i g <quote-char> <content...> <quote-char>
+        //         0 1 2  3            4..len-2      len-1
+        if (e.text.len >= 5) try g.w.writeAll(e.text[4 .. e.text.len - 1]);
+    }
+
+    fn genLambda(g: Generator, e: *Ast.ExprLambda) anyerror!void {
+        // Emit as an anonymous struct with a `call` method — the standard Zig
+        // idiom for lambdas.
+        //
+        // Without capture:
+        //   struct { fn call(params) RetT { body } }.call
+        //
+        // With capture (explicit `capture` block):
+        //   (struct { field1: T1, field2: T2, ...,
+        //             fn call(self: *@This(), params) RetT { body } }
+        //   { .field1 = init1, .field2 = init2, ... }).call
+
+        const has_capture = e.capture.len > 0;
+
+        if (has_capture) try g.w.writeAll("(");
+        try g.w.writeAll("struct {");
+
+        // Capture fields
+        if (has_capture) {
+            try g.w.writeAll("\n");
+            const fg = g.indented();
+            for (e.capture) |cv| {
+                try fg.writeIndent();
+                try fg.w.writeAll(cv.name);
+                try fg.w.writeAll(": ");
+                if (cv.type_) |tr| try fg.genType(tr) else try fg.w.writeAll("anytype");
+                try fg.w.writeAll(",\n");
+            }
+            try g.writeIndent();
+        }
+
+        // call method
+        try g.w.writeAll(" fn call(");
+        var first = true;
+        if (has_capture) {
+            try g.w.writeAll("self: *@This()");
+            first = false;
+        }
+        for (e.params) |p| {
+            if (!first) try g.w.writeAll(", ");
+            first = false;
+            try g.w.writeAll(p.name);
+            try g.w.writeAll(": ");
+            if (p.type_) |tr| try g.genType(tr) else try g.w.writeAll("anytype");
+        }
+        try g.w.writeAll(") ");
+        // Return type: use declared type if present, else infer:
+        //   - Expression body → @TypeOf(expr) (valid in Zig when params are typed)
+        //   - Statement body  → void (caller must declare return type explicitly)
+        if (e.return_type) |rt| {
+            try g.genType(rt);
+        } else {
+            switch (e.body) {
+                .expr => |ex| {
+                    try g.w.writeAll("@TypeOf(");
+                    try g.genExpr(ex);
+                    try g.w.writeAll(")");
+                },
+                .stmts => try g.w.writeAll("void"),
+            }
+        }
+        try g.w.writeAll(" {");
+        const lg = g.asMethod();
+        switch (e.body) {
+            .expr  => |ex| {
+                try lg.w.writeAll(" return ");
+                try lg.genExpr(ex);
+                try lg.w.writeAll(";");
+            },
+            .stmts => |ss| {
+                var ret_set_lambda = try scanReturnedNames(ss, g.alloc);
+                defer ret_set_lambda.deinit();
+                try lg.w.writeAll("\n");
+                try lg.indented().withReturnedNames(&ret_set_lambda).genStmts(ss);
+                try lg.writeIndent();
+            },
+        }
+        try g.w.writeAll(" }");
+        try g.w.writeAll(" }");
+
+        // Capture initialiser
+        if (has_capture) {
+            try g.w.writeAll("{ ");
+            for (e.capture) |cv| {
+                try g.w.writeAll(".");
+                try g.w.writeAll(cv.name);
+                try g.w.writeAll(" = ");
+                if (cv.init) |init| try g.genExpr(init) else try g.w.writeAll("undefined");
+                try g.w.writeAll(", ");
+            }
+            try g.w.writeAll("}");
+            try g.w.writeAll(").call");
+        } else {
+            try g.w.writeAll(".call");
+        }
+    }
+
+    // ── Type reference ────────────────────────────────────────────────────────
+
+    fn genType(g: Generator, tr: Ast.TypeRef) anyerror!void {
+        switch (tr) {
+            .named       => |n| {
+                // Try static mapping first; fall back to dynamic sized-type emission
+                // for arbitrary-width types like int5, uint3, float7.
+                const zig = zigTypeName(n.name);
+                if (!std.mem.eql(u8, zig, n.name)) {
+                    try g.w.writeAll(zig);
+                } else if (!try Builtins.writeZigSizedType(g.w, n.name)) {
+                    try g.w.writeAll(zig);
+                }
+            },
+            .nilable     => |inner| {
+                try g.w.writeAll("?");
+                try g.genType(inner.*);
+            },
+            .stream      => |inner| {
+                // Zig has no built-in stream/generator type.
+                try g.w.writeAll("anytype /* stream: ");
+                try g.genType(inner.*);
+                try g.w.writeAll(" */");
+            },
+            .error_union => |inner| {
+                try g.w.writeAll("anyerror!");
+                try g.genType(inner.*);
+            },
+            .generic     => |gtr| {
+                // HashMap(K, V): use StringHashMap for string keys, AutoHashMap otherwise.
+                if (std.mem.eql(u8, gtr.name, "HashMap")) {
+                    const key_is_str = gtr.args.len >= 1 and isStringTypeRef(gtr.args[0]);
+                    if (key_is_str) {
+                        try g.w.writeAll("std.StringHashMap(");
+                        if (gtr.args.len >= 2) try g.genType(gtr.args[1]) else try g.w.writeAll("anytype");
+                        try g.w.writeAll(")");
+                    } else {
+                        try g.w.writeAll("std.AutoHashMap(");
+                        for (gtr.args, 0..) |arg, i| {
+                            if (i > 0) try g.w.writeAll(", ");
+                            try g.genType(arg);
+                        }
+                        try g.w.writeAll(")");
+                    }
+                    return;
+                }
+                try g.w.writeAll(zigGenericName(gtr.name));
+                if (gtr.args.len > 0) {
+                    try g.w.writeAll("(");
+                    for (gtr.args, 0..) |arg, i| {
+                        if (i > 0) try g.w.writeAll(", ");
+                        try g.genType(arg);
+                    }
+                    try g.w.writeAll(")");
+                }
+            },
+            .void_       => try g.w.writeAll("void"),
+            .same        => try g.w.writeAll(if (g.owner.len > 0) g.owner else "@This()"),
+        }
+    }
+};
+
+// ── Print format specifier ────────────────────────────────────────────────────
+
+/// Choose the Zig format specifier for a single `print` argument based on its
+/// inferred type.  Falls back to `{any}` when type information is unavailable.
+/// `catch_var` is the current catch-clause binding name (empty if not in a catch);
+/// `catch_var.message` is always `[]const u8` so always uses `{s}`.
+fn printFmt(tc: ?*const TypeChecker.TypeCheckResult, catch_var: []const u8, expr: *const Ast.Expr) []const u8 {
+    // e.message inside a catch block is always []const u8.
+    if (catch_var.len > 0 and expr.* == .member) {
+        const mem = expr.member;
+        if (std.mem.eql(u8, mem.member, "message") and
+            mem.object.* == .ident and
+            std.mem.eql(u8, mem.object.ident.name, catch_var))
+        {
+            return "{s}";
+        }
+    }
+    const result = tc orelse return "{any}";
+    const t = result.expr_types.get(expr) orelse return "{any}";
+    return switch (t) {
+        .string                        => "{s}",
+        .int, .uint, .int_n, .uint_n,
+        .bool                          => "{}",
+        .float, .float_n               => "{d}",
+        .char                          => "{u}",
+        .void_, .unknown, .named,
+        .string_builder,
+        .http_request,
+        .http_response,
+        .tcp_conn,
+        .udp_socket,
+        .regex                         => "{any}",
+    };
+}
+
+// ── Format spec translation ───────────────────────────────────────────────────
+
+/// Translate a Zebra/Python-style format spec (the text after `:` in `[expr:spec]`,
+/// already stripped of the leading `:`) into the Zig format specifier that goes
+/// inside `{...}`.  Writes directly to `w`.
+///
+/// Python mini-language:  `[[fill]align][sign][#][0][width][.prec][type]`
+/// Zig format string:      `[type][:[[fill]align][width][.prec]]`
+///
+/// Examples
+///   ""       → ""          (empty — use TC-inferred default; caller adds `{}`)
+///   "08x"    → "x:0>8"
+///   ">10.2f" → "d:>10.2"
+///   "<20s"   → "s:<20"
+///   ".2f"    → "d:.2"
+///   "^15"    → ":^15"      (no type — Zig uses default, just alignment+width)
+///   "_>15"   → ":_>15"
+fn writeZigFmtSpec(
+    w:       anytype,
+    spec:    []const u8,
+    tc_type: TypeChecker.Type,
+) !void {
+    if (spec.len == 0) return;
+
+    const isAlignChar = struct {
+        fn f(c: u8) bool { return c == '<' or c == '>' or c == '^'; }
+    }.f;
+
+    var i: usize = 0;
+    var fill:      ?u8          = null;
+    var align_ch:  ?u8          = null;
+    var zero_pad               = false;
+    var width:     []const u8  = "";
+    var precision: []const u8  = "";
+    var type_ch:   ?u8         = null;
+
+    // ── Fill + align ────────────────────────────────────────────────────────
+    // Pattern: [fill]align  where align ∈ { < > ^ }
+    if (i + 1 < spec.len and !isAlignChar(spec[i]) and isAlignChar(spec[i + 1])) {
+        fill     = spec[i];
+        align_ch = spec[i + 1];
+        i += 2;
+    } else if (i < spec.len and isAlignChar(spec[i])) {
+        align_ch = spec[i];
+        i += 1;
+    }
+
+    // ── Sign (skip — Zig doesn't support the same sign formatting) ──────────
+    if (i < spec.len and (spec[i] == '+' or spec[i] == '-' or spec[i] == ' ')) {
+        i += 1;
+    }
+
+    // ── Alternate form # (skip) ─────────────────────────────────────────────
+    if (i < spec.len and spec[i] == '#') i += 1;
+
+    // ── Zero-pad (implicit fill='0', align='>') ──────────────────────────────
+    // Only applies if no explicit fill/align seen yet.
+    if (i < spec.len and spec[i] == '0' and align_ch == null) {
+        zero_pad = true;
+        fill     = '0';
+        align_ch = '>';
+        i += 1;
+    }
+
+    // ── Width ────────────────────────────────────────────────────────────────
+    const w_start = i;
+    while (i < spec.len and spec[i] >= '0' and spec[i] <= '9') : (i += 1) {}
+    width = spec[w_start..i];
+
+    // ── Grouping option (skip) ───────────────────────────────────────────────
+    if (i < spec.len and (spec[i] == '_' or spec[i] == ',')) i += 1;
+
+    // ── Precision ────────────────────────────────────────────────────────────
+    if (i < spec.len and spec[i] == '.') {
+        const p_start = i;
+        i += 1;
+        while (i < spec.len and spec[i] >= '0' and spec[i] <= '9') : (i += 1) {}
+        precision = spec[p_start..i];
+    }
+
+    // ── Type character ───────────────────────────────────────────────────────
+    if (i < spec.len) {
+        type_ch = spec[i];
+        // (remaining chars ignored)
+    }
+
+    // ── Emit Zig specifier ───────────────────────────────────────────────────
+    // 1. Type part (before the ':')
+    if (type_ch) |tc| {
+        switch (tc) {
+            's'                => try w.writeByte('s'),
+            'c'                => try w.writeByte('c'),
+            'u'                => try w.writeByte('u'),
+            'd', 'i', 'n'      => try w.writeByte('d'),
+            'f', 'g', 'G', '%' => try w.writeByte('d'), // Zig uses 'd' for decimal float
+            'e', 'E'           => try w.writeByte('e'),
+            'x'                => try w.writeByte('x'),
+            'X'                => try w.writeByte('X'),
+            'o'                => try w.writeByte('o'),
+            'b'                => try w.writeByte('b'),
+            else               => try w.writeByte('d'),
+        }
+    } else {
+        // No explicit type: infer from TC type.
+        switch (tc_type) {
+            .string              => try w.writeByte('s'),
+            .float, .float_n     => try w.writeByte('d'),
+            .char                => try w.writeByte('u'),
+            .int, .uint,
+            .int_n, .uint_n      => try w.writeByte('d'),
+            else                 => {}, // leave empty — Zig default
+        }
+    }
+
+    // 2. Format options (after ':')
+    const has_opts = fill != null or align_ch != null or
+                     width.len > 0 or precision.len > 0 or zero_pad;
+    if (has_opts) {
+        try w.writeByte(':');
+        if (fill)     |f| try w.writeByte(f);
+        if (align_ch) |a| try w.writeByte(a);
+        try w.writeAll(width);
+        try w.writeAll(precision);
+    }
+}
+
+/// When a bit-repr format spec (x/X/o/b) is applied to a signed integer, Zig's
+/// std.fmt prepends a `+` sign for positive values, giving e.g. `+ff` instead
+/// of `ff`.  Return the Zig unsigned type name to cast to before formatting, or
+/// null if no cast is needed (type is unsigned/float/string, or spec doesn't
+/// request a bit representation).
+fn castTypeForBitSpec(spec: []const u8, tc_type: TypeChecker.Type) ?[]const u8 {
+    if (spec.len == 0) return null;
+    // The type character is the last non-digit, non-fill character in the spec;
+    // for our purposes it's sufficient to check the final character.
+    const last = spec[spec.len - 1];
+    if (last != 'x' and last != 'X' and last != 'o' and last != 'b') return null;
+    return switch (tc_type) {
+        .int        => "u64",
+        .int_n => |n| switch (n) {
+            8   => "u8",
+            16  => "u16",
+            32  => "u32",
+            64  => "u64",
+            128 => "u128",
+            else => null,
+        },
+        else => null,
+    };
+}
+
+// ── Entry-point detection ─────────────────────────────────────────────────────
+
+/// Search decls (recursing into namespaces) for a class that contains a
+/// `shared def main`.  Returns the fully-qualified Zig path (allocated via
+/// `alloc`) if found, else null.  Caller must free the returned slice.
+/// Find the `shared def main` method in any class/namespace in the module.
+/// Returns a pointer to the method declaration (in the arena-owned AST).
+fn findMainMethod(decls: []const Ast.Decl) ?*Ast.DeclMethod {
+    for (decls) |decl| {
+        switch (decl) {
+            .class => |c| {
+                for (c.members) |m| {
+                    if (m == .method and m.method.mods.shared and
+                        std.mem.eql(u8, m.method.name, "main"))
+                        return m.method;
+                }
+            },
+            .namespace => |ns| {
+                if (findMainMethod(ns.decls)) |m| return m;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn findMainClass(decls: []const Ast.Decl, alloc: Allocator, prefix: []const u8) anyerror!?[]const u8 {
+    for (decls) |decl| {
+        switch (decl) {
+            .class => |c| {
+                for (c.members) |m| {
+                    if (m == .method and
+                        m.method.mods.shared and
+                        std.mem.eql(u8, m.method.name, "main"))
+                    {
+                        if (prefix.len > 0)
+                            return try std.fmt.allocPrint(alloc, "{s}.{s}", .{prefix, c.name});
+                        return try alloc.dupe(u8, c.name);
+                    }
+                }
+            },
+            .namespace => |ns| {
+                // Build the qualified prefix for this namespace level.
+                const ns_prefix = if (prefix.len > 0)
+                    try std.fmt.allocPrint(alloc, "{s}.{s}", .{prefix, ns.name})
+                else
+                    try alloc.dupe(u8, ns.name);
+                defer alloc.free(ns_prefix);
+                if (try findMainClass(ns.decls, alloc, ns_prefix)) |name| return name;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+fn generateSnippet(src: []const u8, alloc: Allocator) anyerror![]u8 {
+    const Tokenizer  = @import("Tokenizer.zig");
+    const Parser     = @import("Parser.zig");
+    const AstBuilder = @import("AstBuilder.zig");
+    const Binder     = @import("Binder.zig");
+
+    const tokens = try Tokenizer.tokenize(src, alloc);
+    defer alloc.free(tokens);
+
+    var parse_result = try Parser.parse(tokens, alloc);
+    defer parse_result.deinit();
+
+    const ok = switch (parse_result) {
+        .ok  => |*s| s,
+        .err => |e| {
+            std.debug.print("parse error at token {}\n", .{e.error_pos});
+            return error.ParseFailed;
+        },
+    };
+
+    var sym_arena = std.heap.ArenaAllocator.init(alloc);
+    defer sym_arena.deinit();
+
+    const module = try AstBuilder.build(ok, sym_arena.allocator());
+    var bind = try Binder.bindPass1(module, sym_arena.allocator(), alloc);
+    defer bind.deinit();
+
+    var resolve = try Resolver.resolvePass2(module, &bind.table, alloc, alloc);
+    defer resolve.deinit();
+
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(alloc);
+
+    try generate(module, &resolve, null, alloc, out.writer(alloc).any());
+    return out.toOwnedSlice(alloc);
+}
+
+test "codegen: class fields become struct fields" {
+    const src =
+        \\class Counter
+        \\    var count as int
+        \\
+    ;
+    const out = try generateSnippet(src, testing.allocator);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "pub const Counter = struct {") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "count: i64") != null);
+}
+
+test "codegen: method gets self param and field uses self prefix" {
+    const src =
+        \\class Counter
+        \\    var count as int
+        \\    def increment
+        \\        count = count + 1
+        \\
+    ;
+    const out = try generateSnippet(src, testing.allocator);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "pub fn increment(self: *Counter)") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "self.count") != null);
+}
+
+test "codegen: method params and return type" {
+    const src =
+        \\class Greeter
+        \\    def greet(name as String) as String
+        \\        return name
+        \\
+    ;
+    const out = try generateSnippet(src, testing.allocator);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out,
+        "pub fn greet(self: *Greeter, name: []const u8) []const u8") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "return name;") != null);
+}
+
+test "codegen: interface becomes comptime checker" {
+    const src =
+        \\interface Printable
+        \\    def render
+        \\
+    ;
+    const out = try generateSnippet(src, testing.allocator);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out,
+        "pub fn Printable(comptime T: type) void {") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "@hasDecl(T, \"render\")") != null);
+}
+
+test "codegen: enum members" {
+    const src =
+        \\enum Direction
+        \\    North
+        \\    South
+        \\    East
+        \\    West
+        \\
+    ;
+    const out = try generateSnippet(src, testing.allocator);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "pub const Direction = enum {") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "North,") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "West,") != null);
+}
+
+test "codegen: mixin inlined into class, not emitted standalone" {
+    // `adds` is part of the class header line, not a body statement.
+    const src =
+        \\mixin Loggable
+        \\    var log_level as int
+        \\
+        \\class Service adds Loggable
+        \\    var name as String
+        \\
+    ;
+    const out = try generateSnippet(src, testing.allocator);
+    defer testing.allocator.free(out);
+
+    // Mixin should NOT appear as a standalone type.
+    try testing.expect(std.mem.indexOf(u8, out, "const Loggable") == null);
+    // Mixin field should be inlined inside Service.
+    try testing.expect(std.mem.indexOf(u8, out, "log_level: i64") != null);
+}
+
+test "codegen: nilable type maps to ?T" {
+    const src =
+        \\class Node
+        \\    var next as Node?
+        \\
+    ;
+    const out = try generateSnippet(src, testing.allocator);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "next: ?Node") != null);
+}
