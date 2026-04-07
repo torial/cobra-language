@@ -1,0 +1,8 @@
+# Hello World sample for Zebra IDE
+# This file is clean and compiles without errors
+
+class Main
+    shared
+        def main
+            var msg = "Hello, World!"
+            sys.outln(msg)

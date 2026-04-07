@@ -1,0 +1,103 @@
+# IDE Stub Requirements
+#
+# This file documents the COMPILER FEATURES needed for ZebraIDE.zbr to fully function.
+# All four stubs are builtin compiler/GUI features that need CodeGen.zig implementation.
+#
+# When calling `zebra ZebraIDE.zbr` before these stubs are implemented, you will get
+# compiler errors like "undefined sys.run" or "undefined class CodeEditor".
+# That's expected — hand these stubs to a Sonnet session to implement.
+
+# ════════════════════════════════════════════════════════════════════════════
+# STUB 1: sys.run(argv as List(str)) as SysRunResult
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Specification:
+#   - Runs a subprocess with given argument list
+#   - Returns exit code, stdout, and stderr captures
+#   - Used by CompilerBridge to invoke: zebra -c <file> and zebra <file>
+#
+# Implementation (Sonnet):
+#   WHERE: src/CodeGen.zig, function genSysCall (around line 2968)
+#   ACTION: Add case "run" in genSysCall
+#   EMIT: _sys_run(...) helper in preamble using std.process.Child.run()
+#   STRUCT: SysRunResult { exit_code: int, stdout: str, stderr: str }
+#   ADD TO: Builtins.zig NAMES table so TypeChecker recognizes SysRunResult
+#
+# Zig Implementation Reference:
+#   std.process.Child.run(.{ .allocator, .argv })
+#   returns {term, stdout, stderr}
+
+# ════════════════════════════════════════════════════════════════════════════
+# STUB 2: class CodeEditor with methods and g.codeEditor() rendering
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Specification:
+#   - Wraps ImGuiColorTextEdit (santaclose/ImGuiColorTextEdit fork)
+#   - Provides syntax highlighting, error markers, undo/redo
+#   - Methods: setText, getText, setErrorMarkers, setReadOnly, render
+#
+# Implementation (Sonnet):
+#   WHERE: src/CodeGen.zig, new function genCodeEditorCall
+#   ACTION: Add case in genGuiCall for "codeEditor" method dispatch
+#   EMIT: _gui_code_editor_render(...) C++ wrapper function calls
+#   STRUCT: CodeEditor as builtin type (add to NAMES in Builtins.zig)
+#   CPP SHIM: Create ide_editor.cpp wrapping TextEditor
+#   - TextEditor setLanguageDefinition("zebra") with Zebra keywords from Token.zig
+#   - TextEditor.SetErrorMarkers(map<int, string>) for red squiggles
+#   - extern "C" functions for Zig to call
+#
+# GUI Backend Integration:
+#   - Add ImGuiColorTextEdit as git submodule/dependency in glfw backend build.zig
+#   - Expose via _GuiBackend fn-ptr struct (similar to other GUI calls)
+#   - Stub backend: no-op, returns empty string
+
+# ════════════════════════════════════════════════════════════════════════════
+# STUB 3: g.inputMultiline(label, text, width, height) as str
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Specification:
+#   - Multiline text input widget (useful for read-only output display)
+#   - Returns modified text content
+#   - Used for: output pane display
+#
+# Implementation (Sonnet):
+#   WHERE: src/CodeGen.zig, function genGuiCall
+#   ACTION: Add case "inputMultiline" in the Gui method dispatch
+#   EMIT: ImGui.inputTextMultiline(label, buf, buf_size, size)
+#   BUFFER: Allocate mutable buffer, handle ImGui's write-back callback
+#   RETURN: String slice containing final content
+#   STUB: No-op in stub backend, return empty string
+
+# ════════════════════════════════════════════════════════════════════════════
+# STUB 4: g.panel(label, width, height)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Specification:
+#   - Creates a bordered, scrollable child window region
+#   - Used for: diagnostics pane, output pane
+#
+# Implementation (Sonnet):
+#   WHERE: src/CodeGen.zig, function genGuiCall
+#   ACTION: Add case "panel" in the Gui method dispatch
+#   EMIT: ImGui.beginChild(label, size) ... endChild()
+#   RETURN: Scope for drawing child content (immediate mode)
+#   STUB: No-op in stub backend
+
+# ════════════════════════════════════════════════════════════════════════════
+# Next Steps
+# ════════════════════════════════════════════════════════════════════════════
+#
+# 1. When you get "undefined sys.run" error:
+#    → Implement STUB 1 in CodeGen.zig + Builtins.zig
+#
+# 2. When you get "undefined class CodeEditor" error:
+#    → Implement STUB 2 (CodeEditor type + genCodeEditorCall)
+#
+# 3. When you get "undefined g.inputMultiline" error:
+#    → Implement STUB 3 in genGuiCall
+#
+# 4. When you get "undefined g.panel" error:
+#    → Implement STUB 4 in genGuiCall
+#
+# Full details in: C:\Users\Sean\.claude\projects\C--Projects-cobra-language\memory\project_todo.md
+# Section: "IDE Prerequisites — Compiler Features Needed"
