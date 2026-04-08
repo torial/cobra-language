@@ -1,0 +1,51 @@
+class Main
+    shared
+        def main
+            # ── Case-insensitive (i flag) ───────────────────────────────────────
+            var re_i = Regex.compile("hello", "i")
+            print re_i.match("Hello")        # true
+            print re_i.match("HELLO")        # true
+            print re_i.match("world")        # false
+
+            # ── Dot-all (s flag): dot matches newline ───────────────────────────
+            var re_s = Regex.compile("a.b", "s")
+            print re_s.match("a\nb")         # true
+            var re_no_s = Regex.compile("a.b")
+            print re_no_s.match("a\nb")      # false
+
+            # ── Multiline (m flag): ^ and $ match line boundaries ───────────────
+            var re_m = Regex.compile("^\\w+", "m")
+            print re_m.find("hello\nworld")  # hello
+            var re_m2 = Regex.compile("\\w+$", "m")
+            print re_m2.find("hello\nworld") # hello (first line end)
+
+            # ── Non-greedy *? ──────────────────────────────────────────────────
+            var re_lazy = Regex.compile("<.*?>")
+            print re_lazy.find("<a><b>")     # <a>  (lazy: stops at first >)
+            var re_greedy = Regex.compile("<.*>")
+            print re_greedy.find("<a><b>")   # <a><b> (greedy: extends to last >)
+
+            # ── Non-greedy +? ──────────────────────────────────────────────────
+            var re_lazy2 = Regex.compile("a+?")
+            print re_lazy2.find("aaa")       # a  (lazy: just one)
+            var re_greedy2 = Regex.compile("a+")
+            print re_greedy2.find("aaa")     # aaa (greedy: all three)
+
+            # ── \b word boundary ──────────────────────────────────────────────
+            var re_wb = Regex.compile("\\bcat\\b")
+            print re_wb.match("cat")         # true
+            print re_wb.find("catfish")      # (empty — no boundary after cat)
+            print re_wb.find("my cat sat")   # cat
+
+            # ── \B non-word boundary ──────────────────────────────────────────
+            var re_wB = Regex.compile("\\Bcat\\B")
+            print re_wB.find("concatenate")  # cat (inside word, no boundaries)
+            print re_wB.find("my cat sat")   # (empty)
+
+            # ── {n,m} cap (default 100) — large values clamped ────────────────
+            var re_big = Regex.compile("a{1,200}")  # clamped to 100
+            print re_big.match("a")          # true
+
+            # ── U flag: unlimited {n,m} ────────────────────────────────────────
+            var re_u = Regex.compile("a{1,200}", "U")
+            print re_u.match("a")            # true

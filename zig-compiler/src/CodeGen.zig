@@ -1165,10 +1165,14 @@ const Generator = struct {
         // ── Regex (Thompson NFA) helpers ───────────────────────────────────
         try g.w.writeAll(
             \\// ─── Thompson NFA regex engine ───────────────────────────────────────────────
-            \\const _RNodeKind = enum(u8) { match, lit, dot, cls, split, save, bol, eol_a };
+            \\const _RNodeKind = enum(u8) { match, lit, dot, cls, split, save, bol, eol_a, wb };
             \\const _RNode = struct {
             \\    kind: _RNodeKind, c: u8 = 0, bits: [32]u8 = [_]u8{0} ** 32,
             \\    neg: bool = false, slot: u8 = 0, out1: u32 = 0xFFFF_FFFF, out2: u32 = 0xFFFF_FFFF,
+            \\};
+            \\const _RFlags = struct {
+            \\    ignore_case: bool = false, multiline: bool = false, dot_all: bool = false, unlimited: bool = false,
+            \\    lazy_match: bool = false, // set when any *? +? ?? is parsed
             \\};
             \\const _RFrag = struct {
             \\    start: u32, outs: [64]u32 = [_]u32{0xFFFF_FFFF} ** 64, n: u8 = 0,
@@ -1183,7 +1187,7 @@ const Generator = struct {
             \\};
             \\const _RC = struct {
             \\    pat: []const u8, pos: usize = 0,
-            \\    nodes: std.ArrayListUnmanaged(_RNode) = .{}, alloc: std.mem.Allocator, n_caps: u8 = 0,
+            \\    nodes: std.ArrayListUnmanaged(_RNode) = .{}, alloc: std.mem.Allocator, n_caps: u8 = 0, flags: _RFlags = .{},
             \\    fn addNode(c: *_RC, n: _RNode) error{OutOfMemory}!u32 {
             \\        const idx: u32 = @intCast(c.nodes.items.len);
             \\        try c.nodes.append(c.alloc, n); return idx;
@@ -1246,8 +1250,13 @@ const Generator = struct {
             \\            '.' => { _ = c.eat(); const _di = try c.addNode(.{ .kind = .dot }); return _RFrag.one(_di, _di); },
             \\            '\\' => {
             \\                _ = c.eat(); const esc = c.eat() orelse return null;
+            \\                // \b / \B are zero-width word-boundary assertions, not char classes
+            \\                if (esc == 'b' or esc == 'B') {
+            \\                    const idx = try c.addNode(.{ .kind = .wb, .neg = (esc == 'B') });
+            \\                    return _RFrag.one(idx, idx);
+            \\                }
             \\                var bits = [_]u8{0} ** 32;
-            \\                const neg = std.ascii.isUpper(esc) and esc != 'B';
+            \\                const neg = std.ascii.isUpper(esc);
             \\                if (neg) { _rSetEsc(&bits, std.ascii.toLower(esc)); const pb = bits; bits = [_]u8{0} ** 32; for (&bits, pb) |*b, p| b.* = ~p; }
             \\                else _rSetEsc(&bits, esc);
             \\                const _ci = try c.addNode(.{ .kind = .cls, .bits = bits, .neg = false });
@@ -1262,21 +1271,33 @@ const Generator = struct {
             \\        const q = c.peek() orelse return atom;
             \\        switch (q) {
             \\            '*' => {
-            \\                _ = c.eat();
-            \\                const sp = try c.addNode(.{ .kind = .split, .out1 = atom.start, .out2 = 0xFFFF_FFFF });
+            \\                _ = c.eat(); const lazy = c.expect('?');
+            \\                if (lazy) c.flags.lazy_match = true;
+            \\                const sp = try c.addNode(.{ .kind = .split,
+            \\                    .out1 = if (lazy) 0xFFFF_FFFF else atom.start,
+            \\                    .out2 = if (lazy) atom.start  else 0xFFFF_FFFF });
             \\                c.patch(atom, sp);
-            \\                var f = _RFrag{ .start = sp }; f.outs[0] = sp | 0x8000_0000; f.n = 1; return f;
+            \\                var f = _RFrag{ .start = sp };
+            \\                f.outs[0] = if (lazy) sp else sp | 0x8000_0000; f.n = 1; return f;
             \\            },
             \\            '+' => {
-            \\                _ = c.eat();
-            \\                const sp = try c.addNode(.{ .kind = .split, .out1 = atom.start, .out2 = 0xFFFF_FFFF });
+            \\                _ = c.eat(); const lazy = c.expect('?');
+            \\                if (lazy) c.flags.lazy_match = true;
+            \\                const sp = try c.addNode(.{ .kind = .split,
+            \\                    .out1 = if (lazy) 0xFFFF_FFFF else atom.start,
+            \\                    .out2 = if (lazy) atom.start  else 0xFFFF_FFFF });
             \\                c.patch(atom, sp);
-            \\                var f = _RFrag{ .start = atom.start }; f.outs[0] = sp | 0x8000_0000; f.n = 1; return f;
+            \\                var f = _RFrag{ .start = atom.start };
+            \\                f.outs[0] = if (lazy) sp else sp | 0x8000_0000; f.n = 1; return f;
             \\            },
             \\            '?' => {
-            \\                _ = c.eat();
-            \\                const sp = try c.addNode(.{ .kind = .split, .out1 = atom.start, .out2 = 0xFFFF_FFFF });
-            \\                return _RFrag.two(sp, atom.outs[0], sp | 0x8000_0000);
+            \\                _ = c.eat(); const lazy = c.expect('?');
+            \\                if (lazy) c.flags.lazy_match = true;
+            \\                const sp = try c.addNode(.{ .kind = .split,
+            \\                    .out1 = if (lazy) 0xFFFF_FFFF else atom.start,
+            \\                    .out2 = if (lazy) atom.start  else 0xFFFF_FFFF });
+            \\                return if (lazy) _RFrag.two(sp, sp, atom.outs[0])
+            \\                       else      _RFrag.two(sp, atom.outs[0], sp | 0x8000_0000);
             \\            },
             \\            '{' => {
             \\                _ = c.eat();
@@ -1288,6 +1309,7 @@ const Generator = struct {
             \\                    else { m = 0; while (c.peek()) |d| { if (d < '0' or d > '9') break; m = m *% 10 +% (d - '0'); _ = c.eat(); } }
             \\                }
             \\                _ = c.expect('}');
+            \\                if (!c.flags.unlimited) { if (n > 100) n = 100; if (m > 100) m = 100; }
             \\                if (n == 0 and m == 0 and !unbounded) return atom; // degenerate {0}
             \\                const after_q = c.pos;
             \\                // build result: start with the already-parsed atom (counts as copy 1)
@@ -1340,36 +1362,53 @@ const Generator = struct {
             \\    }
             \\};
             \\const Regex = struct {
-            \\    nodes: []_RNode, start: u32, alloc: std.mem.Allocator,
-            \\    fn closure(re: *const Regex, cur: *std.ArrayListUnmanaged(u32), vis: []bool, alloc: std.mem.Allocator, idx: u32, pos: usize, input_len: usize) error{OutOfMemory}!void {
+            \\    nodes: []_RNode, start: u32, alloc: std.mem.Allocator, flags: _RFlags = .{},
+            \\    fn closure(re: *const Regex, cur: *std.ArrayListUnmanaged(u32), vis: []bool, alloc: std.mem.Allocator, idx: u32, pos: usize, input: []const u8) error{OutOfMemory}!void {
             \\        if (idx == 0xFFFF_FFFF or idx >= re.nodes.len or vis[idx]) return;
             \\        vis[idx] = true;
-            \\        switch (re.nodes[idx].kind) {
-            \\            .split => { try re.closure(cur, vis, alloc, re.nodes[idx].out1, pos, input_len); try re.closure(cur, vis, alloc, re.nodes[idx].out2, pos, input_len); },
-            \\            .save  => try re.closure(cur, vis, alloc, re.nodes[idx].out1, pos, input_len),
-            \\            .bol   => if (pos == 0) try re.closure(cur, vis, alloc, re.nodes[idx].out1, pos, input_len),
-            \\            .eol_a => if (pos == input_len) try re.closure(cur, vis, alloc, re.nodes[idx].out1, pos, input_len),
-            \\            else   => try cur.append(alloc, idx),
+            \\        const nd = &re.nodes[idx];
+            \\        switch (nd.kind) {
+            \\            .split => { try re.closure(cur, vis, alloc, nd.out1, pos, input); try re.closure(cur, vis, alloc, nd.out2, pos, input); },
+            \\            .save  => try re.closure(cur, vis, alloc, nd.out1, pos, input),
+            \\            .bol   => {
+            \\                const ok = pos == 0 or (re.flags.multiline and pos > 0 and input[pos - 1] == '\n');
+            \\                if (ok) try re.closure(cur, vis, alloc, nd.out1, pos, input);
+            \\            },
+            \\            .eol_a => {
+            \\                const ok = pos == input.len or (re.flags.multiline and pos < input.len and input[pos] == '\n');
+            \\                if (ok) try re.closure(cur, vis, alloc, nd.out1, pos, input);
+            \\            },
+            \\            .wb => {
+            \\                const pw = pos > 0 and _rIsWord(input[pos - 1]);
+            \\                const cw = pos < input.len and _rIsWord(input[pos]);
+            \\                if ((pw != cw) != nd.neg) try re.closure(cur, vis, alloc, nd.out1, pos, input);
+            \\            },
+            \\            else => try cur.append(alloc, idx),
             \\        }
             \\    }
-            \\    fn matchAt(re: *const Regex, input: []const u8, from: usize) error{OutOfMemory}!?usize {
+            \\    fn matchAt(re: *const Regex, input: []const u8, from: usize, shortest: bool) error{OutOfMemory}!?usize {
             \\        const alloc = re.alloc;
             \\        var cur: std.ArrayListUnmanaged(u32) = .{}; var nxt: std.ArrayListUnmanaged(u32) = .{};
             \\        defer cur.deinit(alloc); defer nxt.deinit(alloc);
             \\        const vis = try alloc.alloc(bool, re.nodes.len); defer alloc.free(vis);
-            \\        @memset(vis, false); try re.closure(&cur, vis, alloc, re.start, from, input.len);
+            \\        @memset(vis, false); try re.closure(&cur, vis, alloc, re.start, from, input);
             \\        var last: ?usize = null;
-            \\        for (cur.items) |si| if (re.nodes[si].kind == .match) { last = from; break; };
+            \\        for (cur.items) |si| if (re.nodes[si].kind == .match) { last = from; if (shortest) return last; break; };
             \\        var pos = from;
             \\        while (pos < input.len and cur.items.len > 0) : (pos += 1) {
             \\            const ch = input[pos]; nxt.clearRetainingCapacity(); @memset(vis, false);
             \\            for (cur.items) |si| {
             \\                const nd = &re.nodes[si];
-            \\                const ok = switch (nd.kind) { .lit => nd.c == ch, .dot => ch != '\n', .cls => _rClsMatch(nd, ch), else => false };
-            \\                if (ok) try re.closure(&nxt, vis, alloc, nd.out1, pos + 1, input.len);
+            \\                const ok = switch (nd.kind) {
+            \\                    .lit => if (re.flags.ignore_case) std.ascii.toLower(nd.c) == std.ascii.toLower(ch) else nd.c == ch,
+            \\                    .dot => if (re.flags.dot_all) true else ch != '\n',
+            \\                    .cls => if (re.flags.ignore_case) _rClsMatch(nd, ch) or _rClsMatch(nd, std.ascii.toLower(ch)) or _rClsMatch(nd, std.ascii.toUpper(ch)) else _rClsMatch(nd, ch),
+            \\                    else => false,
+            \\                };
+            \\                if (ok) try re.closure(&nxt, vis, alloc, nd.out1, pos + 1, input);
             \\            }
             \\            std.mem.swap(std.ArrayListUnmanaged(u32), &cur, &nxt);
-            \\            for (cur.items) |si| if (re.nodes[si].kind == .match) { last = pos + 1; break; };
+            \\            for (cur.items) |si| if (re.nodes[si].kind == .match) { last = pos + 1; if (shortest) return last; break; };
             \\        }
             \\        return last;
             \\    }
@@ -1377,6 +1416,7 @@ const Generator = struct {
             \\fn _rSetBit(bits: *[32]u8, c: u8) void { bits[c >> 3] |= @as(u8, 1) << @intCast(c & 7); }
             \\fn _rGetBit(bits: *const [32]u8, c: u8) bool { return (bits[c >> 3] >> @intCast(c & 7)) & 1 != 0; }
             \\fn _rClsMatch(nd: *const _RNode, c: u8) bool { const h = _rGetBit(&nd.bits, c); return if (nd.neg) !h else h; }
+            \\fn _rIsWord(c: u8) bool { return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_'; }
             \\fn _rSetEsc(bits: *[32]u8, esc: u8) void {
             \\    switch (std.ascii.toLower(esc)) {
             \\        'd' => { var i: u16 = '0'; while (i <= '9') : (i += 1) _rSetBit(bits, @intCast(i)); },
@@ -1386,25 +1426,31 @@ const Generator = struct {
             \\        else => _rSetBit(bits, esc),
             \\    }
             \\}
-            \\fn _regex_compile(pattern: []const u8) Regex {
+            \\fn _regex_compile(pattern: []const u8, flags_str: []const u8) Regex {
             \\    const alloc = std.heap.page_allocator;
-            \\    var c = _RC{ .pat = pattern, .alloc = alloc };
+            \\    var flags = _RFlags{};
+            \\    for (flags_str) |f| switch (f) {
+            \\        'i' => flags.ignore_case = true, 'm' => flags.multiline = true,
+            \\        's' => flags.dot_all = true,     'U' => flags.unlimited = true,
+            \\        else => {},
+            \\    };
+            \\    var c = _RC{ .pat = pattern, .alloc = alloc, .flags = flags };
             \\    const frag_opt = c.parseAlt() catch @panic("regex OOM");
             \\    const match_idx = c.addNode(.{ .kind = .match }) catch @panic("regex OOM");
             \\    if (frag_opt) |frag| {
             \\        c.patchFrag(frag, match_idx);
-            \\        return .{ .nodes = c.nodes.toOwnedSlice(alloc) catch @panic("regex OOM"), .start = frag.start, .alloc = alloc };
+            \\        return .{ .nodes = c.nodes.toOwnedSlice(alloc) catch @panic("regex OOM"), .start = frag.start, .alloc = alloc, .flags = c.flags };
             \\    }
-            \\    return .{ .nodes = c.nodes.toOwnedSlice(alloc) catch @panic("regex OOM"), .start = match_idx, .alloc = alloc };
+            \\    return .{ .nodes = c.nodes.toOwnedSlice(alloc) catch @panic("regex OOM"), .start = match_idx, .alloc = alloc, .flags = c.flags };
             \\}
             \\fn _regex_match(re: Regex, input: []const u8) bool {
-            \\    const end = re.matchAt(input, 0) catch return false;
+            \\    const end = re.matchAt(input, 0, false) catch return false;
             \\    return end != null and end.? == input.len;
             \\}
             \\fn _regex_find(re: Regex, input: []const u8) []const u8 {
             \\    var i: usize = 0;
             \\    while (i <= input.len) : (i += 1) {
-            \\        if (re.matchAt(input, i) catch null) |e| return input[i..e];
+            \\        if (re.matchAt(input, i, re.flags.lazy_match) catch null) |e| return input[i..e];
             \\    }
             \\    return "";
             \\}
@@ -1412,7 +1458,7 @@ const Generator = struct {
             \\    var out: std.ArrayListUnmanaged([]const u8) = .{};
             \\    var i: usize = 0;
             \\    while (i < input.len) {
-            \\        if (re.matchAt(input, i) catch null) |e| {
+            \\        if (re.matchAt(input, i, re.flags.lazy_match) catch null) |e| {
             \\            out.append(std.heap.page_allocator, input[i..e]) catch @panic("OOM");
             \\            i = if (e > i) e else i + 1;
             \\        } else i += 1;
@@ -1423,7 +1469,7 @@ const Generator = struct {
             \\    var out: std.ArrayListUnmanaged(u8) = .{};
             \\    var i: usize = 0;
             \\    while (i < input.len) {
-            \\        if (re.matchAt(input, i) catch null) |e| {
+            \\        if (re.matchAt(input, i, re.flags.lazy_match) catch null) |e| {
             \\            out.appendSlice(std.heap.page_allocator, sub) catch @panic("OOM");
             \\            i = if (e > i) e else i + 1;
             \\        } else {
@@ -1445,7 +1491,7 @@ const Generator = struct {
             \\fn _re_eclosure_s(
             \\    re: *const Regex, cur: *std.ArrayListUnmanaged(_RegThread),
             \\    vis: []bool, alloc: std.mem.Allocator,
-            \\    state: u32, saves: [_MAX_SAVE_SLOTS]usize, pos: usize, input_len: usize,
+            \\    state: u32, saves: [_MAX_SAVE_SLOTS]usize, pos: usize, input: []const u8,
             \\) std.mem.Allocator.Error!void {
             \\    if (state == 0xFFFF_FFFF or state >= re.nodes.len) return;
             \\    if (vis[state]) return;
@@ -1453,16 +1499,27 @@ const Generator = struct {
             \\    const nd = &re.nodes[state];
             \\    switch (nd.kind) {
             \\        .split => {
-            \\            try _re_eclosure_s(re, cur, vis, alloc, nd.out1, saves, pos, input_len);
-            \\            try _re_eclosure_s(re, cur, vis, alloc, nd.out2, saves, pos, input_len);
+            \\            try _re_eclosure_s(re, cur, vis, alloc, nd.out1, saves, pos, input);
+            \\            try _re_eclosure_s(re, cur, vis, alloc, nd.out2, saves, pos, input);
             \\        },
             \\        .save => {
             \\            var ns = saves;
             \\            if (nd.slot < _MAX_SAVE_SLOTS) ns[nd.slot] = pos;
-            \\            try _re_eclosure_s(re, cur, vis, alloc, nd.out1, ns, pos, input_len);
+            \\            try _re_eclosure_s(re, cur, vis, alloc, nd.out1, ns, pos, input);
             \\        },
-            \\        .bol   => if (pos == 0) try _re_eclosure_s(re, cur, vis, alloc, nd.out1, saves, pos, input_len),
-            \\        .eol_a => if (pos == input_len) try _re_eclosure_s(re, cur, vis, alloc, nd.out1, saves, pos, input_len),
+            \\        .bol => {
+            \\            const ok = pos == 0 or (re.flags.multiline and pos > 0 and input[pos - 1] == '\n');
+            \\            if (ok) try _re_eclosure_s(re, cur, vis, alloc, nd.out1, saves, pos, input);
+            \\        },
+            \\        .eol_a => {
+            \\            const ok = pos == input.len or (re.flags.multiline and pos < input.len and input[pos] == '\n');
+            \\            if (ok) try _re_eclosure_s(re, cur, vis, alloc, nd.out1, saves, pos, input);
+            \\        },
+            \\        .wb => {
+            \\            const pw = pos > 0 and _rIsWord(input[pos - 1]);
+            \\            const cw = pos < input.len and _rIsWord(input[pos]);
+            \\            if ((pw != cw) != nd.neg) try _re_eclosure_s(re, cur, vis, alloc, nd.out1, saves, pos, input);
+            \\        },
             \\        else => try cur.append(alloc, .{ .state = state, .saves = saves }),
             \\    }
             \\}
@@ -1476,19 +1533,24 @@ const Generator = struct {
             \\    const vis = alloc.alloc(bool, re.nodes.len) catch return null;
             \\    defer alloc.free(vis);
             \\    @memset(vis, false);
-            \\    _re_eclosure_s(re, &cur, vis, alloc, re.start, empty, from, input.len) catch return null;
+            \\    _re_eclosure_s(re, &cur, vis, alloc, re.start, empty, from, input) catch return null;
             \\    var last: ?[_MAX_SAVE_SLOTS]usize = null;
-            \\    for (cur.items) |t| { if (re.nodes[t.state].kind == .match) { last = t.saves; break; } }
+            \\    for (cur.items) |t| { if (re.nodes[t.state].kind == .match) { last = t.saves; if (re.flags.lazy_match) return last; break; } }
             \\    var pos = from;
             \\    while (pos < input.len and cur.items.len > 0) : (pos += 1) {
             \\        const ch = input[pos]; nxt.clearRetainingCapacity(); @memset(vis, false);
             \\        for (cur.items) |t| {
             \\            const nd = &re.nodes[t.state];
-            \\            const ok = switch (nd.kind) { .lit => nd.c == ch, .dot => ch != '\n', .cls => _rClsMatch(nd, ch), else => false };
-            \\            if (ok) _re_eclosure_s(re, &nxt, vis, alloc, nd.out1, t.saves, pos + 1, input.len) catch {};
+            \\            const ok = switch (nd.kind) {
+            \\                .lit => if (re.flags.ignore_case) std.ascii.toLower(nd.c) == std.ascii.toLower(ch) else nd.c == ch,
+            \\                .dot => if (re.flags.dot_all) true else ch != '\n',
+            \\                .cls => if (re.flags.ignore_case) _rClsMatch(nd, ch) or _rClsMatch(nd, std.ascii.toLower(ch)) or _rClsMatch(nd, std.ascii.toUpper(ch)) else _rClsMatch(nd, ch),
+            \\                else => false,
+            \\            };
+            \\            if (ok) _re_eclosure_s(re, &nxt, vis, alloc, nd.out1, t.saves, pos + 1, input) catch {};
             \\        }
             \\        std.mem.swap(std.ArrayListUnmanaged(_RegThread), &cur, &nxt);
-            \\        for (cur.items) |t| { if (re.nodes[t.state].kind == .match) { last = t.saves; break; } }
+            \\        for (cur.items) |t| { if (re.nodes[t.state].kind == .match) { last = t.saves; if (re.flags.lazy_match) return last; break; } }
             \\    }
             \\    return last;
             \\}
@@ -3343,6 +3405,8 @@ const Generator = struct {
         if (std.mem.eql(u8, method, "compile")) {
             try g.w.writeAll("_regex_compile(");
             if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(", ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("\"\"");
             try g.w.writeAll(")");
             return true;
         }
