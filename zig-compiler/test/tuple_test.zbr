@@ -1,0 +1,28 @@
+class Math
+    def minMax(a as int, b as int) as (int, int)
+        if a < b
+            return (a, b)
+        else
+            return (b, a)
+
+class Program
+    shared def main
+        var m = Math()
+
+        # Tuple literal and member access
+        var p = (10, 20)
+        print p.0
+        print p.1
+
+        # Typed tuple variable
+        var q as (int, int) = (3, 7)
+        print q.0 + q.1
+
+        # Destructuring
+        var (lo, hi) = m.minMax(42, 17)
+        print lo
+        print hi
+
+        # Tuple in expression
+        var t = (1, 2, 3)
+        print t.2

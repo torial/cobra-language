@@ -1,0 +1,20 @@
+class Bench
+    shared
+        def fib(n as int) as int
+            if n < 2
+                return n
+            return Bench.fib(n - 1) + Bench.fib(n - 2)
+
+        def sumLoop(n as int) as int
+            var acc as int = 0
+            for i in 0 : n
+                acc = acc + i
+            return acc
+
+class Program
+    shared
+        def main
+            var f = Bench.fib(40)
+            print f
+            var s = Bench.sumLoop(100000000)
+            print s

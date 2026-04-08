@@ -1,0 +1,26 @@
+class Main
+    shared
+        def main
+            # Basic nil check: str? variable (postfix ? = nilable)
+            var name as str? = "Alice"
+            if name != nil
+                print name
+
+            # Nil case
+            var empty as str? = nil
+            if empty != nil
+                print empty
+            else
+                print "got nil"
+
+            # else-branch narrowing: if x == nil else
+            var val as str? = "hello"
+            if val == nil
+                print "nil"
+            else
+                print val
+
+            # Integer optional
+            var n as int? = 42
+            if n != nil
+                print n

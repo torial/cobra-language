@@ -260,6 +260,8 @@ pub const TypeRef = union(enum) {
     void_: void,
     /// `same` (return type = declaring type)
     same: void,
+    /// `(T1, T2, …)` — tuple type with two or more element types.
+    tuple: TupleTypeRef,
 };
 
 pub const NamedTypeRef = struct {
@@ -271,6 +273,11 @@ pub const GenericTypeRef = struct {
     span: Span,
     name: []const u8,
     args: []const TypeRef,
+};
+
+pub const TupleTypeRef = struct {
+    span:  Span,
+    elems: []const TypeRef,
 };
 
 
@@ -299,6 +306,8 @@ pub const Stmt = union(enum) {
     assign_except: *StmtAssignExcept, // target = base except ...
     raise: *StmtRaise,            // raise [msg [, details]]
     try_catch: *StmtTryCatch,     // try eol Block CatchClauseList
+    guard: *StmtGuard,            // guard cond else { block | stmt }
+    destruct: *StmtDestruct,      // var (x, y) = expr
 };
 
 pub const StmtIf = struct {
@@ -393,6 +402,26 @@ pub const StmtWith = struct {
     span: Span,
     target: *Expr,
     body: []const Stmt,
+};
+
+/// `guard cond else { block | stmt }` — early-exit: if cond is false, run else body.
+pub const StmtGuard = struct {
+    span: Span,
+    cond: *Expr,
+    /// The else body — one or more statements (block form or single inline stmt).
+    else_body: []const Stmt,
+};
+
+/// `var (x, y, z) = expr` or `var {a, b} = expr` — destructuring declaration.
+/// For tuple form, each name binds to the positional element (`._dt.@"0"` etc.).
+/// For struct form, each name binds to the same-named field (`._dt.name` etc.).
+pub const StmtDestruct = struct {
+    span:  Span,
+    /// Binding names in declaration order.
+    names: []const []const u8,
+    init:  *Expr,
+    /// Whether this is a tuple destructure `(x, y)` or struct destructure `{x, y}`.
+    kind: enum { tuple, struct_ } = .tuple,
 };
 
 /// `raise [msg] [, details] eol` — raise an error.
@@ -514,6 +543,7 @@ pub const Expr = union(enum) {
     old: *ExprOld,     // old expr — pre-call value in `ensure` contracts
     zig_lit: ExprZigLit, // zig'...' / zig"..." backend literal
     try_: *ExprTry,    // try expr — propagate error upward
+    tuple_lit: *ExprTuple,  // (a, b, c) — tuple literal
 };
 
 // ── Literal expressions ───────────────────────────────────────────────────────
@@ -791,6 +821,12 @@ pub const ExprZigLit = struct {
 pub const ExprTry = struct {
     span: Span,
     expr: *Expr,
+};
+
+/// `(a, b, c)` — tuple literal with two or more elements.
+pub const ExprTuple = struct {
+    span:  Span,
+    elems: []const *Expr,
 };
 
 // ── Arena helpers ─────────────────────────────────────────────────────────────

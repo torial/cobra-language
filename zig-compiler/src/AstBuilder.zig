@@ -845,6 +845,18 @@ const Builder = struct {
                 const full_name = try std.fmt.allocPrint(b.arena, "{s}{s}", .{ prefix, bits_text });
                 break :blk .{ .named = .{ .span = spanOf(node, b.tokens), .name = full_name } };
             },
+            5 => blk: {
+                // ( TypeRef , TypeRefListNE )  — tuple type
+                // lparen TypeRef comma TypeRefListNE rparen
+                var elems = std.ArrayList(Ast.TypeRef){};
+                try elems.append(b.arena, try b.buildTypeRef(kids[1]));
+                const rest = try b.buildTypeRefListNE(kids[3]);
+                try elems.appendSlice(b.arena, rest);
+                break :blk .{ .tuple = .{
+                    .span  = spanOf(node, b.tokens),
+                    .elems = try elems.toOwnedSlice(b.arena),
+                }};
+            },
             else => std.debug.panic("buildTypeRef: child count {}", .{kids.len}),
         };
     }
@@ -863,6 +875,19 @@ const Builder = struct {
             // TypeRefListNE comma TypeRef
             try b.collectTypeRefs(kids[0], out);
             try out.append(b.arena, try b.buildTypeRef(kids[2]));
+        }
+    }
+
+    /// Collect identifier names from an `IdListNE` node into `out`.
+    /// IdListNE → id | IdListNE comma id
+    fn collectIdListNE(b: Builder, node: TN, out: *std.ArrayList([]const u8)) anyerror!void {
+        const kids = ch(node);
+        if (kids.len == 1) {
+            try out.append(b.arena, leafText(kids[0], b.tokens));
+        } else {
+            // IdListNE comma id
+            try b.collectIdListNE(kids[0], out);
+            try out.append(b.arena, leafText(kids[2], b.tokens));
         }
     }
 
@@ -931,12 +956,35 @@ const Builder = struct {
             .StmtBranch   => .{ .branch  = try b.box(Ast.StmtBranch, try b.buildStmtBranch(inner)) },
             .StmtLocalVar       => try b.buildStmtLocalVarDispatch(inner),
             .StmtLocalVarLambda => try b.buildStmtLocalVarLambda(inner),
+            .StmtDestruct       => blk: {
+                // kw_var lparen IdListNE rparen assign Expr eol
+                var names = std.ArrayList([]const u8){};
+                try b.collectIdListNE(kids[2], &names);
+                break :blk .{ .destruct = try b.box(Ast.StmtDestruct, .{
+                    .span  = s,
+                    .names = try names.toOwnedSlice(b.arena),
+                    .init  = try b.box(Ast.Expr, try b.buildExpr(kids[5])),
+                    .kind  = .tuple,
+                }) };
+            },
+            .StmtDestructStruct => blk: {
+                // kw_var lcurly IdListNE rcurly assign Expr eol
+                var names = std.ArrayList([]const u8){};
+                try b.collectIdListNE(kids[2], &names);
+                break :blk .{ .destruct = try b.box(Ast.StmtDestruct, .{
+                    .span  = s,
+                    .names = try names.toOwnedSlice(b.arena),
+                    .init  = try b.box(Ast.Expr, try b.buildExpr(kids[5])),
+                    .kind  = .struct_,
+                }) };
+            },
             .StmtAssign   => try b.buildStmtAssignDispatch(inner),
             .StmtExpr     => .{ .expr    = try b.box(Ast.Expr,       try b.buildExpr(kids[0])) },
             .StmtDefer    => .{ .defer_    = try b.box(Ast.StmtDefer,    try b.buildStmtDefer(inner)) },
             .StmtWith     => .{ .with      = try b.box(Ast.StmtWith,     try b.buildStmtWith(inner)) },
             .StmtRaise    => .{ .raise     = try b.box(Ast.StmtRaise,    try b.buildStmtRaise(inner)) },
             .StmtTryCatch => .{ .try_catch = try b.box(Ast.StmtTryCatch, try b.buildStmtTryCatch(inner)) },
+            .StmtGuard, .StmtGuardInline => .{ .guard = try b.box(Ast.StmtGuard, try b.buildStmtGuard(inner)) },
             .StmtExpect   => @panic("TODO: StmtExpect"),
             .StmtLock     => @panic("TODO: StmtLock"),
             else => std.debug.panic("buildStmt: unexpected NT {s}", .{@tagName(ntOf(inner))}),
@@ -1268,6 +1316,25 @@ const Builder = struct {
         };
     }
 
+    fn buildStmtGuard(b: Builder, node: TN) anyerror!Ast.StmtGuard {
+        const kids = ch(node);
+        const span = spanOf(node, b.tokens);
+        // Block form:   kw_guard Expr kw_else eol Block   (5 kids)
+        // Inline form:  kw_guard Expr kw_else comma Stmt  (5 kids)
+        // kids[0]=kw_guard, kids[1]=Expr, kids[2]=kw_else, kids[3]=eol|comma, kids[4]=Block|Stmt
+        const cond = try b.box(Ast.Expr, try b.buildExpr(kids[1]));
+        const else_body = if (ntOf(kids[4]) == .Block)
+            try b.buildBlock(kids[4])
+        else blk: {
+            // Inline: wrap the single Stmt in a slice
+            const stmt = try b.buildStmt(kids[4]);
+            var stmts = try b.arena.alloc(Ast.Stmt, 1);
+            stmts[0] = stmt;
+            break :blk stmts;
+        };
+        return .{ .span = span, .cond = cond, .else_body = else_body };
+    }
+
     fn buildStmtTryCatch(b: Builder, node: TN) anyerror!Ast.StmtTryCatch {
         // kw_try eol Block CatchClauseList
         const kids = ch(node);
@@ -1585,10 +1652,28 @@ const Builder = struct {
             }) };
         }
 
+        // `expr?` postfix: 2 children, second is .question — sugar for `try expr`
+        if (kids.len == 2 and isLeafKind(kids[1], .question)) {
+            return .{ .try_ = try b.box(Ast.ExprTry, .{
+                .span = s,
+                .expr = try b.box(Ast.Expr, try b.buildExpr(kids[0])),
+            }) };
+        }
+
         // Member access: Expr9 . id — 3 children, right is a bare identifier.
         // Must be checked before the generic binary handler because `kids[2]`
         // is a leaf token, not an expression node.
         if (kids.len == 3 and isLeafKind(kids[1], .dot) and isLeafKind(kids[2], .id)) {
+            return .{ .member = try b.box(Ast.ExprMember, .{
+                .span   = s,
+                .object = try b.box(Ast.Expr, try b.buildExpr(kids[0])),
+                .member = leafText(kids[2], b.tokens),
+            }) };
+        }
+
+        // Tuple member access: Expr9 . integer_lit — e.g. `p.0`, `p.1`
+        // Must be checked before the generic binary handler for the same reason.
+        if (kids.len == 3 and isLeafKind(kids[1], .dot) and isLeafKind(kids[2], .integer_lit)) {
             return .{ .member = try b.box(Ast.ExprMember, .{
                 .span   = s,
                 .object = try b.box(Ast.Expr, try b.buildExpr(kids[0])),
@@ -1628,7 +1713,9 @@ const Builder = struct {
                 .kw_is     => mk.bin(b, s, .eq,      left, right),
                 .kw_in     => mk.bin(b, s, .eq,      left, right),
                 .eq        => mk.bin(b, s, .eq,      left, right),
-                .ne        => mk.bin(b, s, .ne,      left, right),
+                .ne,
+                .bang_equals => mk.bin(b, s, .ne, left, right), // <> and != both mean not-equal
+
                 .lt        => mk.bin(b, s, .lt,      left, right),
                 .le        => mk.bin(b, s, .le,      left, right),
                 .gt        => mk.bin(b, s, .gt,      left, right),
@@ -1782,9 +1869,12 @@ const Builder = struct {
                     else => std.debug.panic("buildAtom leaf: {s}", .{@tagName(tok)}),
                 };
             }
-            // Inner child (AllAnyExpr or LambdaExpr)
+            // Inner child (AllAnyExpr, LambdaExpr, or LambdaBlockExpr)
             if (kid == .inner and ntOf(kid) == .LambdaExpr) {
                 return b.buildLambdaExpr(kid);
+            }
+            if (kid == .inner and ntOf(kid) == .LambdaBlockExpr) {
+                return b.buildLambdaBlockExpr(kid);
             }
             return b.buildExpr(kid);
         }
@@ -1812,6 +1902,18 @@ const Builder = struct {
         // (Expr)  — grouped
         if (kids.len == 3 and isLeafKind(kids[0], .lparen)) {
             return b.buildExpr(kids[1]);
+        }
+
+        // (Expr, ExprListNE)  — tuple literal (5 children)
+        if (kids.len == 5 and isLeafKind(kids[0], .lparen) and isLeafKind(kids[2], .comma)) {
+            var elems = std.ArrayList(*Ast.Expr){};
+            try elems.append(b.arena, try b.box(Ast.Expr, try b.buildExpr(kids[1])));
+            const rest = try b.buildExprListNE(kids[3]);
+            try elems.appendSlice(b.arena, rest);
+            return .{ .tuple_lit = try b.box(Ast.ExprTuple, .{
+                .span  = s,
+                .elems = try elems.toOwnedSlice(b.arena),
+            }) };
         }
 
         // .open_call ArgList rparen  — self method call (4 children: dot, open_call, ArgList, rparen)
@@ -2005,6 +2107,25 @@ const Builder = struct {
             .return_type = ret_type,
             .body        = .{ .expr = body_expr },
             .capture     = &.{},
+        }) };
+    }
+
+    /// Block-body lambda as argument: `def(params) [as T] eol indent CaptureOpt StmtList dedent`
+    /// Grammar: kw_def lparen ParamList rparen ReturnAnnotOpt eol indent CaptureOpt StmtList dedent
+    fn buildLambdaBlockExpr(b: Builder, node: TN) anyerror!Ast.Expr {
+        const kids = ch(node);
+        const s    = spanOf(node, b.tokens);
+        // kids: [kw_def, lparen, ParamList, rparen, ReturnAnnotOpt, eol, indent, CaptureOpt, StmtList, dedent]
+        const params   = try b.buildParamList(kids[2]);
+        const ret_type = try b.buildReturnAnnotOpt(kids[4]);
+        const capture  = try b.buildCaptureOpt(kids[7]);
+        const stmts    = try b.buildStmtList(kids[8]);
+        return .{ .lambda = try b.box(Ast.ExprLambda, .{
+            .span        = s,
+            .params      = params,
+            .return_type = ret_type,
+            .body        = .{ .stmts = stmts },
+            .capture     = capture,
         }) };
     }
 

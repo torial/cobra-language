@@ -1,0 +1,25 @@
+use CUtils
+
+class Program
+    shared
+        def testArithmetic
+            var sum = CUtils.c_add(10, 32)
+            print sum
+            var product = CUtils.c_mul(6, 7)
+            print product
+            var diff = CUtils.c_add(100, -30)
+            print diff
+
+        def testBoundaryValues
+            var zero = CUtils.c_add(0, 0)
+            print zero
+            var large = CUtils.c_mul(1000, 1000)
+            print large
+            var negative = CUtils.c_add(-50, -25)
+            print negative
+
+        def main
+            print "C Interop Tests"
+            testArithmetic()
+            testBoundaryValues()
+            print "C interop tests completed"

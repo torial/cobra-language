@@ -1,0 +1,32 @@
+union Expr
+    num as int
+    add as int
+    neg
+
+class Parser
+    shared
+        def makeNum(n as int) as Expr
+            return Expr.num(n)
+
+class Main
+    shared
+        def main
+            # Case 1: inferred-type var (no annotation)
+            var e = Expr.num(42)
+            branch e
+                on Expr.num as n
+                    print n
+                on Expr.add as n
+                    print n
+                on Expr.neg
+                    print "neg"
+
+            # Case 2: function return value
+            var e2 = Parser.makeNum(7)
+            branch e2
+                on Expr.num as n
+                    print n
+                on Expr.add as n
+                    print n
+                on Expr.neg
+                    print "neg"

@@ -1,0 +1,27 @@
+class Main
+    shared
+        def main
+            # char.toString() — convert Unicode codepoint to UTF-8 string
+            var word as str = "abc"
+            var chars_list as List(str) = List()
+            for c in word.chars()
+                chars_list.add(c.toString())
+            for s in chars_list
+                print s    # a, b, c
+
+            # Greek char
+            var greek as str = "λόγος"
+            var gchars as List(str) = List()
+            for c in greek.chars()
+                gchars.add(c.toString())
+            print gchars.count()    # 5
+
+            # list.at(i) with runtime index
+            var i = 0
+            while i < chars_list.count()
+                print chars_list.at(i)
+                i = i + 1
+
+            # codePointCount returns int (usable in arithmetic)
+            var n = word.codePointCount()
+            print n - 2    # 1

@@ -1,0 +1,122 @@
+class Math
+    shared
+        def divide(a as int, b as int) as Result(int, str)
+            if b == 0
+                return Result.err("division by zero")
+            return Result.ok(a / b)
+
+class Main
+    shared
+        def main
+            var r1 as Result(int, str) = Math.divide(10, 2)
+            var r2 as Result(int, str) = Math.divide(10, 0)
+
+            # isOk / isErr
+            print r1.isOk()
+            print r2.isErr()
+
+            # unwrapOr — safe extraction
+            print r1.unwrapOr(0)
+            print r2.unwrapOr(-1)
+
+            # okValue / errValue — optional extraction
+            var ok = r1.okValue()
+            if ok != nil
+                print ok
+
+            var err = r2.errValue()
+            if err != nil
+                print err
+
+            # branch — pattern match on Result
+            branch r1
+                on Result.ok as v
+                    print v
+                on Result.err as e
+                    print e
+
+            branch r2
+                on Result.ok as v
+                    print v
+                on Result.err as e
+                    print e
+
+        def testMapOnResult
+            var r as Result(int, str) = Math.divide(20, 4)
+            print r.unwrapOr(-1)
+            print "Result mapping tested"
+
+        def testFlatMap
+            # flatMap chains Results
+            var r1 as Result(int, str) = Math.divide(20, 4)  # ok(5)
+            var r2 as Result(int, str) = Math.divide(10, 0)  # err("...")
+            print r1.isOk()
+            print r2.isErr()
+
+        def testResultChaining
+            # Simulate chaining: divide by 2, then divide result by 5
+            var first as Result(int, str) = Math.divide(100, 2)   # ok(50)
+            if first.isOk()
+                var second as Result(int, str) = Math.divide(first.unwrapOr(0), 5)  # ok(10)
+                print second.unwrapOr(-1)
+
+        def testErrorPropagation
+            var r1 as Result(int, str) = Math.divide(10, 0)
+            var r2 as Result(int, str) = Math.divide(20, 2)
+
+            # Check both results
+            if r1.isErr()
+                print "Error in r1: ".concat(r1.errValue())
+            if r2.isOk()
+                print "Success in r2: ".concat(r2.okValue().toString())
+
+        def testMultipleResults
+            var results as List(Result(int, str)) = List()
+            results.add(Math.divide(10, 2))
+            results.add(Math.divide(20, 4))
+            results.add(Math.divide(30, 0))  # error
+
+            var success_count = 0
+            var error_count = 0
+            for r in results
+                if r.isOk()
+                    success_count = success_count + 1
+                else
+                    error_count = error_count + 1
+            print success_count
+            print error_count
+
+        def testResultWithNil
+            # Testing Result with optional values
+            var r as Result(int?, str) = Result.ok(nil)
+            if r.isOk()
+                var val = r.okValue()
+                if val == nil
+                    print "null value in ok"
+
+        def testCustomError
+            # Custom error types might be supported
+            # For now test with strings
+            var error_msg = "Invalid operation"
+            var r as Result(int, str) = Result.err(error_msg)
+            print r.errValue()
+
+        def testDefaultValue
+            var r1 as Result(int, str) = Math.divide(10, 0)
+            var val1 = r1.unwrapOr(-1)
+            print val1              # -1
+
+            var r2 as Result(int, str) = Math.divide(10, 2)
+            var val2 = r2.unwrapOr(-1)
+            print val2              # 5
+
+        def testErrWithContext
+            var r1 as Result(int, str) = Math.divide(42, 0)
+            var r2 as Result(int, str) = Math.divide(100, 10)
+
+            # Get error with context
+            if r1.isErr()
+                var context = "Operation failed: ".concat(r1.errValue())
+                print context
+            if r2.isOk()
+                print r2.unwrapOr(-1)

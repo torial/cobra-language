@@ -1,0 +1,27 @@
+use MathUtils
+
+class App
+    shared
+        def testTypeInference
+            # Without explicit type annotation — inferred from cross-module interface.
+            # If type inference works, this should compile and print 14 and 16.
+            # If it fails (type stays .unknown), codegen emits {any} which Zig rejects.
+            var d = MathUtils.double(7)
+            var s = MathUtils.square(4)
+            print d
+            print s
+
+        def testInferenceWithOperations
+            var x = MathUtils.double(3)    # Should infer int
+            var y = MathUtils.cube(2)     # Should infer int
+            var z = x + y                 # Should work with inferred ints
+            print z
+
+        def testChainedInference
+            var result = MathUtils.square(MathUtils.double(5))  # Chain inferences
+            print result
+
+        def main
+            testTypeInference()
+            testInferenceWithOperations()
+            testChainedInference()

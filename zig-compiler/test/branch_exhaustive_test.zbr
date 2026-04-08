@@ -1,0 +1,31 @@
+union Shape
+    circle as float
+    rect as int
+    point
+
+class Main
+    shared
+        def main
+            # Full coverage - all variants
+            var s = Shape.circle(3.14)
+            branch s
+                on Shape.circle as r
+                    print r
+                on Shape.rect as n
+                    print n
+                on Shape.point
+                    print "point"
+
+            # else clause covers the rest - no exhaustiveness error
+            branch s
+                on Shape.circle as r
+                    print r
+                else
+                    print "not circle"
+
+            # Inline else form
+            var s2 = Shape.rect(42)
+            branch s2
+                on Shape.rect as n
+                    print n
+                else, print "other"

@@ -1,0 +1,27 @@
+use ZigMath
+
+class Program
+    shared
+        def testBasicMath
+            print "Basic math operations:"
+            print ZigMath.square(7)
+            print ZigMath.clamp(15, 0, 10)
+            print ZigMath.abs(-42)
+
+        def testEdgeCases
+            print "Edge cases:"
+            print ZigMath.square(0)
+            print ZigMath.clamp(5, 5, 5)
+            print ZigMath.abs(0)
+            print ZigMath.abs(-1)
+
+        def testFloatMath
+            print "Float operations:"
+            var f1 = 3.14
+            var f2 = 2.71
+            print f1 + f2
+
+        def main
+            testBasicMath()
+            testEdgeCases()
+            testFloatMath()

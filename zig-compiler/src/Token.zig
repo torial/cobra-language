@@ -297,6 +297,9 @@ pub const TokenKind = enum {
     // Discriminated union types
     kw_union,     // union type declaration
 
+    // Guard statements
+    kw_guard,     // guard cond else stmt/block — early-exit pattern
+
     // Error propagation
     kw_raise,     // raise an error (with optional details)
     kw_throws,    // method annotation — method may propagate errors
@@ -393,6 +396,7 @@ pub const keyword_map = std.StaticStringMap(TokenKind).initComptime(.{
     .{ "with",        .kw_with },
     .{ "except",      .kw_except },
     .{ "union",       .kw_union  },
+    .{ "guard",       .kw_guard  },
     .{ "raise",       .kw_raise  },
     .{ "throws",      .kw_throws },
     .{ "try",         .kw_try    },

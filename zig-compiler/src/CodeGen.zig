@@ -61,40 +61,82 @@ const Allocator = std.mem.Allocator;
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
+/// Which GUI backend to embed in the generated Zig preamble.
+pub const GuiBackend = enum { stub, glfw, sdl2, dx12 };
+
+/// How a native (non-Zebra) `use` dependency is backed.
+/// Used by `genUse` to emit the correct import statement.
+pub const NativeUse = enum {
+    /// A plain `.zig` file — emit `const Alias = @import("path.zig");`
+    zig,
+    /// A `.c` file with a matching `.h` header — emit `@cImport(@cInclude(...))`.
+    c_with_header,
+    /// A `.c` file with no header — compiled as a translation unit only;
+    /// emit a comment and let the user declare symbols via `zig"extern fn..."`.
+    c_no_header,
+};
+
+/// Result returned by `generate()`.  Currently carries only `uses_gui`; more
+/// fields may be added without breaking callers that ignore or destructure.
+pub const GenerateResult = struct {
+    /// True when the generated code references any GUI API (`Gui.run`, widget
+    /// calls, etc.).  Callers may use this to decide whether to wire up an
+    /// external GUI dependency (e.g. zgui + zglfw for the glfw backend).
+    uses_gui: bool,
+    /// True when at least one `export fn` wrapper was emitted (lib mode only).
+    /// Callers may use this to decide whether to write a `.h` header file.
+    has_exports: bool,
+};
+
 /// Emit Zig source for `module` to `writer`.
 ///
-/// - `resolve` — Pass-2 name-resolution tables (needed for `self.` injection).
-/// - `tc`      — Pass-3 type information.  Pass `null` to skip typed format
-///               specifiers (all `print` args fall back to `{any}`).
-/// - `alloc`   — Used for the mixin index and per-method mutation analysis.
-/// - `writer`  — Destination for the generated Zig source.
+/// - `resolve`      — Pass-2 name-resolution tables (needed for `self.` injection).
+/// - `tc`           — Pass-3 type information.  Pass `null` to skip typed format
+///                    specifiers (all `print` args fall back to `{any}`).
+/// - `alloc`        — Used for the mixin index and per-method mutation analysis.
+/// - `writer`       — Destination for the generated Zig source.
+/// - `gui_backend`  — Which GUI backend preamble to embed (default: `.stub`).
+/// - `native_uses`  — Map from dotted `use` path → `NativeUse` kind for deps that
+///                    are native `.zig` or `.c` files (not compiled from Zebra).
+///                    Pass `null` when all deps are Zebra-compiled.
 pub fn generate(
-    module:  Ast.Module,
-    resolve: *const Resolver.ResolveResult,
-    tc:      ?*const TypeChecker.TypeCheckResult,
-    alloc:   Allocator,
-    writer:  std.io.AnyWriter,
-) anyerror!void {
+    module:       Ast.Module,
+    resolve:      *const Resolver.ResolveResult,
+    tc:           ?*const TypeChecker.TypeCheckResult,
+    alloc:        Allocator,
+    writer:       std.io.AnyWriter,
+    gui_backend:  GuiBackend,
+    native_uses:  ?*const std.StringHashMap(NativeUse),
+    emit_exports: bool,
+) anyerror!GenerateResult {
     var mixins = try collectMixins(module, alloc);
     defer mixins.deinit();
     var union_names = try collectUnionNames(module, alloc);
     defer union_names.deinit();
 
+    var uses_gui    = false;
+    var has_exports = false;
     const g = Generator{
-        .resolve   = resolve,
-        .tc        = tc,
-        .w         = writer,
-        .indent    = 0,
-        .owner     = "",
-        .in_method = false,
-        .mixins    = &mixins,
-        .alloc     = alloc,
+        .resolve     = resolve,
+        .tc          = tc,
+        .w           = writer,
+        .indent      = 0,
+        .owner       = "",
+        .in_method   = false,
+        .mixins      = &mixins,
+        .alloc       = alloc,
         .mutated        = null,
         .closure_vars   = null,
         .capture_fields = &.{},
         .union_names    = &union_names,
+        .gui_backend    = gui_backend,
+        .uses_gui_ptr   = &uses_gui,
+        .native_uses    = native_uses,
+        .emit_exports   = emit_exports,
+        .has_exports_ptr = &has_exports,
     };
     try g.genModule(module);
+    return GenerateResult{ .uses_gui = uses_gui, .has_exports = has_exports };
 }
 
 // ── Mixin pre-pass ────────────────────────────────────────────────────────────
@@ -266,6 +308,8 @@ fn refsInStmt(stmt: Ast.Stmt, r: *const Resolver.ResolveResult, o: *Refs) anyerr
         .assign_except => |s| { try refsInExpr(s.target, r, o); try refsInExpr(s.base, r, o); for (s.fields) |f| try refsInExpr(f.value, r, o); },
         .raise    => |s| { if (s.message) |m| try refsInExpr(m, r, o); if (s.details) |d| try refsInExpr(d, r, o); },
         .try_catch => |s| { try refsInStmts(s.body, r, o); for (s.clauses) |cl| try refsInStmts(cl.body, r, o); },
+        .guard => |s| { try refsInExpr(s.cond, r, o); try refsInStmts(s.else_body, r, o); },
+        .destruct => |s| try refsInExpr(s.init, r, o),
         .pass, .break_, .continue_ => {},
     }
 }
@@ -318,7 +362,9 @@ fn bodyHasRaise(stmts: []const Ast.Stmt) bool {
             },
             .with    => |s| if (bodyHasRaise(s.body)) return true,
             .defer_  => |s| return bodyHasRaise(&.{s.body}),
+            .guard   => |s| { if (exprHasTry(s.cond)) return true; if (bodyHasRaise(s.else_body)) return true; },
             .try_catch => {}, // try/catch absorbs raises — don't propagate
+            .destruct => {},
             else => {},
         }
     }
@@ -356,7 +402,9 @@ fn bodyNeedsErrVar(stmts: []const Ast.Stmt) bool {
             },
             .with    => |s| if (bodyNeedsErrVar(s.body)) return true,
             .defer_  => |s| return bodyNeedsErrVar(&.{s.body}),
+            .guard   => |s| { if (exprHasTry(s.cond)) return true; if (bodyNeedsErrVar(s.else_body)) return true; },
             .try_catch => {}, // inner try has its own err variable
+            .destruct => {},
             else => {},
         }
     }
@@ -447,8 +495,10 @@ fn refsInExpr(expr: *const Ast.Expr, r: *const Resolver.ResolveResult, o: *Refs)
             .stmts => |ss| try refsInStmts(ss, r, o),
         },
         .try_        => |e| try refsInExpr(e.expr, r, o),
+        .tuple_lit   => |e| { for (e.elems) |el| try refsInExpr(el, r, o); },
+        .this        => o.uses_self = true,  // extension methods: `this` means self is used
         .int_lit, .float_lit, .bool_lit, .char_lit,
-        .string_lit, .nil, .this, .zig_lit => {},
+        .string_lit, .nil, .zig_lit => {},
     }
 }
 
@@ -492,6 +542,7 @@ fn scanReturnedNamesInto(stmts: []const Ast.Stmt, set: *std.StringHashMap(void))
                 try scanReturnedNamesInto(s.body, set);
                 for (s.clauses) |cl| try scanReturnedNamesInto(cl.body, set);
             },
+            .guard => |s| try scanReturnedNamesInto(s.else_body, set),
             else => {},
         }
     }
@@ -508,52 +559,63 @@ fn collectIdentNames(expr: *const Ast.Expr, set: *std.StringHashMap(void)) !void
     }
 }
 
-fn scanMutations(stmts: []const Ast.Stmt, alloc: Allocator) !std.StringHashMap(void) {
+fn scanMutations(
+    stmts:  []const Ast.Stmt,
+    alloc:  Allocator,
+    tc_opt: ?*const TypeChecker.TypeCheckResult,
+) !std.StringHashMap(void) {
     var set = std.StringHashMap(void).init(alloc);
     errdefer set.deinit();
-    try scanMutationsInto(stmts, &set);
+    try scanMutationsInto(stmts, &set, tc_opt);
     return set;
 }
 
-fn scanMutationsInto(stmts: []const Ast.Stmt, set: *std.StringHashMap(void)) !void {
+fn scanMutationsInto(
+    stmts:  []const Ast.Stmt,
+    set:    *std.StringHashMap(void),
+    tc_opt: ?*const TypeChecker.TypeCheckResult,
+) !void {
     for (stmts) |stmt| {
         switch (stmt) {
             .assign  => |s| switch (s.target.*) {
                 // Bare `name = value` — marks `name` as mutated.
                 .ident => |e| try set.put(e.name, {}),
-                // `obj.member = value` — field mutation, not a local.
+                // `obj.member = value` — the object needs to be `var` in Zig.
+                .member => |m| if (m.object.* == .ident) try set.put(m.object.ident.name, {}),
                 else   => {},
             },
             .if_     => |s| {
-                try scanMutationsInto(s.then_body, set);
-                for (s.else_ifs) |ei| try scanMutationsInto(ei.body, set);
-                if (s.else_body) |eb| try scanMutationsInto(eb, set);
+                try scanMutationsInto(s.then_body, set, tc_opt);
+                for (s.else_ifs) |ei| try scanMutationsInto(ei.body, set, tc_opt);
+                if (s.else_body) |eb| try scanMutationsInto(eb, set, tc_opt);
             },
             .while_  => |s| {
-                try scanMutationsInto(s.body, set);
-                if (s.post_body) |pb| try scanMutationsInto(pb, set);
+                try scanMutationsInto(s.body, set, tc_opt);
+                if (s.post_body) |pb| try scanMutationsInto(pb, set, tc_opt);
             },
-            .for_in  => |s| try scanMutationsInto(s.body, set),
-            .for_num => |s| try scanMutationsInto(s.body, set),
+            .for_in  => |s| try scanMutationsInto(s.body, set, tc_opt),
+            .for_num => |s| try scanMutationsInto(s.body, set, tc_opt),
             .branch  => |s| {
-                for (s.on) |on| try scanMutationsInto(on.body, set);
-                if (s.else_) |eb| try scanMutationsInto(eb, set);
+                for (s.on) |on| try scanMutationsInto(on.body, set, tc_opt);
+                if (s.else_) |eb| try scanMutationsInto(eb, set, tc_opt);
             },
             // Scan expressions in remaining statement kinds for call-receivers.
-            .var_    => |n| { if (n.init) |e| try scanMutationsInExpr(e, set); },
-            .return_ => |s| { if (s.value) |v| try scanMutationsInExpr(v, set); },
-            .expr    => |e| try scanMutationsInExpr(e, set),
-            .print   => |s| { for (s.args) |a| try scanMutationsInExpr(a, set); },
+            .var_    => |n| { if (n.init) |e| try scanMutationsInExpr(e, set, tc_opt); },
+            .return_ => |s| { if (s.value) |v| try scanMutationsInExpr(v, set, tc_opt); },
+            .expr    => |e| try scanMutationsInExpr(e, set, tc_opt),
+            .print   => |s| { for (s.args) |a| try scanMutationsInExpr(a, set, tc_opt); },
             // `with target` — the target variable is mutated (fields are assigned).
             .with    => |s| {
                 if (s.target.* == .ident) try set.put(s.target.ident.name, {});
-                try scanMutationsInto(s.body, set);
+                try scanMutationsInto(s.body, set, tc_opt);
             },
             .try_catch => |s| {
-                try scanMutationsInto(s.body, set);
-                for (s.clauses) |cl| try scanMutationsInto(cl.body, set);
+                try scanMutationsInto(s.body, set, tc_opt);
+                for (s.clauses) |cl| try scanMutationsInto(cl.body, set, tc_opt);
             },
-            else     => {},
+            .guard    => |s| try scanMutationsInto(s.else_body, set, tc_opt),
+            .destruct => |s| try scanMutationsInExpr(s.init, set, tc_opt),
+            else      => {},
         }
     }
 }
@@ -561,7 +623,12 @@ fn scanMutationsInto(stmts: []const Ast.Stmt, set: *std.StringHashMap(void)) !vo
 /// Mark any local variable that is used directly as a method-call receiver as
 /// "mutated".  Zebra methods always take `self: *Owner`, so even a read-only
 /// call through a local requires that local to be declared `var`.
-fn scanMutationsInExpr(expr: *const Ast.Expr, set: *std.StringHashMap(void)) anyerror!void {
+/// Extension methods (from `extend` blocks) are pass-by-value and are NOT mutating.
+fn scanMutationsInExpr(
+    expr:   *const Ast.Expr,
+    set:    *std.StringHashMap(void),
+    tc_opt: ?*const TypeChecker.TypeCheckResult,
+) anyerror!void {
     switch (expr.*) {
         // obj.method(args) — if obj is a bare identifier, mark it as needing var
         // unless the method is a non-mutating stdlib operation (strings, reads).
@@ -599,24 +666,68 @@ fn scanMutationsInExpr(expr: *const Ast.Expr, set: *std.StringHashMap(void)) any
                     .{ "match",          {} }, .{ "find",           {} },
                     .{ "findAll",        {} }, .{ "replace",        {} },
                 });
-                if (non_mutating.get(method) == null and obj.* == .ident)
+                // Extension methods are pass-by-value: never require var on the receiver.
+                const is_ext_method = blk: {
+                    if (tc_opt) |tc| {
+                        if (obj.* == .ident) {
+                            const obj_type = tc.expr_types.get(obj) orelse .unknown;
+                            const tname: ?[]const u8 = switch (obj_type) {
+                                .string         => "String",
+                                .int            => "int",
+                                .uint           => "uint",
+                                .float          => "float",
+                                .bool           => "bool",
+                                .char           => "char",
+                                .string_builder => "StringBuilder",
+                                .named          => |sym| switch (sym.decl) {
+                                    .class     => |c| c.name,
+                                    .struct_   => |s| s.name,
+                                    .interface => |i| i.name,
+                                    else       => null,
+                                },
+                                else => null,
+                            };
+                            if (tname) |tn| {
+                                // Build key and check — use a fixed buffer to avoid alloc.
+                                var buf: [256]u8 = undefined;
+                                if (std.fmt.bufPrint(&buf, "{s}.{s}", .{tn, method})) |key| {
+                                    if (tc.ext_methods.get(key) != null) break :blk true;
+                                } else |_| {}
+                            }
+                        }
+                    }
+                    break :blk false;
+                };
+                if (!is_ext_method and non_mutating.get(method) == null and obj.* == .ident)
                     try set.put(obj.ident.name, {});
             }
             // Recurse into args.
-            for (e.args) |a| try scanMutationsInExpr(a.value, set);
+            for (e.args) |a| try scanMutationsInExpr(a.value, set, tc_opt);
         },
-        .binary   => |e| { try scanMutationsInExpr(e.left, set); try scanMutationsInExpr(e.right, set); },
-        .unary    => |e| try scanMutationsInExpr(e.operand, set),
-        .member   => |e| try scanMutationsInExpr(e.object, set),
-        .index    => |e| { try scanMutationsInExpr(e.object, set); try scanMutationsInExpr(e.index, set); },
-        .if_expr  => |e| { try scanMutationsInExpr(e.cond, set); try scanMutationsInExpr(e.then_expr, set); try scanMutationsInExpr(e.else_expr, set); },
-        .orelse_  => |e| { try scanMutationsInExpr(e.expr, set); try scanMutationsInExpr(e.fallback, set); },
-        .catch_   => |e| { try scanMutationsInExpr(e.expr, set); try scanMutationsInExpr(e.fallback, set); },
-        else      => {},
+        .binary    => |e| { try scanMutationsInExpr(e.left, set, tc_opt); try scanMutationsInExpr(e.right, set, tc_opt); },
+        .unary     => |e| try scanMutationsInExpr(e.operand, set, tc_opt),
+        .member    => |e| try scanMutationsInExpr(e.object, set, tc_opt),
+        .index     => |e| { try scanMutationsInExpr(e.object, set, tc_opt); try scanMutationsInExpr(e.index, set, tc_opt); },
+        .if_expr   => |e| { try scanMutationsInExpr(e.cond, set, tc_opt); try scanMutationsInExpr(e.then_expr, set, tc_opt); try scanMutationsInExpr(e.else_expr, set, tc_opt); },
+        .orelse_   => |e| { try scanMutationsInExpr(e.expr, set, tc_opt); try scanMutationsInExpr(e.fallback, set, tc_opt); },
+        .catch_    => |e| { try scanMutationsInExpr(e.expr, set, tc_opt); try scanMutationsInExpr(e.fallback, set, tc_opt); },
+        .tuple_lit => |e| { for (e.elems) |el| try scanMutationsInExpr(el, set, tc_opt); },
+        else       => {},
     }
 }
 
 /// True if `name` appears as an identifier anywhere in `stmts`.
+/// Returns the variable name being nil-checked in `x != nil` (for_then=true) or `x == nil` (for_then=false).
+fn nilNarrowVar(cond: *const Ast.Expr, for_then: bool) ?[]const u8 {
+    if (cond.* != .binary) return null;
+    const b = cond.binary;
+    const want: Ast.BinaryOp = if (for_then) .ne else .eq;
+    if (b.op != want) return null;
+    if (b.left.* == .ident and b.right.* == .nil) return b.left.ident.name;
+    if (b.right.* == .ident and b.left.* == .nil) return b.right.ident.name;
+    return null;
+}
+
 fn nameUsedInStmts(name: []const u8, stmts: []const Ast.Stmt) bool {
     for (stmts) |s| if (nameUsedInStmt(name, s)) return true;
     return false;
@@ -638,21 +749,27 @@ fn nameUsedInStmt(name: []const u8, stmt: Ast.Stmt) bool {
         .while_  => |s| nameUsedInExpr(name, s.cond) or nameUsedInStmts(name, s.body),
         .for_in  => |s| nameUsedInExpr(name, s.iter) or nameUsedInStmts(name, s.body),
         .for_num => |s| nameUsedInExpr(name, s.start) or nameUsedInExpr(name, s.stop) or nameUsedInStmts(name, s.body),
-        else     => false,
+        .guard    => |s| nameUsedInExpr(name, s.cond) or nameUsedInStmts(name, s.else_body),
+        .destruct => |s| nameUsedInExpr(name, s.init),
+        else      => false,
     };
 }
 fn nameUsedInExpr(name: []const u8, expr: *const Ast.Expr) bool {
     return switch (expr.*) {
-        .ident  => |e| std.mem.eql(u8, e.name, name),
-        .call   => |e| nameUsedInExpr(name, e.callee) or blk: {
+        .ident     => |e| std.mem.eql(u8, e.name, name),
+        .call      => |e| nameUsedInExpr(name, e.callee) or blk: {
             for (e.args) |a| if (nameUsedInExpr(name, a.value)) break :blk true;
             break :blk false;
         },
-        .member => |e| nameUsedInExpr(name, e.object),
-        .binary => |e| nameUsedInExpr(name, e.left) or nameUsedInExpr(name, e.right),
-        .unary  => |e| nameUsedInExpr(name, e.operand),
-        .index  => |e| nameUsedInExpr(name, e.object) or nameUsedInExpr(name, e.index),
-        else    => false,
+        .member    => |e| nameUsedInExpr(name, e.object),
+        .binary    => |e| nameUsedInExpr(name, e.left) or nameUsedInExpr(name, e.right),
+        .unary     => |e| nameUsedInExpr(name, e.operand),
+        .index     => |e| nameUsedInExpr(name, e.object) or nameUsedInExpr(name, e.index),
+        .tuple_lit => |e| blk: {
+            for (e.elems) |el| if (nameUsedInExpr(name, el)) break :blk true;
+            break :blk false;
+        },
+        else       => false,
     };
 }
 
@@ -684,6 +801,10 @@ const Generator = struct {
     /// closures).  Call sites emit `name.call(args)` instead of `name(args)`.
     /// Populated lazily as `genLocalVar` processes capture-lambda var decls.
     closure_vars: ?*std.StringHashMap(void),
+    /// Variable names that are known to be std.ArrayList at runtime, introduced
+    /// by `for k, v in HashMap(K, List(T))` loops.  `genForIn` checks this so
+    /// that `for elem in v` emits `for (v.items)` instead of `for (v)`.
+    list_loop_vars: ?*const std.StringHashMap(void) = null,
     /// Capture field names in scope when generating a lambda body that has a
     /// `capture` block.  Ident refs to these names become `self.name`.
     capture_fields: []const []const u8,
@@ -706,11 +827,45 @@ const Generator = struct {
     /// When a name is in this set, we skip emitting `defer _allocator.free(name)`
     /// because the caller takes ownership of the allocated string.
     returned_names: ?*const std.StringHashMap(void) = null,
+    /// Which GUI backend preamble to embed.
+    gui_backend: GuiBackend = .stub,
+    /// Set to true the first time any GUI API call is encountered.
+    /// Allows `generate()` to return a `GenerateResult` with `uses_gui`.
+    uses_gui_ptr: ?*bool = null,
+    /// When true, emit `export fn Owner_method(...)` wrappers after each
+    /// class/struct for eligible `shared` methods (lib mode only).
+    emit_exports: bool = false,
+    /// Points to the `has_exports` bool in `generate()`.  Set to true the
+    /// first time an export wrapper is emitted.
+    has_exports_ptr: ?*bool = null,
+    /// Variable names that are nil-narrowed in the current if-then scope.
+    /// These idents should be accessed with `.?` in Zig to unwrap the optional.
+    nil_narrowed: ?*const std.StringHashMap(void) = null,
+    /// Non-null inside `extend T` method bodies: the Zebra type of `self`/`this`.
+    /// Used so stdlib method calls on `self` dispatch correctly.
+    ext_self_type: ?TypeChecker.Type = null,
+    /// When set, genExpr substitutes the named expression pointer with this
+    /// variable name.  Used to hoist allocating receivers in `genReturn`.
+    expr_subst: ?struct { orig: *const Ast.Expr, name: []const u8 } = null,
+    /// Native (non-Zebra) `use` dep kinds.  Keyed by dotted Zebra path.
+    /// Null = all deps are Zebra-compiled; missing key = Zebra dep.
+    native_uses: ?*const std.StringHashMap(NativeUse) = null,
+    /// Non-empty when generating a TCO-transformed method: the current method
+    /// name.  `genReturn` checks tail-recursive calls against this name.
+    tco_method_name: []const u8 = "",
+    /// Parameter names of the TCO method (declaration order).
+    /// `genReturn` uses these to emit assignments before `continue`.
+    tco_params: []const []const u8 = &.{},
+    /// True when the TCO method is `shared` (class-level static).
+    tco_shared: bool = false,
 
     // ── Context-adjustment helpers ────────────────────────────────────────────
 
     fn withOwner(g: Generator, new_owner: []const u8) Generator {
         var c = g; c.owner = new_owner; return c;
+    }
+    fn withExtSelf(g: Generator, t: TypeChecker.Type) Generator {
+        var c = g; c.ext_self_type = t; return c;
     }
     fn asMethod(g: Generator) Generator {
         var c = g; c.in_method = true; return c;
@@ -736,6 +891,12 @@ const Generator = struct {
     fn withReturnedNames(g: Generator, rn: *const std.StringHashMap(void)) Generator {
         var c = g; c.returned_names = rn; return c;
     }
+    fn withNilNarrowed(g: Generator, nn: *const std.StringHashMap(void)) Generator {
+        var c = g; c.nil_narrowed = nn; return c;
+    }
+    fn withTco(g: Generator, method_name: []const u8, params: []const []const u8, shared: bool) Generator {
+        var c = g; c.tco_method_name = method_name; c.tco_params = params; c.tco_shared = shared; return c;
+    }
 
     // ── Low-level output ──────────────────────────────────────────────────────
 
@@ -756,10 +917,14 @@ const Generator = struct {
     fn genModule(g: Generator, module: Ast.Module) anyerror!void {
         try g.w.writeAll("// Generated by the Zebra compiler.\n// Source: ");
         try g.w.writeAll(module.file);
-        try g.w.writeAll("\n\nconst std = @import(\"std\");\n\n");
+        try g.w.writeAll("\n\nconst std     = @import(\"std\");\nconst builtin = @import(\"builtin\");\n\n");
         // Global allocator — used by List, HashMap, and allocating string ops.
-        try g.w.writeAll("var _gpa = std.heap.GeneralPurposeAllocator(.{}){};\n");
-        try g.w.writeAll("const _allocator = _gpa.allocator();\n\n");
+        // ArenaAllocator: individual free() calls are no-ops; everything released
+        // at program exit via _arena.deinit().  Much faster than GPA for programs
+        // that do many small allocations (string ops, trigram maps, etc.).
+        // For leak detection during development, swap to GeneralPurposeAllocator.
+        try g.w.writeAll("var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);\n");
+        try g.w.writeAll("const _allocator = _arena.allocator();\n\n");
         // Thread-local error context — populated by `raise` statements.
         try g.w.writeAll("const _Stringable = struct {\n");
         try g.w.writeAll("    ptr:         *anyopaque,\n");
@@ -770,6 +935,49 @@ const Generator = struct {
         try g.w.writeAll("};\n");
         try g.w.writeAll("const _ZebraErrorCtx = struct { message: []const u8 = \"\", details: ?_Stringable = null };\n");
         try g.w.writeAll("threadlocal var _error_ctx: _ZebraErrorCtx = .{};\n");
+        // ── Comparison helpers — handle both numeric and string ([]const u8) types ──
+        try g.w.writeAll(
+            \\fn _zebra_lt(a: anytype, b: anytype) bool {
+            \\    if (comptime @TypeOf(a) == []const u8) return std.mem.lessThan(u8, a, b);
+            \\    return a < b;
+            \\}
+            \\fn _zebra_le(a: anytype, b: anytype) bool {
+            \\    if (comptime @TypeOf(a) == []const u8) return std.mem.order(u8, a, b) != .gt;
+            \\    return a <= b;
+            \\}
+            \\fn _zebra_gt(a: anytype, b: anytype) bool {
+            \\    if (comptime @TypeOf(a) == []const u8) return std.mem.order(u8, a, b) == .gt;
+            \\    return a > b;
+            \\}
+            \\fn _zebra_ge(a: anytype, b: anytype) bool {
+            \\    if (comptime @TypeOf(a) == []const u8) return std.mem.order(u8, a, b) != .lt;
+            \\    return a >= b;
+            \\}
+        );
+        // ── Result(T, E) — functional error type ──────────────────────────────
+        try g.w.writeAll(
+            \\fn _Result(comptime T: type, comptime E: type) type {
+            \\    return union(enum) {
+            \\        ok: T,
+            \\        err: E,
+            \\        pub fn isOk(self: @This()) bool { return self == .ok; }
+            \\        pub fn isErr(self: @This()) bool { return self == .err; }
+            \\        pub fn unwrap(self: @This()) T {
+            \\            return switch (self) { .ok => |v| v, .err => std.debug.panic("unwrap() on error Result\n", .{}) };
+            \\        }
+            \\        pub fn unwrapOr(self: @This(), default: T) T {
+            \\            return switch (self) { .ok => |v| v, .err => default };
+            \\        }
+            \\        pub fn okValue(self: @This()) ?T {
+            \\            return switch (self) { .ok => |v| v, .err => null };
+            \\        }
+            \\        pub fn errValue(self: @This()) ?E {
+            \\            return switch (self) { .ok => null, .err => |e| e };
+            \\        }
+            \\    };
+            \\}
+            \\
+        );
         // ── String padding helpers ──────────────────────────────────────────
         try g.w.writeAll("fn _pad_left(s: []const u8, width: usize, fill: u8, alloc: std.mem.Allocator) []const u8 {\n");
         try g.w.writeAll("    if (s.len >= width) return s;\n");
@@ -792,6 +1000,27 @@ const Generator = struct {
         try g.w.writeAll("    @memcpy(buf[lpad .. lpad + s.len], s);\n");
         try g.w.writeAll("    @memset(buf[lpad + s.len ..], fill);\n");
         try g.w.writeAll("    return buf;\n}\n\n");
+        // ── List sort helpers ───────────────────────────────────────────────
+        try g.w.writeAll(
+            \\fn _zebra_sort_natural(comptime T: type, items: []T) void {
+            \\    const _I = struct {
+            \\        fn less(_: void, a: T, b: T) bool {
+            \\            if (comptime T == []const u8) return std.mem.lessThan(u8, a, b);
+            \\            return a < b;
+            \\        }
+            \\    };
+            \\    std.mem.sort(T, items, {}, _I.less);
+            \\}
+            \\fn _zebra_sort_by(comptime T: type, comptime cmp: anytype, items: []T) void {
+            \\    const _I = struct {
+            \\        fn less(_: void, a: T, b: T) bool {
+            \\            return cmp(a, b);
+            \\        }
+            \\    };
+            \\    std.mem.sort(T, items, {}, _I.less);
+            \\}
+            \\
+        );
         // ── HTTP networking helpers ─────────────────────────────────────────
         // HttpResponse text is heap-allocated for program duration (page_allocator avoids GPA leak tracking).
         try g.w.writeAll("const HttpResponse = struct { status: u16, text: []const u8 };\n");
@@ -914,6 +1143,25 @@ const Generator = struct {
         try g.w.writeAll("    return buf[0..n];\n");
         try g.w.writeAll("}\n");
         try g.w.writeAll("fn _udp_close(sock: UdpSocket) void { std.posix.close(sock.handle); }\n\n");
+        // ── Net.resolve helpers ────────────────────────────────────────────
+        try g.w.writeAll(
+            \\fn _net_resolve(host: []const u8) []const []const u8 {
+            \\    var _result: std.ArrayList([]const u8) = .{};
+            \\    const _list = std.net.getAddressList(std.heap.page_allocator, host, 0) catch return &.{};
+            \\    defer _list.deinit();
+            \\    for (_list.addrs) |_addr| {
+            \\        var _buf: [64]u8 = undefined;
+            \\        const _full = std.fmt.bufPrint(&_buf, "{f}", .{_addr}) catch continue;
+            \\        const _col = std.mem.lastIndexOfScalar(u8, _full, ':') orelse _full.len;
+            \\        var _ip = _full[0.._col];
+            \\        if (_ip.len >= 2 and _ip[0] == '[') _ip = _ip[1 .. _ip.len - 1];
+            \\        const _owned = std.heap.page_allocator.dupe(u8, _ip) catch continue;
+            \\        _result.append(std.heap.page_allocator, _owned) catch {};
+            \\    }
+            \\    return _result.toOwnedSlice(std.heap.page_allocator) catch &.{};
+            \\}
+            \\
+        );
         // ── Regex (Thompson NFA) helpers ───────────────────────────────────
         try g.w.writeAll(
             \\// ─── Thompson NFA regex engine ───────────────────────────────────────────────
@@ -970,7 +1218,7 @@ const Generator = struct {
             \\                _ = c.eat(); const slot: u8 = c.n_caps * 2; c.n_caps += 1;
             \\                const open = try c.addNode(.{ .kind = .save, .slot = slot });
             \\                if (try c.parseAlt()) |inner| {
-            \\                    c.patch(inner, try c.addNode(.{ .kind = .save, .slot = slot + 1 }));
+            \\                    c.patchFrag(inner, try c.addNode(.{ .kind = .save, .slot = slot + 1 }));
             \\                    _ = c.expect(')');
             \\                    const close: u32 = @intCast(c.nodes.items.len - 1);
             \\                    c.nodes.items[open].out1 = inner.start;
@@ -1135,72 +1383,443 @@ const Generator = struct {
             \\}
             \\
         );
-
-        // ── GUI (stub backend — 1 frame, prints to stderr) ─────────────────
+        // ── Regex capture-group extraction ─────────────────────────────────────
         try g.w.writeAll(
-            \\// ─── Gui stub backend ────────────────────────────────────────────────────────
-            \\const GuiContext = struct {
-            \\    pub fn text(self: GuiContext, s: []const u8) void {
-            \\        _ = self;
-            \\        std.debug.print("[gui] text: {s}\n", .{s});
+            \\const _MAX_SAVE_SLOTS: usize = 20; // 10 capture groups (open+close slots each)
+            \\const _RegThread = struct { state: u32, saves: [_MAX_SAVE_SLOTS]usize };
+            \\// Epsilon closure that threads per-state save vectors through the NFA.
+            \\// First-wins: if a state is already in cur, later paths are ignored
+            \\// (leftmost-greedy semantics).
+            \\fn _re_eclosure_s(
+            \\    re: *const Regex, cur: *std.ArrayListUnmanaged(_RegThread),
+            \\    vis: []bool, alloc: std.mem.Allocator,
+            \\    state: u32, saves: [_MAX_SAVE_SLOTS]usize, pos: usize,
+            \\) std.mem.Allocator.Error!void {
+            \\    if (state == 0xFFFF_FFFF or state >= re.nodes.len) return;
+            \\    if (vis[state]) return;
+            \\    vis[state] = true;
+            \\    const nd = &re.nodes[state];
+            \\    switch (nd.kind) {
+            \\        .split => {
+            \\            try _re_eclosure_s(re, cur, vis, alloc, nd.out1, saves, pos);
+            \\            try _re_eclosure_s(re, cur, vis, alloc, nd.out2, saves, pos);
+            \\        },
+            \\        .save => {
+            \\            var ns = saves;
+            \\            if (nd.slot < _MAX_SAVE_SLOTS) ns[nd.slot] = pos;
+            \\            try _re_eclosure_s(re, cur, vis, alloc, nd.out1, ns, pos);
+            \\        },
+            \\        else => try cur.append(alloc, .{ .state = state, .saves = saves }),
             \\    }
-            \\    pub fn separator(self: GuiContext) void {
-            \\        _ = self;
-            \\        std.debug.print("[gui] ---\n", .{});
+            \\}
+            \\fn _re_match_with_saves(re: *const Regex, input: []const u8, from: usize) ?[_MAX_SAVE_SLOTS]usize {
+            \\    const alloc = std.heap.page_allocator;
+            \\    const empty: [_MAX_SAVE_SLOTS]usize = [_]usize{0xFFFF_FFFF_FFFF_FFFF} ** _MAX_SAVE_SLOTS;
+            \\    var cur: std.ArrayListUnmanaged(_RegThread) = .{};
+            \\    defer cur.deinit(alloc);
+            \\    var nxt: std.ArrayListUnmanaged(_RegThread) = .{};
+            \\    defer nxt.deinit(alloc);
+            \\    const vis = alloc.alloc(bool, re.nodes.len) catch return null;
+            \\    defer alloc.free(vis);
+            \\    @memset(vis, false);
+            \\    _re_eclosure_s(re, &cur, vis, alloc, re.start, empty, from) catch return null;
+            \\    var last: ?[_MAX_SAVE_SLOTS]usize = null;
+            \\    for (cur.items) |t| { if (re.nodes[t.state].kind == .match) { last = t.saves; break; } }
+            \\    var pos = from;
+            \\    while (pos < input.len and cur.items.len > 0) : (pos += 1) {
+            \\        const ch = input[pos]; nxt.clearRetainingCapacity(); @memset(vis, false);
+            \\        for (cur.items) |t| {
+            \\            const nd = &re.nodes[t.state];
+            \\            const ok = switch (nd.kind) { .lit => nd.c == ch, .dot => ch != '\n', .cls => _rClsMatch(nd, ch), else => false };
+            \\            if (ok) _re_eclosure_s(re, &nxt, vis, alloc, nd.out1, t.saves, pos + 1) catch {};
+            \\        }
+            \\        std.mem.swap(std.ArrayListUnmanaged(_RegThread), &cur, &nxt);
+            \\        for (cur.items) |t| { if (re.nodes[t.state].kind == .match) { last = t.saves; break; } }
             \\    }
-            \\    pub fn sameLine(self: GuiContext) void {
-            \\        _ = self;
-            \\        std.debug.print("[gui] sameLine\n", .{});
+            \\    return last;
+            \\}
+            \\fn _regex_groups(re: Regex, input: []const u8) []const []const u8 {
+            \\    const alloc = std.heap.page_allocator;
+            \\    var start: usize = 0;
+            \\    while (start <= input.len) : (start += 1) {
+            \\        if (_re_match_with_saves(&re, input, start)) |saves| {
+            \\            var out: std.ArrayListUnmanaged([]const u8) = .{};
+            \\            var i: usize = 0;
+            \\            while (i + 1 < _MAX_SAVE_SLOTS) : (i += 2) {
+            \\                const s = saves[i]; const e = saves[i + 1];
+            \\                if (s == 0xFFFF_FFFF_FFFF_FFFF) break;
+            \\                if (e != 0xFFFF_FFFF_FFFF_FFFF and e >= s) out.append(alloc, input[s..e]) catch {};
+            \\            }
+            \\            return out.toOwnedSlice(alloc) catch &.{};
+            \\        }
             \\    }
-            \\    pub fn spacing(self: GuiContext) void {
-            \\        _ = self;
-            \\        std.debug.print("[gui] spacing\n", .{});
-            \\    }
-            \\    pub fn indent(self: GuiContext) void {
-            \\        _ = self;
-            \\        std.debug.print("[gui] indent\n", .{});
-            \\    }
-            \\    pub fn unindent(self: GuiContext) void {
-            \\        _ = self;
-            \\        std.debug.print("[gui] unindent\n", .{});
-            \\    }
-            \\    pub fn button(self: GuiContext, label: []const u8) bool {
-            \\        _ = self;
-            \\        std.debug.print("[gui] button: {s}\n", .{label});
-            \\        return false;
-            \\    }
-            \\    pub fn checkbox(self: GuiContext, label: []const u8, value: bool) bool {
-            \\        _ = self;
-            \\        std.debug.print("[gui] checkbox: {s} = {}\n", .{ label, value });
-            \\        return value;
-            \\    }
-            \\    pub fn slider(self: GuiContext, label: []const u8, value: f64, min: f64, max: f64) f64 {
-            \\        _ = self;
-            \\        std.debug.print("[gui] slider: {s} = {d} [{d}, {d}]\n", .{ label, value, min, max });
-            \\        return value;
-            \\    }
-            \\    pub fn input(self: GuiContext, label: []const u8, value: []const u8) []const u8 {
-            \\        _ = self;
-            \\        std.debug.print("[gui] input: {s} = {s}\n", .{ label, value });
-            \\        return value;
-            \\    }
-            \\    pub fn panel(self: GuiContext, label: []const u8, callback: anytype) void {
-            \\        std.debug.print("[gui] panel: {s}\n", .{label});
-            \\        if (comptime @typeInfo(@TypeOf(callback)) == .@"fn") callback(self) else callback.call(self);
-            \\    }
-            \\    pub fn window(self: GuiContext, label: []const u8, callback: anytype) void {
-            \\        std.debug.print("[gui] window: {s}\n", .{label});
-            \\        if (comptime @typeInfo(@TypeOf(callback)) == .@"fn") callback(self) else callback.call(self);
-            \\    }
-            \\};
-            \\fn _gui_run(title: []const u8, width: i64, height: i64, frame: anytype) void {
-            \\    _ = title; _ = width; _ = height;
-            \\    var _mframe = frame;
-            \\    const _g = GuiContext{};
-            \\    if (comptime @typeInfo(@TypeOf(frame)) == .@"fn") frame(_g) else _mframe.call(_g);
+            \\    return &.{};
             \\}
             \\
         );
+
+        // ── GUI: _GuiBackend fn-ptr isolation + GuiContext stable surface ──────
+        try g.w.writeAll(
+            \\// ─── GUI: backend isolation ──────────────────────────────────────────────────
+            \\// _GuiBackend is an fn-ptr struct.  Swap `_gui_active_backend` to change
+            \\// the renderer without touching user code or GuiContext.
+            \\const _GuiBackend = struct {
+            \\    initFn:        *const fn (title: []const u8, width: i64, height: i64) anyerror!void,
+            \\    deinitFn:      *const fn () void,
+            \\    newFrameFn:    *const fn () bool,
+            \\    endFrameFn:    *const fn () void,
+            \\    textFn:        *const fn (s: []const u8) void,
+            \\    separatorFn:   *const fn () void,
+            \\    sameLineFn:    *const fn () void,
+            \\    spacingFn:     *const fn () void,
+            \\    indentFn:      *const fn () void,
+            \\    unindentFn:    *const fn () void,
+            \\    buttonFn:      *const fn (label: []const u8) bool,
+            \\    checkboxFn:    *const fn (label: []const u8, value: bool) bool,
+            \\    sliderFn:      *const fn (label: []const u8, value: f64, min: f64, max: f64) f64,
+            \\    inputFn:       *const fn (label: []const u8, value: []const u8) []const u8,
+            \\    inputMultilineFn: *const fn (label: []const u8, value: []const u8, width: f64, height: f64) []const u8,
+            \\    beginPanelFn:  *const fn (label: []const u8) bool,
+            \\    endPanelFn:    *const fn () void,
+            \\    beginWindowFn: *const fn (label: []const u8) bool,
+            \\    endWindowFn:   *const fn () void,
+            \\};
+            \\const GuiContext = struct {
+            \\    _b: *const _GuiBackend,
+            \\    pub fn text(self: GuiContext, s: []const u8) void { self._b.textFn(s); }
+            \\    pub fn separator(self: GuiContext) void { self._b.separatorFn(); }
+            \\    pub fn sameLine(self: GuiContext) void { self._b.sameLineFn(); }
+            \\    pub fn spacing(self: GuiContext) void { self._b.spacingFn(); }
+            \\    pub fn indent(self: GuiContext) void { self._b.indentFn(); }
+            \\    pub fn unindent(self: GuiContext) void { self._b.unindentFn(); }
+            \\    pub fn button(self: GuiContext, label: []const u8) bool { return self._b.buttonFn(label); }
+            \\    pub fn checkbox(self: GuiContext, label: []const u8, value: bool) bool { return self._b.checkboxFn(label, value); }
+            \\    pub fn slider(self: GuiContext, label: []const u8, value: f64, min: f64, max: f64) f64 { return self._b.sliderFn(label, value, min, max); }
+            \\    pub fn input(self: GuiContext, label: []const u8, value: []const u8) []const u8 { return self._b.inputFn(label, value); }
+            \\    pub fn inputMultiline(self: GuiContext, label: []const u8, value: []const u8, width: f64, height: f64) []const u8 { return self._b.inputMultilineFn(label, value, width, height); }
+            \\    pub fn panel(self: GuiContext, label: []const u8, callback: anytype) void {
+            \\        if (self._b.beginPanelFn(label)) {
+            \\            if (comptime @typeInfo(@TypeOf(callback)) == .@"fn") callback(self) else callback.call(self);
+            \\            self._b.endPanelFn();
+            \\        }
+            \\    }
+            \\    pub fn window(self: GuiContext, label: []const u8, callback: anytype) void {
+            \\        if (self._b.beginWindowFn(label)) {
+            \\            if (comptime @typeInfo(@TypeOf(callback)) == .@"fn") callback(self) else callback.call(self);
+            \\            self._b.endWindowFn();
+            \\        }
+            \\    }
+            \\};
+            \\fn _gui_run(title: []const u8, width: i64, height: i64, frame: anytype) void {
+            \\    _gui_active_backend.initFn(title, width, height) catch @panic("gui init failed");
+            \\    defer _gui_active_backend.deinitFn();
+            \\    const _g = GuiContext{ ._b = &_gui_active_backend };
+            \\    if (comptime @typeInfo(@TypeOf(frame)) == .@"fn") {
+            \\        while (_gui_active_backend.newFrameFn()) {
+            \\            frame(_g);
+            \\            _gui_active_backend.endFrameFn();
+            \\        }
+            \\    } else {
+            \\        var _mframe = frame;
+            \\        while (_gui_active_backend.newFrameFn()) {
+            \\            _mframe.call(_g);
+            \\            _gui_active_backend.endFrameFn();
+            \\        }
+            \\    }
+            \\}
+            \\
+        );
+        // ── Backend-specific implementation ────────────────────────────────────
+        switch (g.gui_backend) {
+            .stub => try g.w.writeAll(
+                \\// ─── Stub backend (single frame, prints to stderr) ───────────────────────────
+                \\fn _stub_init(title: []const u8, width: i64, height: i64) anyerror!void {
+                \\    _ = title; _ = width; _ = height;
+                \\}
+                \\fn _stub_deinit() void {}
+                \\var _stub_frame_count: u8 = 0;
+                \\fn _stub_new_frame() bool {
+                \\    if (_stub_frame_count >= 1) return false;
+                \\    _stub_frame_count += 1;
+                \\    return true;
+                \\}
+                \\fn _stub_end_frame() void {}
+                \\fn _stub_text(s: []const u8) void { std.debug.print("[gui] text: {s}\n", .{s}); }
+                \\fn _stub_separator() void { std.debug.print("[gui] ---\n", .{}); }
+                \\fn _stub_same_line() void { std.debug.print("[gui] sameLine\n", .{}); }
+                \\fn _stub_spacing() void { std.debug.print("[gui] spacing\n", .{}); }
+                \\fn _stub_indent() void { std.debug.print("[gui] indent\n", .{}); }
+                \\fn _stub_unindent() void { std.debug.print("[gui] unindent\n", .{}); }
+                \\fn _stub_button(label: []const u8) bool {
+                \\    std.debug.print("[gui] button: {s}\n", .{label});
+                \\    return false;
+                \\}
+                \\fn _stub_checkbox(label: []const u8, value: bool) bool {
+                \\    std.debug.print("[gui] checkbox: {s} = {}\n", .{ label, value });
+                \\    return value;
+                \\}
+                \\fn _stub_slider(label: []const u8, value: f64, min: f64, max: f64) f64 {
+                \\    std.debug.print("[gui] slider: {s} = {d} [{d}, {d}]\n", .{ label, value, min, max });
+                \\    return value;
+                \\}
+                \\fn _stub_input(label: []const u8, value: []const u8) []const u8 {
+                \\    std.debug.print("[gui] input: {s} = {s}\n", .{ label, value });
+                \\    return value;
+                \\}
+                \\fn _stub_input_multiline(label: []const u8, value: []const u8, width: f64, height: f64) []const u8 {
+                \\    std.debug.print("[gui] inputMultiline: {s} ({d}x{d})\n", .{ label, width, height });
+                \\    return value;
+                \\}
+                \\fn _stub_begin_panel(label: []const u8) bool {
+                \\    std.debug.print("[gui] panel: {s}\n", .{label});
+                \\    return true;
+                \\}
+                \\fn _stub_end_panel() void {}
+                \\fn _stub_begin_window(label: []const u8) bool {
+                \\    std.debug.print("[gui] window: {s}\n", .{label});
+                \\    return true;
+                \\}
+                \\fn _stub_end_window() void {}
+                \\const _gui_stub_backend = _GuiBackend{
+                \\    .initFn        = _stub_init,
+                \\    .deinitFn      = _stub_deinit,
+                \\    .newFrameFn    = _stub_new_frame,
+                \\    .endFrameFn    = _stub_end_frame,
+                \\    .textFn        = _stub_text,
+                \\    .separatorFn   = _stub_separator,
+                \\    .sameLineFn    = _stub_same_line,
+                \\    .spacingFn     = _stub_spacing,
+                \\    .indentFn      = _stub_indent,
+                \\    .unindentFn    = _stub_unindent,
+                \\    .buttonFn      = _stub_button,
+                \\    .checkboxFn    = _stub_checkbox,
+                \\    .sliderFn      = _stub_slider,
+                \\    .inputFn       = _stub_input,
+                \\    .inputMultilineFn = _stub_input_multiline,
+                \\    .beginPanelFn  = _stub_begin_panel,
+                \\    .endPanelFn    = _stub_end_panel,
+                \\    .beginWindowFn = _stub_begin_window,
+                \\    .endWindowFn   = _stub_end_window,
+                \\};
+                \\const _gui_active_backend: _GuiBackend = _gui_stub_backend;
+                \\
+            ),
+            // ── zgui GLFW+OpenGL3 backend ──────────────────────────────────────
+            // Requires a `zig build` project (not bare `zig run`).
+            // main.zig wires up a generated project dir when uses_gui is true.
+            .glfw => try g.w.writeAll(
+                \\// ─── zgui GLFW+OpenGL3 backend ──────────────────────────────────────────────
+                \\const zgui    = @import("zgui");
+                \\const zglfw   = @import("zglfw");
+                \\const zopengl = @import("zopengl");
+                \\var _gl_window: *zglfw.Window = undefined;
+                \\fn _imgui_init(title: []const u8, width: i64, height: i64) anyerror!void {
+                \\    try zglfw.init();
+                \\    errdefer zglfw.terminate();
+                \\    zglfw.windowHint(.context_version_major, 3);
+                \\    zglfw.windowHint(.context_version_minor, 3);
+                \\    zglfw.windowHint(.opengl_profile, .opengl_core_profile);
+                \\    const _title_z = try _allocator.dupeZ(u8, title);
+                \\    defer _allocator.free(_title_z);
+                \\    _gl_window = try zglfw.createWindow(
+                \\        @intCast(width), @intCast(height), _title_z, null, null,
+                \\    );
+                \\    errdefer _gl_window.destroy();
+                \\    zglfw.makeContextCurrent(_gl_window);
+                \\    zglfw.swapInterval(1);
+                \\    try zopengl.loadCoreProfile(zglfw.getProcAddress, 3, 3);
+                \\    zgui.init(_allocator);
+                \\    zgui.backend.init(_gl_window);
+                \\}
+                \\fn _imgui_deinit() void {
+                \\    zgui.backend.deinit();
+                \\    zgui.deinit();
+                \\    _gl_window.destroy();
+                \\    zglfw.terminate();
+                \\}
+                \\fn _imgui_new_frame() bool {
+                \\    zglfw.pollEvents();
+                \\    if (_gl_window.shouldClose()) return false;
+                \\    const _fb = _gl_window.getFramebufferSize();
+                \\    zgui.backend.newFrame(@intCast(_fb[0]), @intCast(_fb[1]));
+                \\    // Auto-wrap all frame widgets in a fullscreen borderless window.
+                \\    zgui.setNextWindowPos(.{ .x = 0, .y = 0 });
+                \\    zgui.setNextWindowSize(.{ .w = @floatFromInt(_fb[0]), .h = @floatFromInt(_fb[1]) });
+                \\    _ = zgui.begin("##_main", .{ .flags = .{
+                \\        .no_title_bar = true, .no_resize = true,
+                \\        .no_move = true,      .no_collapse = true,
+                \\    }});
+                \\    return true;
+                \\}
+                \\fn _imgui_end_frame() void {
+                \\    zgui.end();
+                \\    const _fb = _gl_window.getFramebufferSize();
+                \\    zopengl.bindings.viewport(0, 0, _fb[0], _fb[1]);
+                \\    zopengl.bindings.clearColor(0.1, 0.1, 0.1, 1.0);
+                \\    zopengl.bindings.clear(zopengl.bindings.COLOR_BUFFER_BIT);
+                \\    zgui.backend.draw();
+                \\    _gl_window.swapBuffers();
+                \\}
+                \\fn _imgui_text(s: []const u8) void { zgui.textUnformatted(s); }
+                \\fn _imgui_separator() void { zgui.separator(); }
+                \\fn _imgui_same_line() void { zgui.sameLine(.{}); }
+                \\fn _imgui_spacing() void { zgui.spacing(); }
+                \\fn _imgui_indent() void { zgui.indent(.{}); }
+                \\fn _imgui_unindent() void { zgui.unindent(.{}); }
+                \\fn _imgui_button(label: []const u8) bool {
+                \\    const _z = _allocator.dupeZ(u8, label) catch return false;
+                \\    defer _allocator.free(_z);
+                \\    return zgui.button(_z, .{});
+                \\}
+                \\fn _imgui_checkbox(label: []const u8, value: bool) bool {
+                \\    const _z = _allocator.dupeZ(u8, label) catch return value;
+                \\    defer _allocator.free(_z);
+                \\    var _v = value;
+                \\    _ = zgui.checkbox(_z, .{ .v = &_v });
+                \\    return _v;
+                \\}
+                \\fn _imgui_slider(label: []const u8, value: f64, min: f64, max: f64) f64 {
+                \\    const _z = _allocator.dupeZ(u8, label) catch return value;
+                \\    defer _allocator.free(_z);
+                \\    var _v: f32 = @floatCast(value);
+                \\    _ = zgui.sliderFloat(_z, .{ .v = &_v, .min = @floatCast(min), .max = @floatCast(max) });
+                \\    return @floatCast(_v);
+                \\}
+                \\fn _imgui_input(label: []const u8, value: []const u8) []const u8 {
+                \\    const _z = _allocator.dupeZ(u8, label) catch return value;
+                \\    defer _allocator.free(_z);
+                \\    var _buf: [256:0]u8 = @splat(0);
+                \\    const _n = @min(value.len, _buf.len - 1);
+                \\    @memcpy(_buf[0.._n], value[0.._n]);
+                \\    if (zgui.inputText(_z, .{ .buf = &_buf })) {
+                \\        const _len = std.mem.indexOfScalar(u8, &_buf, 0) orelse _buf.len;
+                \\        return _allocator.dupe(u8, _buf[0.._len]) catch value;
+                \\    }
+                \\    return value;
+                \\}
+                \\fn _imgui_input_multiline(label: []const u8, value: []const u8, width: f64, height: f64) []const u8 {
+                \\    const _z = _allocator.dupeZ(u8, label) catch return value;
+                \\    defer _allocator.free(_z);
+                \\    var _buf: [65536:0]u8 = @splat(0);
+                \\    const _n = @min(value.len, _buf.len - 1);
+                \\    @memcpy(_buf[0.._n], value[0.._n]);
+                \\    if (zgui.inputTextMultiline(_z, .{ .buf = &_buf, .w = @floatCast(width), .h = @floatCast(height) })) {
+                \\        const _len = std.mem.indexOfScalar(u8, &_buf, 0) orelse _buf.len;
+                \\        return _allocator.dupe(u8, _buf[0.._len]) catch value;
+                \\    }
+                \\    return value;
+                \\}
+                \\fn _imgui_begin_panel(label: []const u8) bool {
+                \\    const _z = _allocator.dupeZ(u8, label) catch return true;
+                \\    defer _allocator.free(_z);
+                \\    return zgui.collapsingHeader(_z, .{});
+                \\}
+                \\fn _imgui_end_panel() void {}
+                \\fn _imgui_begin_window(label: []const u8) bool {
+                \\    const _z = _allocator.dupeZ(u8, label) catch return true;
+                \\    defer _allocator.free(_z);
+                \\    return zgui.begin(_z, .{});
+                \\}
+                \\fn _imgui_end_window() void { zgui.end(); }
+                \\const _gui_imgui_backend = _GuiBackend{
+                \\    .initFn        = _imgui_init,
+                \\    .deinitFn      = _imgui_deinit,
+                \\    .newFrameFn    = _imgui_new_frame,
+                \\    .endFrameFn    = _imgui_end_frame,
+                \\    .textFn        = _imgui_text,
+                \\    .separatorFn   = _imgui_separator,
+                \\    .sameLineFn    = _imgui_same_line,
+                \\    .spacingFn     = _imgui_spacing,
+                \\    .indentFn      = _imgui_indent,
+                \\    .unindentFn    = _imgui_unindent,
+                \\    .buttonFn      = _imgui_button,
+                \\    .checkboxFn    = _imgui_checkbox,
+                \\    .sliderFn      = _imgui_slider,
+                \\    .inputFn       = _imgui_input,
+                \\    .inputMultilineFn = _imgui_input_multiline,
+                \\    .beginPanelFn  = _imgui_begin_panel,
+                \\    .endPanelFn    = _imgui_end_panel,
+                \\    .beginWindowFn = _imgui_begin_window,
+                \\    .endWindowFn   = _imgui_end_window,
+                \\};
+                \\const _gui_active_backend: _GuiBackend = _gui_imgui_backend;
+                \\
+            ),
+            // sdl2 / dx12 not yet implemented — fall through to stub.
+            .sdl2, .dx12 => try g.w.writeAll(
+                \\// TODO: sdl2/dx12 GUI backend not yet implemented; using stub.
+                \\fn _stub_init(title: []const u8, width: i64, height: i64) anyerror!void {
+                \\    _ = title; _ = width; _ = height;
+                \\}
+                \\fn _stub_deinit() void {}
+                \\var _stub_frame_count: u8 = 0;
+                \\fn _stub_new_frame() bool {
+                \\    if (_stub_frame_count >= 1) return false;
+                \\    _stub_frame_count += 1;
+                \\    return true;
+                \\}
+                \\fn _stub_end_frame() void {}
+                \\fn _stub_text(s: []const u8) void { std.debug.print("[gui] text: {s}\n", .{s}); }
+                \\fn _stub_separator() void { std.debug.print("[gui] ---\n", .{}); }
+                \\fn _stub_same_line() void { std.debug.print("[gui] sameLine\n", .{}); }
+                \\fn _stub_spacing() void { std.debug.print("[gui] spacing\n", .{}); }
+                \\fn _stub_indent() void { std.debug.print("[gui] indent\n", .{}); }
+                \\fn _stub_unindent() void { std.debug.print("[gui] unindent\n", .{}); }
+                \\fn _stub_button(label: []const u8) bool {
+                \\    std.debug.print("[gui] button: {s}\n", .{label});
+                \\    return false;
+                \\}
+                \\fn _stub_checkbox(label: []const u8, value: bool) bool {
+                \\    std.debug.print("[gui] checkbox: {s} = {}\n", .{ label, value });
+                \\    return value;
+                \\}
+                \\fn _stub_slider(label: []const u8, value: f64, min: f64, max: f64) f64 {
+                \\    std.debug.print("[gui] slider: {s} = {d} [{d}, {d}]\n", .{ label, value, min, max });
+                \\    return value;
+                \\}
+                \\fn _stub_input(label: []const u8, value: []const u8) []const u8 {
+                \\    std.debug.print("[gui] input: {s} = {s}\n", .{ label, value });
+                \\    return value;
+                \\}
+                \\fn _stub_input_multiline(label: []const u8, value: []const u8, width: f64, height: f64) []const u8 {
+                \\    std.debug.print("[gui] inputMultiline: {s} ({d}x{d})\n", .{ label, width, height });
+                \\    return value;
+                \\}
+                \\fn _stub_begin_panel(label: []const u8) bool {
+                \\    std.debug.print("[gui] panel: {s}\n", .{label});
+                \\    return true;
+                \\}
+                \\fn _stub_end_panel() void {}
+                \\fn _stub_begin_window(label: []const u8) bool {
+                \\    std.debug.print("[gui] window: {s}\n", .{label});
+                \\    return true;
+                \\}
+                \\fn _stub_end_window() void {}
+                \\const _gui_stub_backend = _GuiBackend{
+                \\    .initFn        = _stub_init,
+                \\    .deinitFn      = _stub_deinit,
+                \\    .newFrameFn    = _stub_new_frame,
+                \\    .endFrameFn    = _stub_end_frame,
+                \\    .textFn        = _stub_text,
+                \\    .separatorFn   = _stub_separator,
+                \\    .sameLineFn    = _stub_same_line,
+                \\    .spacingFn     = _stub_spacing,
+                \\    .indentFn      = _stub_indent,
+                \\    .unindentFn    = _stub_unindent,
+                \\    .buttonFn      = _stub_button,
+                \\    .checkboxFn    = _stub_checkbox,
+                \\    .sliderFn      = _stub_slider,
+                \\    .inputFn       = _stub_input,
+                \\    .inputMultilineFn = _stub_input_multiline,
+                \\    .beginPanelFn  = _stub_begin_panel,
+                \\    .endPanelFn    = _stub_end_panel,
+                \\    .beginWindowFn = _stub_begin_window,
+                \\    .endWindowFn   = _stub_end_window,
+                \\};
+                \\const _gui_active_backend: _GuiBackend = _gui_stub_backend;
+                \\
+            ),
+        }
 
         for (module.decls) |decl| try g.genTopDecl(decl);
 
@@ -1215,7 +1834,7 @@ const Generator = struct {
             };
             const call_prefix: []const u8 = if (main_throws) "try " else "";
             try g.w.print(
-                "pub fn main() !void {{\n    defer _ = _gpa.deinit();\n    {s}{s}.main();\n}}\n",
+                "pub fn main() !void {{\n    defer _arena.deinit();\n    {s}{s}.main();\n}}\n",
                 .{ call_prefix, class_name },
             );
         }
@@ -1246,16 +1865,35 @@ const Generator = struct {
         // Alias = last segment of dotted path:  "Math.Utils" → "Utils"
         const last_dot = std.mem.lastIndexOf(u8, n.path, ".");
         const alias = if (last_dot) |d| n.path[d + 1..] else n.path;
-        // Import path: replace '.' with '/' and append ".zig".
-        // Always use forward slashes — Zig @import accepts them on all platforms.
+        // Import path: replace '.' with '/' and use forward slashes throughout.
+        // Zig @import accepts forward slashes on all platforms.
         const import_rel = try std.mem.replaceOwned(u8, g.alloc, n.path, ".", "/");
         defer g.alloc.free(import_rel);
-        // Directly unwrap the named class from the module file so that
-        //   Utils.double(5)  in Zebra  →  Utils.double(5)  in Zig
-        // (otherwise it would be Utils.Utils.double(5), which is awkward).
-        // Convention: every .zbr file exports a type with the same name as
-        // the last path segment.
-        try g.w.print("const {s} = @import(\"{s}.zig\").{s};\n", .{ alias, import_rel, alias });
+
+        // Check if this dep is a native Zig or C file.
+        const native_kind: ?NativeUse = if (g.native_uses) |nu| nu.get(n.path) else null;
+
+        if (native_kind) |kind| switch (kind) {
+            .zig => {
+                // Native Zig file: import the whole module without unwrapping a
+                // single class.  The user accesses its exports as `Alias.Foo`.
+                try g.w.print("const {s} = @import(\"{s}.zig\");\n", .{ alias, import_rel });
+            },
+            .c_with_header => {
+                // C file + matching header: expose via cImport so Zebra code
+                // can call C functions as `Alias.some_fn(...)`.
+                try g.w.print("const {s} = @cImport(@cInclude(\"{s}.h\"));\n", .{ alias, import_rel });
+            },
+            .c_no_header => {
+                // C file without a header: compiled as a translation unit.
+                // Declare needed symbols via zig"extern fn ..." in Zebra source.
+                try g.w.print("// {s}: C source compiled inline (use zig\"extern fn...\" for declarations)\n", .{alias});
+            },
+        } else {
+            // Zebra dep: the generated .zig exports a type matching the last path
+            // segment.  Unwrap it so `Utils.method()` works without double qualifier.
+            try g.w.print("const {s} = @import(\"{s}.zig\").{s};\n", .{ alias, import_rel, alias });
+        }
     }
 
     // ── namespace ─────────────────────────────────────────────────────────────
@@ -1270,6 +1908,70 @@ const Generator = struct {
     }
 
     // ── class ─────────────────────────────────────────────────────────────────
+
+    // ── C export helpers ──────────────────────────────────────────────────────
+
+    /// True if `tr` maps to a plain C primitive (no slices, generics, optionals).
+    fn isCExportable(tr: Ast.TypeRef) bool {
+        return switch (tr) {
+            .void_  => true,
+            .named  => |n| std.StaticStringMap(void).initComptime(&.{
+                .{ "int",     {} }, .{ "uint",    {} }, .{ "float",   {} },
+                .{ "bool",    {} }, .{ "char",    {} },
+                .{ "int8",    {} }, .{ "int16",   {} }, .{ "int32",   {} }, .{ "int64",   {} },
+                .{ "uint8",   {} }, .{ "uint16",  {} }, .{ "uint32",  {} }, .{ "uint64",  {} },
+                .{ "float32", {} }, .{ "float64", {} },
+            }).has(n.name),
+            else    => false,
+        };
+    }
+
+    /// True if a `shared def` method can be exported with C linkage.
+    /// Requirements: shared, no throws, body present, all param/return types
+    /// are C-compatible primitives.
+    fn isMethodCExportable(n: *const Ast.DeclMethod) bool {
+        if (!n.mods.shared) return false;
+        if (n.throws) return false;
+        if (n.body == null) return false;
+        for (n.params) |p| {
+            const tr = p.type_ orelse return false;
+            if (!isCExportable(tr)) return false;
+        }
+        if (n.return_type) |rt| if (!isCExportable(rt)) return false;
+        return true;
+    }
+
+    /// Emit file-scope `export fn OwnerName_methodName(...)` wrappers for all
+    /// eligible shared methods in `members`.  Updates `has_exports_ptr` when any
+    /// wrapper is emitted.
+    fn genExportWrappers(g: Generator, owner_name: []const u8, members: []const Ast.Decl) anyerror!void {
+        if (!g.emit_exports) return;
+        for (members) |decl| {
+            const n = switch (decl) { .method => |m| m, else => continue };
+            if (!isMethodCExportable(n)) continue;
+
+            const returns_void = n.return_type == null or n.return_type.? == .void_;
+            try g.w.print("export fn {s}_{s}(", .{ owner_name, n.name });
+            for (n.params, 0..) |p, i| {
+                if (i > 0) try g.w.writeAll(", ");
+                try g.w.print("{s}: ", .{p.name});
+                try g.genType(p.type_.?);
+            }
+            try g.w.writeAll(") ");
+            if (n.return_type) |rt| try g.genType(rt) else try g.w.writeAll("void");
+            try g.w.print(" {{ {s}{s}.{s}(", .{
+                if (returns_void) "" else "return ",
+                owner_name,
+                n.name,
+            });
+            for (n.params, 0..) |p, i| {
+                if (i > 0) try g.w.writeAll(", ");
+                try g.w.writeAll(p.name);
+            }
+            try g.w.writeAll("); }\n");
+            if (g.has_exports_ptr) |p| p.* = true;
+        }
+    }
 
     fn genClass(g: Generator, n: *Ast.DeclClass) anyerror!void {
         const cg = g.withOwner(n.name);
@@ -1311,6 +2013,7 @@ const Generator = struct {
 
         try g.writeIndent();
         try g.w.writeAll("};\n\n");
+        try g.genExportWrappers(n.name, n.members);
     }
 
     // ── Member dispatch ───────────────────────────────────────────────────────
@@ -1333,6 +2036,30 @@ const Generator = struct {
             // `shared var` → Zig namespace-level declaration inside the struct.
             // Accessed as StructName.field, not instance.field.
             const kw: []const u8 = if (n.mods.readonly or n.is_const) "const" else "var";
+            // Stdlib constructor shorthand: `shared var x as List(T) = List()` or HashMap variant.
+            // Must emit `std.ArrayList(T){}` / `std.StringHashMap(T).init(_allocator)`, not `List()`.
+            if (n.init) |e| {
+                if (n.type_) |tr| {
+                    if (tr == .generic) {
+                        const gtr = tr.generic;
+                        if (e.* == .call and e.call.args.len == 0 and
+                            e.call.callee.* == .ident and
+                            std.mem.eql(u8, e.call.callee.ident.name, gtr.name))
+                        {
+                            try g.w.writeAll("pub ");
+                            try g.w.writeAll(kw);
+                            try g.w.writeAll(" ");
+                            try g.w.writeAll(n.name);
+                            try g.w.writeAll(": ");
+                            try g.genType(tr);
+                            try g.w.writeAll(" = ");
+                            try g.genStdlibInit(gtr);
+                            try g.w.writeAll(";\n");
+                            return;
+                        }
+                    }
+                }
+            }
             try g.w.writeAll("pub ");
             try g.w.writeAll(kw);
             try g.w.writeAll(" ");
@@ -1407,6 +2134,7 @@ const Generator = struct {
         }
         try g.writeIndent();
         try g.w.writeAll("};\n\n");
+        try g.genExportWrappers(n.name, n.members);
     }
 
     // ── enum ──────────────────────────────────────────────────────────────────
@@ -1460,11 +2188,85 @@ const Generator = struct {
 
     fn genExtend(g: Generator, n: *Ast.DeclExtend) anyerror!void {
         const tname = typeRefSimpleName(n.target) orelse "Unknown";
-        const eg = g.withOwner(tname);
         try g.writeIndent();
         try g.w.print("// extend {s}\n", .{tname});
-        for (n.members) |decl| try eg.genMember(decl);
+        for (n.members) |decl| switch (decl) {
+            .method => |m| try g.genExtMethod(tname, m),
+            else    => {},
+        };
         try g.w.writeAll("\n");
+    }
+
+    /// Emit a standalone Zig function for an extension method.
+    ///
+    /// `extend String\n    def words as List(str)` →
+    /// `fn _ext_String_words(self: []const u8) !std.ArrayList([]const u8) { ... }`
+    fn genExtMethod(g: Generator, tname: []const u8, m: *Ast.DeclMethod) anyerror!void {
+        const mg = g.asMethod();
+        // Compute the Zebra type of `self` so stdlib method calls on `this` dispatch correctly.
+        const self_kind: TypeChecker.Type = blk: {
+            const sk = Builtins.scalarKind(tname);
+            break :blk switch (sk) {
+                .int, .int_n  => .int,
+                .uint, .uint_n => .uint,
+                .float, .float_n => .float,
+                .bool         => .bool,
+                .char         => .char,
+                .string       => .string,
+                .void_        => .void_,
+                .unknown      => .unknown,
+            };
+        };
+        // The owner for `self.field` injection inside the body is still `tname`.
+        const eg = mg.withOwner(tname).withExtSelf(self_kind);
+
+        try g.writeIndent();
+        try g.w.print("fn _ext_{s}_{s}(self: ", .{tname, m.name});
+        // Self type: Zig value type for builtins, struct name for user types.
+        const zig_self = Builtins.zigTypeName(tname);
+        if (std.mem.eql(u8, zig_self, tname)) {
+            // User-defined type — pass by value so we don't need & at call site.
+            try g.w.writeAll(tname);
+        } else {
+            try g.w.writeAll(zig_self);
+        }
+        if (m.params.len > 0) try g.w.writeAll(", ");
+        for (m.params, 0..) |p, i| {
+            if (i > 0) try g.w.writeAll(", ");
+            try g.w.writeAll(p.name);
+            try g.w.writeAll(": ");
+            if (p.type_) |tr| try g.genType(tr) else try g.w.writeAll("anytype");
+        }
+        try g.w.writeAll(") ");
+
+        const needs_error = m.throws or (m.body != null and bodyHasRaise(m.body.?));
+        if (needs_error) try g.w.writeAll("anyerror!");
+        if (m.return_type) |rt| try g.genType(rt) else try g.w.writeAll("void");
+
+        if (m.body) |body| {
+            var refs = try collectRefs(body, g.resolve, g.alloc);
+            defer refs.deinit();
+            var mut_set = try scanMutations(body, g.alloc, g.tc);
+            defer mut_set.deinit();
+            var ret_set = try scanReturnedNames(body, g.alloc);
+            defer ret_set.deinit();
+            var cv_map = std.StringHashMap(void).init(g.alloc);
+            defer cv_map.deinit();
+            const bg = eg.indented().withMutated(&mut_set).withClosureVars(&cv_map).withReturnedNames(&ret_set);
+            try g.w.writeAll(" {\n");
+            if (!refs.uses_self) try bg.line("_ = self;");
+            for (m.params) |p| {
+                if (!refs.param_names.contains(p.name)) {
+                    try bg.writeIndent();
+                    try bg.w.print("_ = {s};\n", .{p.name});
+                }
+            }
+            try bg.genStmts(body);
+            try g.writeIndent();
+            try g.w.writeAll("}\n\n");
+        } else {
+            try g.w.writeAll(" { unreachable; // abstract\n}\n\n");
+        }
     }
 
     // ── Top-level var / const ─────────────────────────────────────────────────
@@ -1486,6 +2288,52 @@ const Generator = struct {
 
     // ── method ────────────────────────────────────────────────────────────────
 
+    // ── TCO detection ─────────────────────────────────────────────────────────
+
+    /// Returns true if `v` is a tail-recursive call to `method_name`.
+    ///
+    /// Accepted patterns:
+    ///   Instance methods: `method(args)` (bare call — Zebra natural style)
+    ///   Shared methods:   `Owner.method(args)` (explicit class prefix)
+    fn isTcoExpr(v: *const Ast.Expr, method_name: []const u8, owner: []const u8, shared: bool) bool {
+        if (v.* != .call) return false;
+        const callee = v.call.callee;
+        if (shared) {
+            // `Owner.method(args)` — explicit class-qualified call for shared methods.
+            if (callee.* != .member) return false;
+            const mem = callee.member;
+            if (!std.mem.eql(u8, mem.member, method_name)) return false;
+            if (mem.object.* != .ident) return false;
+            return std.mem.eql(u8, mem.object.ident.name, owner);
+        } else {
+            // Bare `method(args)` — instance method calling itself.
+            if (callee.* != .ident) return false;
+            return std.mem.eql(u8, callee.ident.name, method_name);
+        }
+    }
+
+    /// Recursively scans `stmts` for any `return` whose value is a direct tail
+    /// call to `method_name` (see `isTcoExpr`).  Returns true on first match.
+    /// Does NOT recurse into loop bodies — a `return` inside a loop breaks the
+    /// loop, not the function, so it is never a function-level tail call.
+    fn scanTco(stmts: []const Ast.Stmt, method_name: []const u8, owner: []const u8, shared: bool) bool {
+        for (stmts) |stmt| switch (stmt) {
+            .return_ => |s| {
+                if (s.value) |v| if (isTcoExpr(v, method_name, owner, shared)) return true;
+            },
+            .if_ => |s| {
+                if (scanTco(s.then_body, method_name, owner, shared)) return true;
+                if (s.else_body) |eb| if (scanTco(eb, method_name, owner, shared)) return true;
+            },
+            .branch => |s| {
+                for (s.on) |on| if (scanTco(on.body, method_name, owner, shared)) return true;
+                if (s.else_) |eb| if (scanTco(eb, method_name, owner, shared)) return true;
+            },
+            else => {},
+        };
+        return false;
+    }
+
     fn genMethod(g: Generator, n: *Ast.DeclMethod) anyerror!void {
         const mg = g.asMethod();
 
@@ -1495,14 +2343,22 @@ const Generator = struct {
         // Instance methods inside a type get `self: *Owner`.
         // `shared` methods (type-level, not instance) omit self.
         const has_self = g.owner.len > 0 and !n.mods.shared;
+
+        // Pre-check: does this method have any tail-recursive calls?
+        // If so, we use the loop-transformation (TCO) path.
+        const is_tco = if (n.body) |body| n.params.len > 0 and
+            scanTco(body, n.name, g.owner, n.mods.shared) else false;
+
         if (has_self) {
             try g.w.print("self: *{s}", .{g.owner});
             if (n.params.len > 0) try g.w.writeAll(", ");
         }
 
+        // In TCO mode params are renamed to `_p_<name>` so we can shadow them
+        // with mutable `var <name> = _p_<name>;` locals inside the while loop.
         for (n.params, 0..) |p, i| {
             if (i > 0) try g.w.writeAll(", ");
-            try g.w.writeAll(p.name);
+            if (is_tco) try g.w.print("_p_{s}", .{p.name}) else try g.w.writeAll(p.name);
             try g.w.writeAll(": ");
             if (p.type_) |tr| try g.genType(tr) else try g.w.writeAll("anytype");
         }
@@ -1519,7 +2375,7 @@ const Generator = struct {
             var refs = try collectRefs(body, g.resolve, g.alloc);
             defer refs.deinit();
             // Pre-scan 2: which locals are mutated? (var vs const)
-            var mut_set = try scanMutations(body, g.alloc);
+            var mut_set = try scanMutations(body, g.alloc, g.tc);
             defer mut_set.deinit();
             // Pre-scan 3: which locals appear in return expressions?
             // Those must NOT get defer-free (caller takes ownership).
@@ -1528,19 +2384,48 @@ const Generator = struct {
             // Mutable map of closure-var names (populated lazily during genStmts)
             var cv_map = std.StringHashMap(void).init(g.alloc);
             defer cv_map.deinit();
-            const bg = mg.indented().withMutated(&mut_set).withClosureVars(&cv_map).withReturnedNames(&ret_set);
 
             try g.w.writeAll(" {\n");
-            // Emit `_ = x;` only for params that are NOT referenced in the body.
-            // Emitting it for a used param would be a "pointless discard" error.
-            if (has_self and !refs.uses_self) try bg.line("_ = self;");
-            for (n.params) |p| {
-                if (!refs.param_names.contains(p.name)) {
-                    try bg.writeIndent();
-                    try bg.w.print("_ = {s};\n", .{p.name});
+
+            if (is_tco) {
+                // TCO preamble: mutable shadow copies of params + `while (true)`.
+                // The body generator uses one extra indent level for the loop body.
+                const ig = mg.indented();
+                for (n.params) |p| {
+                    try ig.writeIndent();
+                    try ig.w.print("var {s} = _p_{s};\n", .{ p.name, p.name });
                 }
+                try ig.writeIndent();
+                try ig.w.writeAll("while (true) {\n");
+
+                // Collect param names slice (lifetime: until end of this block).
+                var tco_pnames: std.ArrayListUnmanaged([]const u8) = .{};
+                defer tco_pnames.deinit(g.alloc);
+                for (n.params) |p| try tco_pnames.append(g.alloc, p.name);
+
+                const bg = ig.indented()
+                    .withMutated(&mut_set).withClosureVars(&cv_map).withReturnedNames(&ret_set)
+                    .withTco(n.name, tco_pnames.items, n.mods.shared);
+                // No param suppression needed — all params are used via `var p = _p_p;`.
+                if (has_self and !refs.uses_self) try bg.line("_ = self;");
+                try bg.genStmts(body);
+
+                // Close the while loop.
+                try ig.writeIndent();
+                try ig.w.writeAll("}\n");
+            } else {
+                const bg = mg.indented().withMutated(&mut_set).withClosureVars(&cv_map).withReturnedNames(&ret_set);
+                // Emit `_ = x;` only for params that are NOT referenced in the body.
+                if (has_self and !refs.uses_self) try bg.line("_ = self;");
+                for (n.params) |p| {
+                    if (!refs.param_names.contains(p.name)) {
+                        try bg.writeIndent();
+                        try bg.w.print("_ = {s};\n", .{p.name});
+                    }
+                }
+                try bg.genStmts(body);
             }
-            try bg.genStmts(body);
+
             try g.writeIndent();
             try g.w.writeAll("}\n\n");
         } else {
@@ -1561,14 +2446,14 @@ const Generator = struct {
         if (n.getter) |body| {
             var refs = try collectRefs(body, g.resolve, g.alloc);
             defer refs.deinit();
-            var mut_set = try scanMutations(body, g.alloc);
+            var mut_set = try scanMutations(body, g.alloc, g.tc);
             defer mut_set.deinit();
             var cv_map = std.StringHashMap(void).init(g.alloc);
             defer cv_map.deinit();
             const pbg = pg.indented().withMutated(&mut_set).withClosureVars(&cv_map);
             try g.writeIndent();
             try g.w.print("pub fn {s}(", .{n.name});
-            if (g.owner.len > 0) try g.w.print("self: *{s}", .{g.owner});
+            if (g.owner.len > 0) try g.w.print("self: *const {s}", .{g.owner});
             try g.w.writeAll(") ");
             if (n.type_) |tr| try g.genType(tr) else try g.w.writeAll("anytype");
             try g.w.writeAll(" {\n");
@@ -1582,7 +2467,7 @@ const Generator = struct {
         if (n.setter) |body| {
             var refs = try collectRefs(body, g.resolve, g.alloc);
             defer refs.deinit();
-            var mut_set = try scanMutations(body, g.alloc);
+            var mut_set = try scanMutations(body, g.alloc, g.tc);
             defer mut_set.deinit();
             var cv_map2 = std.StringHashMap(void).init(g.alloc);
             defer cv_map2.deinit();
@@ -1619,7 +2504,7 @@ const Generator = struct {
         const body = n.body orelse &[_]Ast.Stmt{};
         var refs = try collectRefs(body, g.resolve, g.alloc);
         defer refs.deinit();
-        var mut_set = try scanMutations(body, g.alloc);
+        var mut_set = try scanMutations(body, g.alloc, g.tc);
         defer mut_set.deinit();
         var cv_map = std.StringHashMap(void).init(g.alloc);
         defer cv_map.deinit();
@@ -1689,6 +2574,34 @@ const Generator = struct {
             .assign_except => |s| try g.genAssignExcept(s),
             .raise         => |s| try g.genRaise(s),
             .try_catch     => |s| try g.genTryCatch(s),
+            .guard         => |s| try g.genGuard(s),
+            .destruct      => |s| try g.genDestruct(s),
+        }
+    }
+
+    fn genDestruct(g: Generator, s: *Ast.StmtDestruct) anyerror!void {
+        // Use pointer address as a unique suffix to avoid name collisions when
+        // multiple destructurings appear in the same scope.
+        const uid = @intFromPtr(s) & 0xFFFF;
+        try g.writeIndent();
+        try g.w.print("const _dt_{x} = ", .{uid});
+        try g.genExpr(s.init);
+        try g.w.writeAll(";\n");
+        switch (s.kind) {
+            .tuple => {
+                // var (x, y) = expr  →  const x = _dt_N.@"0"; const y = _dt_N.@"1";
+                for (s.names, 0..) |name, i| {
+                    try g.writeIndent();
+                    try g.w.print("const {s} = _dt_{x}.@\"{d}\";\n", .{ name, uid, i });
+                }
+            },
+            .struct_ => {
+                // var {name, age} = expr  →  const name = _dt_N.name; const age = _dt_N.age;
+                for (s.names) |name| {
+                    try g.writeIndent();
+                    try g.w.print("const {s} = _dt_{x}.{s};\n", .{ name, uid, name });
+                }
+            },
         }
     }
 
@@ -1732,12 +2645,15 @@ const Generator = struct {
                         try g.w.writeAll(" = ");
                         try g.genStdlibInit(gtr);
                         try g.w.writeAll(";\n");
-                        // Emit cleanup defer so memory is returned to the GPA.
-                        try g.writeIndent();
-                        if (std.mem.eql(u8, gtr.name, "List")) {
-                            try g.w.print("defer {s}.deinit(_allocator);\n", .{n.name});
-                        } else {
-                            try g.w.print("defer {s}.deinit();\n", .{n.name});
+                        // Emit cleanup defer unless this var is returned (caller takes ownership).
+                        const is_returned_ctor = if (g.returned_names) |rn| rn.contains(n.name) else false;
+                        if (!is_returned_ctor) {
+                            try g.writeIndent();
+                            if (std.mem.eql(u8, gtr.name, "List")) {
+                                try g.w.print("defer {s}.deinit(_allocator);\n", .{n.name});
+                            } else {
+                                try g.w.print("defer {s}.deinit();\n", .{n.name});
+                            }
                         }
                         return;
                     }
@@ -1763,12 +2679,56 @@ const Generator = struct {
             }
         }
 
-        try g.w.writeAll(kw);
+        // List/HashMap vars need `var` only when a deinit will be emitted, because
+        // deinit takes *Self (mutable pointer). Borrowed vars (.at() / .fetch() init)
+        // and returned vars don't get a deinit, so they can stay `const`.
+        const eff_kw: []const u8 = blk: {
+            if (n.type_) |tr| {
+                if (tr == .generic) {
+                    const gn = tr.generic.name;
+                    if (std.mem.eql(u8, gn, "List") or std.mem.eql(u8, gn, "HashMap")) {
+                        // Same "is_borrowed" check as the deinit-emission path below.
+                        const is_borrowed_kw: bool = if (n.init) |e| b2: {
+                            if (e.* == .call and e.call.callee.* == .member) {
+                                const m = e.call.callee.member.member;
+                                break :b2 std.mem.eql(u8, m, "at") or std.mem.eql(u8, m, "fetch");
+                            }
+                            break :b2 false;
+                        } else false;
+                        const is_returned_kw = if (g.returned_names) |rn| rn.contains(n.name) else false;
+                        if (!is_borrowed_kw and !is_returned_kw)
+                            break :blk "var";
+                    }
+                }
+            }
+            break :blk kw;
+        };
+        try g.w.writeAll(eff_kw);
         try g.w.writeAll(" ");
         try g.w.writeAll(n.name);
         if (n.type_) |tr| {
             try g.w.writeAll(": ");
             try g.genType(tr);
+        } else if (std.mem.eql(u8, kw, "var")) {
+            // Mutable var without explicit type: emit TC-inferred type to avoid
+            // "comptime_int/comptime_float must be const" errors in Zig.
+            if (n.init) |e| {
+                if (g.tc) |tc| {
+                    const t = tc.expr_types.get(e) orelse .unknown;
+                    const ts: ?[]const u8 = switch (t) {
+                        .int   => "i64",
+                        .uint  => "u64",
+                        .float => "f64",
+                        .bool  => "bool",
+                        .char  => "u21",
+                        else   => null,
+                    };
+                    if (ts) |s| {
+                        try g.w.writeAll(": ");
+                        try g.w.writeAll(s);
+                    }
+                }
+            }
         }
         if (n.init) |e| {
             try g.w.writeAll(" = ");
@@ -1777,6 +2737,36 @@ const Generator = struct {
             try g.w.writeAll(" = undefined");
         }
         try g.w.writeAll(";\n");
+        // List/HashMap vars initialized from non-constructor exprs (e.g. File.readLines,
+        // buildNgrams) need deinit — the constructor path already returns early above.
+        // Exception: collection element accesses (.at(), .fetch()) borrow the element
+        // without taking ownership — deiniting them would double-free the original.
+        if (n.type_) |tr| {
+            if (tr == .generic) {
+                const gtr = tr.generic;
+                const is_list_or_map = std.mem.eql(u8, gtr.name, "List") or
+                                       std.mem.eql(u8, gtr.name, "HashMap");
+                if (is_list_or_map) {
+                    // Detect borrowed (non-owning) inits: list.at(i) or map.fetch(k)
+                    const is_borrowed: bool = if (n.init) |e| blk: {
+                        if (e.* == .call and e.call.callee.* == .member) {
+                            const m = e.call.callee.member.member;
+                            break :blk std.mem.eql(u8, m, "at") or std.mem.eql(u8, m, "fetch");
+                        }
+                        break :blk false;
+                    } else false;
+                    const is_returned = if (g.returned_names) |rn| rn.contains(n.name) else false;
+                    if (!is_returned and !is_borrowed) {
+                        try g.writeIndent();
+                        if (std.mem.eql(u8, gtr.name, "List")) {
+                            try g.w.print("defer {s}.deinit(_allocator);\n", .{n.name});
+                        } else {
+                            try g.w.print("defer {s}.deinit();\n", .{n.name});
+                        }
+                    }
+                }
+            }
+        }
         // Allocated string vars (concat, format) need explicit free —
         // unless the variable is returned from this function (caller takes ownership).
         if (n.init) |e| {
@@ -1813,9 +2803,46 @@ const Generator = struct {
             }
             return true;
         }
-        // File.read and File.readLines allocate.
+        // File.read allocates a string. File.readLines/listDir return a List — handled separately.
         if (obj.* == .ident and std.mem.eql(u8, obj.ident.name, "File")) {
-            if (std.mem.eql(u8, m, "read") or std.mem.eql(u8, m, "readLines")) return true;
+            if (std.mem.eql(u8, m, "read")) return true;
+        }
+        // Shell.run allocates stdout+stderr via concat.
+        if (obj.* == .ident and std.mem.eql(u8, obj.ident.name, "Shell")) {
+            if (std.mem.eql(u8, m, "run")) return true;
+        }
+        // Extension method calls that return a string allocate via _allocator.
+        if (tc_opt) |tc| {
+            const obj_type = tc.expr_types.get(obj) orelse .unknown;
+            const tname: ?[]const u8 = switch (obj_type) {
+                .string => "String",
+                .int    => "int",
+                .uint   => "uint",
+                .float  => "float",
+                .bool   => "bool",
+                .char   => "char",
+                .named  => |sym| switch (sym.decl) {
+                    .class     => |c| c.name,
+                    .struct_   => |s| s.name,
+                    .interface => |i| i.name,
+                    else       => null,
+                },
+                else => null,
+            };
+            if (tname) |tn| {
+                var buf: [256]u8 = undefined;
+                if (std.fmt.bufPrint(&buf, "{s}.{s}", .{tn, m})) |key| {
+                    if (tc.ext_methods.get(key)) |ext_meth| {
+                        if (ext_meth.return_type) |*rt| {
+                            const rname = switch (rt.*) {
+                                .named => |n| n.name,
+                                else   => "",
+                            };
+                            if (Builtins.isStringTypeName(rname)) return true;
+                        }
+                    }
+                } else |_| {}
+            }
         }
         return false;
     }
@@ -1858,6 +2885,9 @@ const Generator = struct {
                     const key_is_str = gtr.args.len >= 1 and isStringTypeRef(gtr.args[0]);
                     return g.genHashMapMethod(object, key_is_str, method, args);
                 }
+                if (std.mem.eql(u8, gtr.name, "Result")) {
+                    return g.genResultMethod(object, method, args);
+                }
             },
             .named => |n| {
                 if (isStringTypeName(n.name)) return g.genStringMethod(object, method, args);
@@ -1897,6 +2927,7 @@ const Generator = struct {
                 const list_methods = std.StaticStringMap(void).initComptime(&.{
                     .{ "add", {} }, .{ "at", {} }, .{ "remove", {} },
                     .{ "clear", {} }, .{ "contains", {} }, .{ "count", {} },
+                    .{ "sort", {} }, .{ "sortBy", {} },
                 });
                 if (list_methods.get(method) != null) {
                     return g.genListMethod(object, method, args);
@@ -2005,6 +3036,32 @@ const Generator = struct {
             try g.w.writeAll("})");
             return true;
         }
+        if (std.mem.eql(u8, method, "listDir")) {
+            // File.listDir(path) → ArrayList([]const u8) of entry names in directory.
+            try g.w.writeAll("(blk: {\n");
+            const bg = g.indented();
+            try bg.writeIndent();
+            try bg.w.writeAll("var _ld_dir = std.fs.cwd().openDir(");
+            if (args.len >= 1) try bg.genExpr(args[0].value) else try bg.w.writeAll("\".\"\n");
+            try bg.w.writeAll(", .{ .iterate = true }) catch @panic(\"File.listDir error\");\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("defer _ld_dir.close();\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("var _ld_list = std.ArrayList([]const u8){};\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("var _ld_iter = _ld_dir.iterate();\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("while (_ld_iter.next() catch null) |_ld_entry| {\n");
+            try bg.indented().writeIndent();
+            try bg.indented().w.writeAll("_ld_list.append(_allocator, _allocator.dupe(u8, _ld_entry.name) catch @panic(\"OOM\")) catch @panic(\"OOM\");\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("}\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("break :blk _ld_list;\n");
+            try g.writeIndent();
+            try g.w.writeAll("})");
+            return true;
+        }
         return false;
     }
 
@@ -2056,6 +3113,46 @@ const Generator = struct {
             try g.w.writeAll("std.posix.getenv(");
             if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
             try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    // ── Shell static methods ──────────────────────────────────────────────────
+
+    /// Emit a static `Shell.*` call.
+    ///
+    ///   Shell.run(cmd)  → []u8  stdout+stderr combined; cross-platform (cmd/sh)
+    fn genShellCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "run")) {
+            try g.w.writeAll("(blk: {\n");
+            const bg = g.indented();
+            try bg.writeIndent();
+            try bg.w.writeAll("const _sh_cmd = ");
+            if (args.len >= 1) try bg.genExpr(args[0].value) else try bg.w.writeAll("\"\"");
+            try bg.w.writeAll(";\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("const _sh_argv = if (comptime builtin.os.tag == .windows)\n");
+            try bg.indented().writeIndent();
+            try bg.indented().w.writeAll("@as([]const []const u8, &[_][]const u8{ \"cmd\", \"/c\", _sh_cmd })\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("else\n");
+            try bg.indented().writeIndent();
+            try bg.indented().w.writeAll("@as([]const []const u8, &[_][]const u8{ \"sh\", \"-c\", _sh_cmd });\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("const _sh_res = std.process.Child.run(.{\n");
+            try bg.indented().writeIndent();
+            try bg.indented().w.writeAll(".allocator = _allocator,\n");
+            try bg.indented().writeIndent();
+            try bg.indented().w.writeAll(".argv = _sh_argv,\n");
+            try bg.indented().writeIndent();
+            try bg.indented().w.writeAll(".max_output_bytes = 1024 * 1024,\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("}) catch @panic(\"Shell.run error\");\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("break :blk std.mem.concat(_allocator, u8, &[_][]const u8{ _sh_res.stdout, _sh_res.stderr }) catch @panic(\"OOM\");\n");
+            try g.writeIndent();
+            try g.w.writeAll("})");
             return true;
         }
         return false;
@@ -2174,6 +3271,18 @@ const Generator = struct {
         return false;
     }
 
+    // ── Net static methods ────────────────────────────────────────────────────
+
+    fn genNetCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "resolve")) {
+            try g.w.writeAll("_net_resolve(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeByte(')');
+            return true;
+        }
+        return false;
+    }
+
     // ── Regex static + instance methods ─────────────────────────────────────
 
     fn genRegexCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
@@ -2221,6 +3330,14 @@ const Generator = struct {
             try g.w.writeAll(")");
             return true;
         }
+        if (std.mem.eql(u8, method, "groups")) {
+            try g.w.writeAll("_regex_groups(");
+            try g.genExpr(obj);
+            try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
         return false;
     }
 
@@ -2229,6 +3346,7 @@ const Generator = struct {
     /// Gui.run(title, width, height, callback) → _gui_run(...)
     fn genGuiCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
         if (std.mem.eql(u8, method, "run")) {
+            if (g.uses_gui_ptr) |p| p.* = true;
             try g.w.writeAll("_gui_run(");
             if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"App\"");
             try g.w.writeAll(", ");
@@ -2250,8 +3368,9 @@ const Generator = struct {
         const known = std.StaticStringMap(void).initComptime(&.{
             .{ "text",      {} }, .{ "separator", {} }, .{ "sameLine",  {} },
             .{ "spacing",   {} }, .{ "indent",    {} }, .{ "unindent",  {} },
-            .{ "button",    {} }, .{ "checkbox",  {} }, .{ "slider",    {} },
-            .{ "input",     {} }, .{ "panel",     {} }, .{ "window",    {} },
+            .{ "button",    {} }, .{ "checkbox",  {} }, .{ "slider",         {} },
+            .{ "input",     {} }, .{ "inputMultiline", {} },
+            .{ "panel",     {} }, .{ "window",    {} },
         });
         if (known.get(method) == null) return false;
         try g.genExpr(obj);
@@ -2364,6 +3483,18 @@ const Generator = struct {
         return false;
     }
 
+    // ── String-slice methods ([]const []const u8, e.g. Net.resolve result) ──────
+
+    fn genStrSliceMethod(g: Generator, obj: *const Ast.Expr, method: []const u8) anyerror!bool {
+        if (std.mem.eql(u8, method, "count")) {
+            try g.w.writeAll("@as(i64, @intCast(");
+            try g.genExpr(obj);
+            try g.w.writeAll(".len))");
+            return true;
+        }
+        return false;
+    }
+
     // ── List methods ──────────────────────────────────────────────────────────
 
     fn genListMethod(g: Generator, obj: *const Ast.Expr, method: []const u8, args: []const Ast.Arg) anyerror!bool {
@@ -2377,10 +3508,11 @@ const Generator = struct {
         }
         if (std.mem.eql(u8, method, "at")) {
             // list.at(i) → list.items[i]   (use 'at' since 'get' is a keyword)
+            // Index is i64 in Zebra; Zig requires usize for slice indexing.
             try g.genExpr(obj);
-            try g.w.writeAll(".items[");
+            try g.w.writeAll(".items[@as(usize, @intCast(");
             if (args.len > 0) try g.genExpr(args[0].value);
-            try g.w.writeAll("]");
+            try g.w.writeAll("))]");
             return true;
         }
         if (std.mem.eql(u8, method, "remove")) {
@@ -2409,8 +3541,33 @@ const Generator = struct {
             return true;
         }
         if (std.mem.eql(u8, method, "count")) {
+            // items.len is usize; cast to i64 to match Zebra's int type.
+            try g.w.writeAll("@as(i64, @intCast(");
             try g.genExpr(obj);
-            try g.w.writeAll(".items.len");
+            try g.w.writeAll(".items.len))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "sort")) {
+            // list.sort() — natural ascending sort (numeric: a < b, strings: lexicographic)
+            try g.w.writeAll("_zebra_sort_natural(@TypeOf(");
+            try g.genExpr(obj);
+            try g.w.writeAll(".items[0]), ");
+            try g.genExpr(obj);
+            try g.w.writeAll(".items)");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "sortBy")) {
+            // list.sortBy(fn(a, b) => bool) — user-supplied comparator
+            // The lambda generates as `struct { fn call(...) bool {...} }.call`,
+            // a comptime-known function, passed as `comptime cmp` to _zebra_sort_by.
+            if (args.len == 0) return false;
+            try g.w.writeAll("_zebra_sort_by(@TypeOf(");
+            try g.genExpr(obj);
+            try g.w.writeAll(".items[0]), ");
+            try g.genExpr(args[0].value);
+            try g.w.writeAll(", ");
+            try g.genExpr(obj);
+            try g.w.writeAll(".items)");
             return true;
         }
         return false;
@@ -2419,14 +3576,21 @@ const Generator = struct {
     // ── HashMap methods ───────────────────────────────────────────────────────
 
     fn genHashMapMethod(g: Generator, obj: *const Ast.Expr, key_is_str: bool, method: []const u8, args: []const Ast.Arg) anyerror!bool {
-        _ = key_is_str;
         if (std.mem.eql(u8, method, "put")) {
             // map.put(k, v) — note: 'set' is a keyword, use 'put'
+            // For string-keyed maps, dupe the key so the map owns it (caller's string
+            // may be freed by defer _allocator.free after this call).
             try g.genExpr(obj);
             try g.w.writeAll(".put(");
             for (args, 0..) |a, i| {
                 if (i > 0) try g.w.writeAll(", ");
-                try g.genExpr(a.value);
+                if (i == 0 and key_is_str) {
+                    try g.w.writeAll("(_allocator.dupe(u8, ");
+                    try g.genExpr(a.value);
+                    try g.w.writeAll(") catch @panic(\"OOM\"))");
+                } else {
+                    try g.genExpr(a.value);
+                }
             }
             try g.w.writeAll(") catch unreachable");
             return true;
@@ -2458,11 +3622,33 @@ const Generator = struct {
             return true;
         }
         if (std.mem.eql(u8, method, "count")) {
+            // HashMap.count() returns usize; cast to i64 to match Zebra's int type.
+            try g.w.writeAll("@as(i64, @intCast(");
             try g.genExpr(obj);
-            try g.w.writeAll(".count()");
+            try g.w.writeAll(".count()))");
             return true;
         }
         return false;
+    }
+
+    // ── Result(T, E) methods ──────────────────────────────────────────────────
+
+    fn genResultMethod(g: Generator, obj: *const Ast.Expr, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        const known = std.StaticStringMap(void).initComptime(&.{
+            .{ "isOk", {} }, .{ "isErr", {} }, .{ "unwrap", {} },
+            .{ "unwrapOr", {} }, .{ "okValue", {} }, .{ "errValue", {} },
+        });
+        if (!known.has(method)) return false;
+        try g.genExpr(obj);
+        try g.w.writeByte('.');
+        try g.w.writeAll(method);
+        try g.w.writeByte('(');
+        for (args, 0..) |a, i| {
+            if (i > 0) try g.w.writeAll(", ");
+            try g.genExpr(a.value);
+        }
+        try g.w.writeByte(')');
+        return true;
     }
 
     // ── String methods ────────────────────────────────────────────────────────
@@ -2511,17 +3697,18 @@ const Generator = struct {
             return true;
         }
         if (std.mem.eql(u8, method, "isEmpty")) {
+            try g.w.writeAll("(");
             try g.genExpr(obj);
-            try g.w.writeAll(".len == 0");
+            try g.w.writeAll(".len == 0)");
             return true;
         }
         if (std.mem.eql(u8, method, "count")) {
-            // str.count(substr) → count non-overlapping occurrences
-            try g.w.writeAll("std.mem.count(u8, ");
+            // str.count(substr) → count non-overlapping occurrences; cast to i64.
+            try g.w.writeAll("@as(i64, @intCast(std.mem.count(u8, ");
             try g.genExpr(obj);
             try g.w.writeAll(", ");
             if (args.len > 0) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
-            try g.w.writeAll(")");
+            try g.w.writeAll(")))");
             return true;
         }
         if (std.mem.eql(u8, method, "join")) {
@@ -2599,10 +3786,10 @@ const Generator = struct {
         }
         if (std.mem.eql(u8, method, "codePointCount")) {
             // Returns the number of Unicode codepoints (not bytes).
-            // utf8CountCodepoints returns an error on invalid UTF-8; we catch and return 0.
-            try g.w.writeAll("(std.unicode.utf8CountCodepoints(");
+            // Cast to i64 to match Zebra's int type.
+            try g.w.writeAll("@as(i64, @intCast(std.unicode.utf8CountCodepoints(");
             try g.genExpr(obj);
-            try g.w.writeAll(") catch 0)");
+            try g.w.writeAll(") catch 0))");
             return true;
         }
         if (std.mem.eql(u8, method, "chars")) {
@@ -2758,7 +3945,7 @@ const Generator = struct {
             .stmts => |ss| ss,
             .expr  => &.{},
         };
-        var body_mutations = try scanMutations(body_stmts, g.alloc);
+        var body_mutations = try scanMutations(body_stmts, g.alloc, g.tc);
         defer body_mutations.deinit();
         var any_capture_mutated = false;
         for (e.capture) |cv| {
@@ -2878,8 +4065,60 @@ const Generator = struct {
     }
 
     fn genReturn(g: Generator, s: *Ast.StmtReturn) anyerror!void {
+        // TCO path: `return self.method(args)` inside a TCO-transformed method.
+        // Instead of a real return, assign new arg values to the mutable param
+        // copies and `continue` the enclosing `while (true)` loop.
+        if (g.tco_method_name.len > 0) {
+            if (s.value) |v| {
+                if (isTcoExpr(v, g.tco_method_name, g.owner, g.tco_shared)) {
+                    const args = v.call.args;
+                    const n_update = @min(args.len, g.tco_params.len);
+                    // Evaluate new args into temps first (avoids aliasing when a
+                    // param appears on both sides, e.g. `return self.f(b, a)`).
+                    try g.writeIndent();
+                    try g.w.writeAll("{");
+                    for (args[0..n_update], 0..) |arg, i| {
+                        try g.w.print(" const _tco{d} = ", .{i});
+                        try g.genExpr(arg.value);
+                        try g.w.writeAll(";");
+                    }
+                    for (0..n_update) |i| {
+                        try g.w.print(" {s} = _tco{d};", .{ g.tco_params[i], i });
+                    }
+                    try g.w.writeAll(" }\n");
+                    try g.writeIndent();
+                    try g.w.writeAll("continue;\n");
+                    return;
+                }
+            }
+        }
         try g.writeIndent();
         if (s.value) |v| {
+            // If the return value is an allocating call whose receiver is also
+            // an allocating expression, hoist the receiver into a scoped temp
+            // so it can be defer-freed after the outer call completes.
+            if (v.* == .call and v.call.callee.* == .member) {
+                const mem_call = v.call.callee.member;
+                if (isAllocatingStringInit(mem_call.object, g.tc)) {
+                    try g.w.writeAll("{\n");
+                    const ig = g.indented();
+                    try ig.writeIndent();
+                    try ig.w.writeAll("const _ret_recv = ");
+                    try ig.genExpr(mem_call.object);
+                    try ig.w.writeAll(";\n");
+                    try ig.writeIndent();
+                    try ig.w.writeAll("defer _allocator.free(_ret_recv);\n");
+                    try ig.writeIndent();
+                    try ig.w.writeAll("return ");
+                    var sg = ig;
+                    sg.expr_subst = .{ .orig = mem_call.object, .name = "_ret_recv" };
+                    try sg.genExpr(v);
+                    try ig.w.writeAll(";\n");
+                    try g.writeIndent();
+                    try g.w.writeAll("}\n");
+                    return;
+                }
+            }
             try g.w.writeAll("return ");
             try g.genExpr(v);
             try g.w.writeAll(";\n");
@@ -2893,7 +4132,14 @@ const Generator = struct {
         try g.w.writeAll("if (");
         try g.genExpr(s.cond);
         try g.w.writeAll(") {\n");
-        try g.indented().genStmts(s.then_body);
+        // Nil narrowing: if cond is `x != nil`, unwrap x with .? inside then_body.
+        const narrow_then = nilNarrowVar(s.cond, true);
+        const narrow_else = nilNarrowVar(s.cond, false);
+        var nn_set = std.StringHashMap(void).init(g.alloc);
+        defer nn_set.deinit();
+        if (narrow_then) |name| try nn_set.put(name, {});
+        const then_g = if (narrow_then != null) g.indented().withNilNarrowed(&nn_set) else g.indented();
+        try then_g.genStmts(s.then_body);
         try g.writeIndent();
         try g.w.writeAll("}");
         for (s.else_ifs) |ei| {
@@ -2906,7 +4152,11 @@ const Generator = struct {
         }
         if (s.else_body) |eb| {
             try g.w.writeAll(" else {\n");
-            try g.indented().genStmts(eb);
+            var nn_else_set = std.StringHashMap(void).init(g.alloc);
+            defer nn_else_set.deinit();
+            if (narrow_else) |name| try nn_else_set.put(name, {});
+            const else_g = if (narrow_else != null) g.indented().withNilNarrowed(&nn_else_set) else g.indented();
+            try else_g.genStmts(eb);
             try g.writeIndent();
             try g.w.writeAll("}");
         }
@@ -2982,6 +4232,14 @@ const Generator = struct {
             try g.w.writeAll("))))");
             return true;
         }
+        if (std.mem.eql(u8, method, "toString")) {
+            // Encode unicode codepoint (u21) to its UTF-8 byte sequence.
+            // Stack-encode into a 4-byte buffer, then dupe to allocator memory.
+            try g.w.writeAll("(blk: { var _cpbuf: [4]u8 = undefined; const _cplen = std.unicode.utf8Encode(");
+            try g.genExpr(object);
+            try g.w.writeAll(", &_cpbuf) catch 1; const _cpout = _allocator.dupe(u8, _cpbuf[0.._cplen]) catch @panic(\"OOM\"); break :blk @as([]const u8, _cpout); })");
+            return true;
+        }
         return false;
     }
 
@@ -3046,6 +4304,13 @@ const Generator = struct {
                     return g.genForInList(s);
             }
         }
+        // Also check list_loop_vars — vars introduced as values in HashMap(K, List(T)) loops.
+        if (s.iter.* == .ident) {
+            if (g.list_loop_vars) |llv| {
+                if (llv.contains(s.iter.ident.name))
+                    return g.genForInList(s);
+            }
+        }
 
         // Default: standard Zig for-loop over a slice / range.
         try g.writeIndent();
@@ -3104,12 +4369,32 @@ const Generator = struct {
             const entry_var = try std.fmt.allocPrint(g.alloc, "_e_{s}", .{first_var});
             defer g.alloc.free(entry_var);
 
+            // If the HashMap's value type is List(T), mark the value variable
+            // so that nested `for elem in v` loops dispatch to genForInList.
+            var val_list_vars = std.StringHashMap(void).init(g.alloc);
+            defer val_list_vars.deinit();
+            var body_gen = g;
+            if (g.getExprDeclaredType(s.iter)) |tr| {
+                if (tr == .generic and
+                    std.mem.eql(u8, tr.generic.name, "HashMap") and
+                    tr.generic.args.len >= 2)
+                {
+                    const val_tr = tr.generic.args[1];
+                    if (val_tr == .generic and
+                        std.mem.eql(u8, val_tr.generic.name, "List"))
+                    {
+                        try val_list_vars.put(s.vars[1], {});
+                        body_gen.list_loop_vars = &val_list_vars;
+                    }
+                }
+            }
+
             try g.w.print("var {s} = ", .{iter_var});
             try g.genExpr(s.iter);
             try g.w.writeAll(".iterator();\n");
             try g.writeIndent();
             try g.w.print("while ({s}.next()) |{s}| {{\n", .{iter_var, entry_var});
-            const bg = g.indented();
+            const bg = body_gen.indented();
             try bg.writeIndent();
             try bg.w.print("const {s} = {s}.key_ptr.*;\n",   .{s.vars[0], entry_var});
             if (!nameUsedInStmts(s.vars[0], s.body)) {
@@ -3216,7 +4501,10 @@ const Generator = struct {
     /// Emits a while loop using `std.unicode.Utf8View.initUnchecked().iterator()`.
     fn genForInChars(g: Generator, s: *Ast.StmtForIn) anyerror!void {
         const var_name = if (s.vars.len > 0) s.vars[0] else "_cp";
-        const iter_var = try std.fmt.allocPrint(g.alloc, "_cp_it_{s}", .{var_name});
+        // Use pointer address as unique suffix to avoid name collisions when the
+        // same loop variable name (e.g. `c`) appears in two separate chars() loops.
+        const uid = @intFromPtr(s) & 0xFFFF;
+        const iter_var = try std.fmt.allocPrint(g.alloc, "_cp_it_{x}", .{uid});
         defer g.alloc.free(iter_var);
 
         const recv = s.iter.call.callee.member.object;
@@ -3519,7 +4807,37 @@ const Generator = struct {
                 // Unique label from AST pointer so multiple raises don't collide.
                 const uid = @intFromPtr(s) & 0xFFFF;
 
-                if (det_type == .string) {
+                const det_is_primitive = switch (det_type) {
+                    .int, .uint, .float, .bool, .char,
+                    .int_n, .uint_n, .float_n => true,
+                    else => false,
+                };
+                if (det_is_primitive) {
+                    const fmt: []const u8 = switch (det_type) {
+                        .float, .float_n => "{d}",
+                        .char            => "{u}",
+                        else             => "{}",
+                    };
+                    try g.w.print("{{ const _rdet_{x}: []const u8 = std.fmt.allocPrint(_allocator, \"{s}\", .{{", .{ uid, fmt });
+                    try g.genExpr(det);
+                    try g.w.print("}}) catch @panic(\"OOM\");\n", .{});
+                    try g.writeIndent();
+                    try g.w.print("  const _rdet_ptr_{x} = _allocator.create([]const u8) catch @panic(\"OOM\");\n", .{uid});
+                    try g.writeIndent();
+                    try g.w.print("  _rdet_ptr_{x}.* = _rdet_{x};\n", .{uid, uid});
+                    try g.writeIndent();
+                    try g.w.print("  const _rshim_{x} = struct {{ fn call(p: *anyopaque) []const u8 {{\n", .{uid});
+                    try g.writeIndent();
+                    try g.w.writeAll("      return @as(*[]const u8, @alignCast(@ptrCast(p))).*;\n");
+                    try g.writeIndent();
+                    try g.w.print("  }} }};\n", .{});
+                    try g.writeIndent();
+                    try g.w.writeAll("  _error_ctx = .{ .message = ");
+                    try g.genExpr(msg);
+                    try g.w.print(", .details = .{{ .ptr = @ptrCast(_rdet_ptr_{x}), .toString_fn = _rshim_{x}.call }} }};\n", .{ uid, uid });
+                    try g.writeIndent();
+                    try g.w.writeAll("}\n");
+                } else if (det_type == .string) {
                     // String details: heap-alloc the slice header so the pointer is stable.
                     try g.w.print("{{ const _rdet_{x}: []const u8 = ", .{uid});
                     try g.genExpr(det);
@@ -3652,9 +4970,28 @@ const Generator = struct {
         }
     }
 
+    fn genGuard(g: Generator, s: *Ast.StmtGuard) anyerror!void {
+        // guard cond else { body }  →  if (!(cond)) { body }
+        try g.writeIndent();
+        try g.w.writeAll("if (!(");
+        try g.genExpr(s.cond);
+        try g.w.writeAll(")) {\n");
+        try g.indented().genStmts(s.else_body);
+        try g.writeIndent();
+        try g.w.writeAll("}\n");
+    }
+
     // ── Expressions ───────────────────────────────────────────────────────────
 
     fn genExpr(g: Generator, expr: *const Ast.Expr) anyerror!void {
+        // Expression substitution: used to hoist an allocating receiver out of
+        // a return value chain so it can be defer-freed before the return.
+        if (g.expr_subst) |sub| {
+            if (sub.orig == expr) {
+                try g.w.writeAll(sub.name);
+                return;
+            }
+        }
         sw: switch (expr.*) {
             .int_lit       => |e| try g.w.writeAll(e.text),
             .float_lit     => |e| try g.w.writeAll(e.text),
@@ -3697,6 +5034,26 @@ const Generator = struct {
                 if (g.getExprDeclaredType(e.object)) |tr| {
                     if (try g.genStdlibProp(e.object, tr, e.member)) break :sw;
                 }
+                // Computed property (getter): obj.area → obj.area()
+                if (g.tc) |tc| {
+                    const obj_type = tc.expr_types.get(e.object) orelse .unknown;
+                    if (obj_type == .named) {
+                        const key = std.fmt.allocPrint(g.alloc, "{s}.{s}", .{ obj_type.named.name, e.member }) catch "";
+                        if (tc.getter_methods.contains(key)) {
+                            try g.genExpr(e.object);
+                            try g.w.writeByte('.');
+                            try g.w.writeAll(e.member);
+                            try g.w.writeAll("()");
+                            break :sw;
+                        }
+                    }
+                }
+                // Tuple index access: p.0 → p.@"0"
+                if (e.member.len > 0 and std.ascii.isDigit(e.member[0])) {
+                    try g.genExpr(e.object);
+                    try g.w.print(".@\"{s}\"", .{e.member});
+                    break :sw;
+                }
                 try g.genExpr(e.object);
                 try g.w.writeAll(".");
                 try g.w.writeAll(e.member);
@@ -3733,8 +5090,20 @@ const Generator = struct {
                 try g.genExpr(e.expr);
             },
             .to_non_nil => |e| {
+                // If the inner ident is already nil-narrowed, genIdent will emit
+                // `name.?` itself. Adding another `.?` would produce `name.?.?`.
+                // Only append `.?` when the expression is not already unwrapped.
+                const already_unwrapped = blk: {
+                    if (g.nil_narrowed) |nn| {
+                        switch (e.expr.*) {
+                            .ident => |ie| break :blk nn.contains(ie.name),
+                            else => {},
+                        }
+                    }
+                    break :blk false;
+                };
                 try g.genExpr(e.expr);
-                try g.w.writeAll(".?");
+                if (!already_unwrapped) try g.w.writeAll(".?");
             },
             .is_nil => |e| {
                 try g.w.writeAll("(");
@@ -3807,6 +5176,28 @@ const Generator = struct {
                     try g.genExpr(e.expr);
                 }
             },
+            .tuple_lit => |e| {
+                // (a, b, c) → .{ @as(T0, a), @as(T1, b), @as(T2, c) }
+                // Use @as(T, ...) so Zig can determine the anonymous struct field types.
+                try g.w.writeAll(".{ ");
+                for (e.elems, 0..) |el, i| {
+                    if (i > 0) try g.w.writeAll(", ");
+                    if (g.tc) |tc| {
+                        const t = tc.expr_types.get(el) orelse .unknown;
+                        if (t != .unknown and t != .named) {
+                            const zig_t = Builtins.zigTypeName(t.name());
+                            if (!std.mem.eql(u8, zig_t, t.name())) {
+                                try g.w.print("@as({s}, ", .{zig_t});
+                                try g.genExpr(el);
+                                try g.w.writeAll(")");
+                                continue;
+                            }
+                        }
+                    }
+                    try g.genExpr(el);
+                }
+                try g.w.writeAll(" }");
+            },
         }
     }
 
@@ -3816,13 +5207,35 @@ const Generator = struct {
     /// identifier references (local vars and parameters that have a type
     /// annotation).  Returns null for everything else.
     fn getExprDeclaredType(g: Generator, expr: *const Ast.Expr) ?Ast.TypeRef {
-        if (expr.* != .ident) return null;
-        const sym = g.resolve.exprs.get(&expr.ident) orelse return null;
-        return switch (sym.decl) {
-            .var_  => |v| v.type_,
-            .param => |p| p.type_,
-            else   => null,
-        };
+        if (expr.* == .ident) {
+            const sym = g.resolve.exprs.get(&expr.ident) orelse return null;
+            return switch (sym.decl) {
+                .var_  => |v| v.type_,
+                .param => |p| p.type_,
+                else   => null,
+            };
+        }
+        // Handle `ClassName.fieldName` — look through the class's member list for the field type.
+        if (expr.* == .member) {
+            const mem = expr.member;
+            if (mem.object.* == .ident) {
+                const class_sym = g.resolve.exprs.get(&mem.object.ident) orelse return null;
+                const members: []const Ast.Decl = switch (class_sym.decl) {
+                    .class   => |c| c.members,
+                    .struct_ => |s| s.members,
+                    else     => return null,
+                };
+                for (members) |decl| {
+                    if (decl == .var_) {
+                        const field = decl.var_;
+                        if (std.mem.eql(u8, field.name, mem.member)) {
+                            return field.type_;
+                        }
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     fn genIdent(g: Generator, e: *const Ast.ExprIdent) anyerror!void {
@@ -3836,9 +5249,23 @@ const Generator = struct {
         if (g.in_method) {
             if (g.resolve.exprs.get(e)) |sym| {
                 if (sym.kind == .var_) {
+                    // Nil-narrowed field: self.name.?
+                    if (g.nil_narrowed) |nn| {
+                        if (nn.contains(e.name)) {
+                            try g.w.print("self.{s}.?", .{e.name});
+                            return;
+                        }
+                    }
                     try g.w.print("self.{s}", .{e.name});
                     return;
                 }
+            }
+        }
+        // Nil-narrowed local: name.?
+        if (g.nil_narrowed) |nn| {
+            if (nn.contains(e.name)) {
+                try g.w.print("{s}.?", .{e.name});
+                return;
             }
         }
         try g.w.writeAll(e.name);
@@ -3867,6 +5294,15 @@ const Generator = struct {
         if (e.callee.* == .member) {
             const mem = e.callee.member;
             if (mem.object.* == .ident) {
+                // Result.ok(v) / Result.err(v) → anonymous struct literal, inferred to declared type
+                if (std.mem.eql(u8, mem.object.ident.name, "Result")) {
+                    if (std.mem.eql(u8, mem.member, "ok") or std.mem.eql(u8, mem.member, "err")) {
+                        try g.w.print(".{{ .{s} = ", .{mem.member});
+                        if (e.args.len >= 1) try g.genExpr(e.args[0].value) else try g.w.writeAll("{}");
+                        try g.w.writeAll(" }");
+                        return;
+                    }
+                }
                 const type_name = mem.object.ident.name;
                 if (g.union_names.contains(type_name)) {
                     try g.w.print("{s}{{ .{s} = ", .{type_name, mem.member});
@@ -3878,6 +5314,21 @@ const Generator = struct {
                     try g.w.writeAll(" }");
                     return;
                 }
+            }
+        }
+        // Builtin collection constructors: `List()` → `std.ArrayList(...){}`,
+        // `HashMap()` → `std.StringHashMap(...).init(_allocator)`.
+        // These appear in assignment RHS and field initializers when no type annotation
+        // is available, so we emit the least-typed form that Zig can infer.
+        if (e.callee.* == .ident and e.args.len == 0) {
+            const name = e.callee.ident.name;
+            if (std.mem.eql(u8, name, "List")) {
+                try g.w.writeAll("std.ArrayList([]const u8){}");
+                return;
+            }
+            if (std.mem.eql(u8, name, "HashMap")) {
+                try g.w.writeAll("std.StringHashMap(i64).init(_allocator)");
+                return;
             }
         }
         // Constructor call: ClassName(args) → ClassName.init(args) if class has `cue init`,
@@ -3947,6 +5398,13 @@ const Generator = struct {
                 if (try g.genUdpCall(mem.member, e.args)) return;
             }
         }
+        // Net static call: Net.resolve(host).
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Net")) {
+                if (try g.genNetCall(mem.member, e.args)) return;
+            }
+        }
         // Regex static call: Regex.compile(pattern).
         if (e.callee.* == .member) {
             const mem = e.callee.member;
@@ -3968,11 +5426,22 @@ const Generator = struct {
                 if (try g.genSysCall(mem.member, e.args)) return;
             }
         }
+        // Shell static calls: Shell.run(cmd).
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Shell")) {
+                if (try g.genShellCall(mem.member, e.args)) return;
+            }
+        }
         // toString() on any value — use TC-inferred type for format specifier.
         if (e.callee.* == .member) {
             const mem = e.callee.member;
             if (std.mem.eql(u8, mem.member, "toString")) {
                 const obj_tc = if (g.tc) |tc| tc.expr_types.get(mem.object) orelse .unknown else .unknown;
+                // char.toString() — encode the Unicode codepoint as UTF-8 via {u}.
+                if (obj_tc == .char) {
+                    if (try g.genCharMethod(mem.object, "toString", e.args)) return;
+                }
                 const fmt: []const u8 = switch (obj_tc) {
                     .float => "{d}",
                     else   => "{}",
@@ -3981,6 +5450,43 @@ const Generator = struct {
                 try g.genExpr(mem.object);
                 try g.w.writeAll("}) catch unreachable)");
                 return;
+            }
+        }
+        // Extension method call: obj.method(args) where "TypeName.method" is in ext_methods.
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (g.tc) |tc| {
+                const obj_type = tc.expr_types.get(mem.object) orelse .unknown;
+                const tname_opt: ?[]const u8 = switch (obj_type) {
+                    .string         => "String",
+                    .int            => "int",
+                    .uint           => "uint",
+                    .float          => "float",
+                    .bool           => "bool",
+                    .char           => "char",
+                    .string_builder => "StringBuilder",
+                    .named          => |sym| switch (sym.decl) {
+                        .class     => |c| c.name,
+                        .struct_   => |s| s.name,
+                        .interface => |i| i.name,
+                        else       => null,
+                    },
+                    else => null,
+                };
+                if (tname_opt) |tname| {
+                    const key = try std.fmt.allocPrint(g.alloc, "{s}.{s}", .{tname, mem.member});
+                    defer g.alloc.free(key);
+                    if (tc.ext_methods.get(key) != null) {
+                        try g.w.print("_ext_{s}_{s}(", .{tname, mem.member});
+                        try g.genExpr(mem.object);
+                        for (e.args) |a| {
+                            try g.w.writeAll(", ");
+                            try g.genExpr(a.value);
+                        }
+                        try g.w.writeAll(")");
+                        return;
+                    }
+                }
             }
         }
         // Stdlib method call: obj.method(args) where obj has a known stdlib type.
@@ -3994,13 +5500,21 @@ const Generator = struct {
                 // unannotated vars inferred from sys.args() etc.
                 // Skip fallback for .named types (user-defined class methods go
                 // through genExpr → user struct method call below).
-                const tc_type = if (g.tc) |tc| tc.expr_types.get(mem.object) orelse .unknown else .unknown;
+                const tc_type: TypeChecker.Type = blk: {
+                    // Inside extension method bodies, `this` has a known self type.
+                    if (mem.object.* == .this) {
+                        if (g.ext_self_type) |est| break :blk est;
+                    }
+                    break :blk if (g.tc) |tc| tc.expr_types.get(mem.object) orelse .unknown else .unknown;
+                };
                 switch (tc_type) {
                     .string     => if (try g.genStringMethod(mem.object, mem.member, e.args)) return,
+                    .char       => if (try g.genCharMethod(mem.object, mem.member, e.args)) return,
                     .tcp_conn   => if (try g.genTcpMethod(mem.object, mem.member, e.args)) return,
                     .udp_socket => if (try g.genUdpMethod(mem.object, mem.member, e.args)) return,
                     .regex       => if (try g.genRegexMethod(mem.object, mem.member, e.args)) return,
                     .gui_context => if (try g.genGuiWidgetMethod(mem.object, mem.member, e.args)) return,
+                    .str_slice  => if (try g.genStrSliceMethod(mem.object, mem.member)) return,
                     .unknown    => if (try g.genListMethod(mem.object, mem.member, e.args)) return,
                     else        => {},
                 }
@@ -4022,6 +5536,30 @@ const Generator = struct {
                 }
             }
         }
+        // Bare method call inside an instance method body: `method(args)` → `self.method(args)`.
+        // Field idents already get `self.` in genIdent; methods need it here at the call site.
+        if (e.callee.* == .ident and g.in_method and g.owner.len > 0) {
+            const ident = &e.callee.ident;
+            if (g.resolve.exprs.get(ident)) |sym| {
+                if (sym.kind == .method) {
+                    const is_shared: bool = switch (sym.decl) {
+                        .method => |m| m.mods.shared,
+                        else    => false,
+                    };
+                    if (is_shared) {
+                        try g.w.print("{s}.{s}(", .{ g.owner, ident.name });
+                    } else {
+                        try g.w.print("self.{s}(", .{ident.name});
+                    }
+                    for (e.args, 0..) |a, i| {
+                        if (i > 0) try g.w.writeAll(", ");
+                        try g.genExpr(a.value);
+                    }
+                    try g.w.writeAll(")");
+                    return;
+                }
+            }
+        }
         try g.genExpr(e.callee);
         try g.w.writeAll("(");
         for (e.args, 0..) |a, i| {
@@ -4033,7 +5571,7 @@ const Generator = struct {
 
     fn genBinary(g: Generator, e: *Ast.ExprBinary) anyerror!void {
         switch (e.op) {
-            .int_div => {
+            .div, .int_div => {
                 try g.w.writeAll("@divTrunc(");
                 try g.genExpr(e.left);
                 try g.w.writeAll(", ");
@@ -4078,6 +5616,22 @@ const Generator = struct {
                     try g.genExpr(e.right);
                     try g.w.writeAll(")");
                 }
+            },
+            .lt, .le, .gt, .ge => {
+                // Use comptime-polymorphic helpers that handle both strings and numerics.
+                const helper: []const u8 = switch (e.op) {
+                    .lt => "_zebra_lt",
+                    .le => "_zebra_le",
+                    .gt => "_zebra_gt",
+                    .ge => "_zebra_ge",
+                    else => unreachable,
+                };
+                try g.w.writeAll(helper);
+                try g.w.writeAll("(");
+                try g.genExpr(e.left);
+                try g.w.writeAll(", ");
+                try g.genExpr(e.right);
+                try g.w.writeAll(")");
             },
             else => {
                 try g.w.writeAll("(");
@@ -4260,7 +5814,7 @@ const Generator = struct {
         try g.w.writeAll(") ");
         // Return type: use declared type if present, else infer:
         //   - Expression body → @TypeOf(expr) (valid in Zig when params are typed)
-        //   - Statement body  → void (caller must declare return type explicitly)
+        //   - Statement body  → walk body for first `return expr`; use TC type or void
         if (e.return_type) |rt| {
             try g.genType(rt);
         } else {
@@ -4270,7 +5824,21 @@ const Generator = struct {
                     try g.genExpr(ex);
                     try g.w.writeAll(")");
                 },
-                .stmts => try g.w.writeAll("void"),
+                .stmts => |ss| {
+                    // Find first `return expr` and query TypeChecker for its type.
+                    const inferred = blk: {
+                        if (g.tc) |tc| {
+                            for (ss) |stmt| {
+                                if (stmt == .return_ and stmt.return_.value != null) {
+                                    const t = tc.expr_types.get(stmt.return_.value.?) orelse break :blk TypeChecker.Type.void_;
+                                    break :blk t;
+                                }
+                            }
+                        }
+                        break :blk TypeChecker.Type.void_;
+                    };
+                    try g.w.writeAll(zigTypeNameOf(inferred));
+                },
             }
         }
         try g.w.writeAll(" {");
@@ -4338,6 +5906,15 @@ const Generator = struct {
                 try g.genType(inner.*);
             },
             .generic     => |gtr| {
+                // Result(T, E) → _Result(T, E)
+                if (std.mem.eql(u8, gtr.name, "Result")) {
+                    try g.w.writeAll("_Result(");
+                    if (gtr.args.len >= 1) try g.genType(gtr.args[0]) else try g.w.writeAll("void");
+                    try g.w.writeAll(", ");
+                    if (gtr.args.len >= 2) try g.genType(gtr.args[1]) else try g.w.writeAll("[]const u8");
+                    try g.w.writeAll(")");
+                    return;
+                }
                 // HashMap(K, V): use StringHashMap for string keys, AutoHashMap otherwise.
                 if (std.mem.eql(u8, gtr.name, "HashMap")) {
                     const key_is_str = gtr.args.len >= 1 and isStringTypeRef(gtr.args[0]);
@@ -4367,9 +5944,78 @@ const Generator = struct {
             },
             .void_       => try g.w.writeAll("void"),
             .same        => try g.w.writeAll(if (g.owner.len > 0) g.owner else "@This()"),
+            .tuple       => |ttr| {
+                // (T1, T2, …) → struct { T1, T2, … }  (Zig anonymous struct / tuple)
+                try g.w.writeAll("struct { ");
+                for (ttr.elems, 0..) |el, i| {
+                    if (i > 0) try g.w.writeAll(", ");
+                    try g.genType(el);
+                }
+                try g.w.writeAll(" }");
+            },
         }
     }
 };
+
+// ── C header generation ───────────────────────────────────────────────────────
+
+/// Emit a C header (`#pragma once` + function declarations) for all
+/// `shared def` methods in `module` whose signatures are C-compatible.
+/// Call this after `generate()` when in lib mode.
+pub fn generateHeader(module: Ast.Module, writer: std.io.AnyWriter) anyerror!void {
+    try writer.print(
+        \\// Auto-generated by the Zebra compiler.  DO NOT EDIT.
+        \\// Source: {s}
+        \\#pragma once
+        \\#include <stdint.h>
+        \\#include <stdbool.h>
+        \\#include <stddef.h>
+        \\
+        \\
+    , .{module.file});
+
+    for (module.decls) |decl| {
+        const type_name, const members = switch (decl) {
+            .class   => |c| .{ c.name, c.members },
+            .struct_ => |s| .{ s.name, s.members },
+            else     => continue,
+        };
+        var any_exported = false;
+        for (members) |m| {
+            const n = switch (m) { .method => |meth| meth, else => continue };
+            if (!Generator.isMethodCExportable(n)) continue;
+            if (!any_exported) {
+                try writer.print("// {s}\n", .{type_name});
+                any_exported = true;
+            }
+            const ret_c = if (n.return_type) |rt| cTypeName(rt) else "void";
+            try writer.print("{s} {s}_{s}(", .{ ret_c, type_name, n.name });
+            for (n.params, 0..) |p, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writer.print("{s} {s}", .{ cTypeName(p.type_.?), p.name });
+            }
+            try writer.writeAll(");\n");
+        }
+        if (any_exported) try writer.writeAll("\n");
+    }
+}
+
+fn cTypeName(tr: Ast.TypeRef) []const u8 {
+    return switch (tr) {
+        .void_  => "void",
+        .named  => |n| std.StaticStringMap([]const u8).initComptime(&.{
+            .{ "int",     "int64_t"  }, .{ "uint",    "uint64_t" },
+            .{ "float",   "double"   }, .{ "bool",    "bool"     },
+            .{ "char",    "uint32_t" },
+            .{ "int8",    "int8_t"   }, .{ "int16",   "int16_t"  },
+            .{ "int32",   "int32_t"  }, .{ "int64",   "int64_t"  },
+            .{ "uint8",   "uint8_t"  }, .{ "uint16",  "uint16_t" },
+            .{ "uint32",  "uint32_t" }, .{ "uint64",  "uint64_t" },
+            .{ "float32", "float"    }, .{ "float64", "double"   },
+        }).get(n.name) orelse "/* unsupported */",
+        else => "/* unsupported */",
+    };
+}
 
 // ── Print format specifier ────────────────────────────────────────────────────
 
@@ -4389,7 +6035,55 @@ fn printFmt(tc: ?*const TypeChecker.TypeCheckResult, catch_var: []const u8, expr
         }
     }
     const result = tc orelse return "{any}";
-    const t = result.expr_types.get(expr) orelse return "{any}";
+    const t_opt = result.expr_types.get(expr);
+    // Fallback for extension method calls: look up return type from ext_methods.
+    const t: TypeChecker.Type = t_opt orelse blk: {
+        if (expr.* == .call and expr.call.callee.* == .member) {
+            const mem = expr.call.callee.member;
+            const obj_type = result.expr_types.get(mem.object) orelse .unknown;
+            const tname: ?[]const u8 = switch (obj_type) {
+                .string         => "String",
+                .int            => "int",
+                .uint           => "uint",
+                .float          => "float",
+                .bool           => "bool",
+                .char           => "char",
+                .string_builder => "StringBuilder",
+                .named          => |sym| switch (sym.decl) {
+                    .class     => |c| c.name,
+                    .struct_   => |s| s.name,
+                    .interface => |i| i.name,
+                    else       => null,
+                },
+                else => null,
+            };
+            if (tname) |tn| {
+                var buf: [256]u8 = undefined;
+                if (std.fmt.bufPrint(&buf, "{s}.{s}", .{tn, mem.member})) |key| {
+                    if (result.ext_methods.get(key)) |ext_meth| {
+                        if (ext_meth.return_type) |*rt| {
+                            // Derive type from return TypeRef
+                            const rname = switch (rt.*) {
+                                .named => |n| n.name,
+                                else   => "",
+                            };
+                            if (Builtins.isStringTypeName(rname)) break :blk .string;
+                            const sk = Builtins.scalarKind(rname);
+                            break :blk switch (sk) {
+                                .int, .int_n   => .int,
+                                .uint, .uint_n => .uint,
+                                .float, .float_n => .float,
+                                .bool          => .bool,
+                                .char          => .char,
+                                else           => .unknown,
+                            };
+                        }
+                    }
+                } else |_| {}
+            }
+        }
+        break :blk .unknown;
+    };
     return switch (t) {
         .string                        => "{s}",
         .int, .uint, .int_n, .uint_n,
@@ -4403,7 +6097,12 @@ fn printFmt(tc: ?*const TypeChecker.TypeCheckResult, catch_var: []const u8, expr
         .tcp_conn,
         .udp_socket,
         .regex,
-        .gui_context                   => "{any}",
+        .gui_context,
+        .shell,
+        .file,
+        .str_slice,
+        .optional,
+        .tuple                         => "{any}",
     };
 }
 
@@ -4536,6 +6235,23 @@ fn writeZigFmtSpec(
 /// When a bit-repr format spec (x/X/o/b) is applied to a signed integer, Zig's
 /// std.fmt prepends a `+` sign for positive values, giving e.g. `+ff` instead
 /// of `ff`.  Return the Zig unsigned type name to cast to before formatting, or
+/// Map a TypeChecker.Type to its Zig type name string for use in generated code.
+/// Used when we need a concrete return type (e.g. block-body lambda return types).
+fn zigTypeNameOf(t: TypeChecker.Type) []const u8 {
+    return switch (t) {
+        .int, .uint     => "i64",
+        .float          => "f64",
+        .bool           => "bool",
+        .char           => "u21",
+        .string         => "[]const u8",
+        .void_          => "void",
+        .int_n   => |b| switch (b) { 8 => "i8", 16 => "i16", 32 => "i32", 64 => "i64", 128 => "i128", else => "i64" },
+        .uint_n  => |b| switch (b) { 8 => "u8", 16 => "u16", 32 => "u32", 64 => "u64", 128 => "u128", else => "u64" },
+        .float_n => |b| switch (b) { 16 => "f16", 32 => "f32", 64 => "f64", 128 => "f128", else => "f64" },
+        else            => "void",
+    };
+}
+
 /// null if no cast is needed (type is unsigned/float/string, or spec doesn't
 /// request a bit representation).
 fn castTypeForBitSpec(spec: []const u8, tc_type: TypeChecker.Type) ?[]const u8 {
@@ -4651,7 +6367,7 @@ fn generateSnippet(src: []const u8, alloc: Allocator) anyerror![]u8 {
     var out = std.ArrayList(u8){};
     errdefer out.deinit(alloc);
 
-    try generate(module, &resolve, null, alloc, out.writer(alloc).any());
+    _ = try generate(module, &resolve, null, alloc, out.writer(alloc).any(), .stub);
     return out.toOwnedSlice(alloc);
 }
 

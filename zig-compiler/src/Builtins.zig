@@ -56,6 +56,8 @@ pub const NAMES = std.StaticStringMap(void).initComptime(&.{
     .{ "StringBuilder", {} },
     // Stdlib file I/O
     .{ "File",          {} },
+    // Stdlib shell / process execution
+    .{ "Shell",         {} },
     // Stdlib networking
     .{ "Http",          {} },
     .{ "HttpRequest",   {} },
@@ -64,12 +66,15 @@ pub const NAMES = std.StaticStringMap(void).initComptime(&.{
     .{ "TcpConn",       {} },
     .{ "Udp",           {} },
     .{ "UdpSocket",     {} },
+    .{ "Net",           {} },
     // Stdlib regex
     .{ "Regex",         {} },
     // Stdlib UI
     .{ "Gui",           {} },
     // System / process
     .{ "sys",           {} },
+    // Result(T, E) — functional error handling
+    .{ "Result",        {} },
 });
 
 /// Returns true iff `name` is a built-in type name.

@@ -1,0 +1,28 @@
+class Acc
+    shared
+        # Shared method: Owner.method(args) is the recursive form
+        def sumTo(n as int, acc as int) as int
+            if n <= 0
+                return acc
+            return Acc.sumTo(n - 1, acc + n)
+
+class Counter
+    var count as int = 0
+
+    def countDown(n as int) as int
+        if n <= 0
+            return count
+        count = count + 1
+        return countDown(n - 1)
+
+class Program
+    shared
+        def main
+            # Shared method TCO: sumTo(1_000_000, 0) = 500_000_500_000
+            var s = Acc.sumTo(1000000, 0)
+            print s
+
+            # Instance method TCO: countDown 500_000 times
+            var c = Counter()
+            var result = c.countDown(500000)
+            print result

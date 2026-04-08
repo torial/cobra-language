@@ -1,0 +1,15 @@
+union Color
+    red
+    green
+    blue
+
+class Main
+    shared
+        def main
+            var c as Color = Color.red
+            branch c
+                on Color.red
+                    print "red"
+                on Color.green
+                    print "green"
+            # missing: on Color.blue

@@ -1,0 +1,16 @@
+class Main
+    shared
+        def main
+            # Basic capture groups: (word) (word)
+            var re = Regex.compile("(\\w+)\\s+(\\w+)")
+            for g in re.groups("hello world")
+                print g
+
+            # Date pattern: (YYYY)-(MM)-(DD)
+            var date_re = Regex.compile("(\\d+)-(\\d+)-(\\d+)")
+            for part in date_re.groups("2026-04-06")
+                print part
+
+            # No match → empty result (no output)
+            for x in re.groups("nope")
+                print x

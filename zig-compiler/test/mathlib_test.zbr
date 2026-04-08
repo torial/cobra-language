@@ -1,0 +1,17 @@
+class MathLib
+    shared
+        def add(a as int, b as int) as int
+            return a + b
+
+        def mul(a as int, b as int) as int
+            return a * b
+
+        def clamp(val as float, lo as float, hi as float) as float
+            if val < lo
+                return lo
+            if val > hi
+                return hi
+            return val
+
+        def isEven(n as int) as bool
+            return n - (n / 2) * 2 == 0

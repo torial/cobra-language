@@ -1,0 +1,24 @@
+use MathUtils
+
+class App
+    shared
+        def testBasicArithmetic
+            var d = MathUtils.double(5)
+            var s = MathUtils.square(3)
+            var sum = d + s
+            print sum
+
+        def testMathCombos
+            var x = MathUtils.double(10)      # 20
+            var y = MathUtils.cube(2)         # 8
+            var z = MathUtils.max(x, y)       # 20
+            print z
+
+        def testChaining
+            var result = MathUtils.square(MathUtils.double(3))  # (3*2)^2 = 36
+            print result
+
+        def main
+            testBasicArithmetic()
+            testMathCombos()
+            testChaining()

@@ -1,0 +1,18 @@
+extend String
+    def shout as str
+        return this.upper().concat("!")
+
+    def isLong as bool
+        return this.len > 5
+
+    def greet as str
+        return "Hello, ".concat(this).concat("!")
+
+class Main
+    shared
+        def main
+            var s as str = "hello"
+            var t as str = "world"
+            print s.shout()
+            print s.isLong()
+            print t.greet()

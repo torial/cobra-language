@@ -1,0 +1,88 @@
+# Greek NT fuzzy match — character trigram similarity
+# Compares Mark vs Matthew to find parallel passages
+# Score threshold: intersection / avg_total >= 0.7
+# Integer check: 20 * intersection >= 7 * (total_a + total_b)
+
+class Program
+    shared
+        def buildNgrams(text as str) as HashMap(str, int)
+            var ngrams as HashMap(str, int) = HashMap()
+            var clist as List(str) = List()
+            for c in text.chars()
+                clist.add(c.toString())
+            var i = 0
+            while i < clist.count() - 2
+                var tri = clist.at(i).concat(clist.at(i + 1)).concat(clist.at(i + 2))
+                if ngrams.contains(tri)
+                    ngrams.put(tri, ngrams.fetch(tri) + 1)
+                else
+                    ngrams.put(tri, 1)
+                i = i + 1
+            return ngrams
+
+        def intersection(a as HashMap(str, int), b as HashMap(str, int)) as int
+            var total = 0
+            for tri, ca in a
+                if b.contains(tri)
+                    var cb = b.fetch(tri)
+                    if ca < cb
+                        total = total + ca
+                    else
+                        total = total + cb
+            return total
+
+        def loadVerses(path as str) as List(str)
+            var verses as List(str) = List()
+            var lines as List(str) = File.readLines(path)
+            var first = true
+            for line in lines
+                if first
+                    first = false
+                else
+                    var parts as List(str) = List()
+                    for p in line.split(",")
+                        parts.add(p)
+                    if parts.count() >= 3
+                        var text as str = parts.at(2)
+                        if text.codePointCount() > 4
+                            verses.add(text)
+            return verses
+
+        def main
+            var mark_verses as List(str) = Program.loadVerses("test/texts/MAR.csv")
+            var mat_verses as List(str) = Program.loadVerses("test/texts/MAT.csv")
+            print "Mark: ${mark_verses.count()} verses"
+            print "Mat: ${mat_verses.count()} verses"
+
+            # Pre-build all Matthew ngrams once (avoids 643× redundant rebuilds)
+            var mat_ngrams as List(HashMap(str, int)) = List()
+            var mat_totals as List(int) = List()
+            var mat_idx as List(int) = List()
+            var pi = 0
+            while pi < mat_verses.count()
+                var ptext as str = mat_verses.at(pi)
+                var ptotal = ptext.codePointCount() - 2
+                if ptotal > 3
+                    mat_ngrams.add(Program.buildNgrams(ptext))
+                    mat_totals.add(ptotal)
+                    mat_idx.add(pi)
+                pi = pi + 1
+            print "Mat ngrams cached: ${mat_ngrams.count()}"
+
+            var mi = 0
+            while mi < mark_verses.count()
+                var mtext as str = mark_verses.at(mi)
+                var total_m = mtext.codePointCount() - 2
+                if total_m > 3
+                    var ngrams_m as HashMap(str, int) = Program.buildNgrams(mtext)
+                    var ti = 0
+                    while ti < mat_ngrams.count()
+                        var total_t as int = mat_totals.at(ti)
+                        var ngrams_t as HashMap(str, int) = mat_ngrams.at(ti)
+                        var inter = Program.intersection(ngrams_m, ngrams_t)
+                        # score >= 0.7  ↔  20*inter >= 7*(total_m + total_t)
+                        if 20 * inter >= 7 * (total_m + total_t)
+                            var orig_ti as int = mat_idx.at(ti)
+                            print "MAR[${mi}] ~ MAT[${orig_ti}] inter=${inter} total=${total_m + total_t}"
+                        ti = ti + 1
+                mi = mi + 1

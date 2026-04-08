@@ -1,0 +1,154 @@
+class Program
+    shared
+        def main
+            # sort() — natural ascending order on ints
+            var nums as List(int) = List()
+            nums.add(5)
+            nums.add(2)
+            nums.add(8)
+            nums.add(1)
+            nums.add(9)
+            nums.sort()
+            for n in nums
+                print n    # 1 2 5 8 9
+
+            # sort() — natural ascending order on strings
+            var words as List(str) = List()
+            words.add("banana")
+            words.add("apple")
+            words.add("cherry")
+            words.sort()
+            for w in words
+                print w    # apple banana cherry
+
+            # sortBy() — descending ints
+            var desc as List(int) = List()
+            desc.add(3)
+            desc.add(1)
+            desc.add(4)
+            desc.add(1)
+            desc.add(5)
+            desc.sortBy(def(a, b) = a > b)
+            for n in desc
+                print n    # 5 4 3 1 1
+
+            # sortBy() — sort structs by field (descending score)
+            var alice = Person()
+            alice.name = "Alice"
+            alice.score = 85
+            var bob = Person()
+            bob.name = "Bob"
+            bob.score = 92
+            var carol = Person()
+            carol.name = "Carol"
+            carol.score = 78
+            var people as List(Person) = List()
+            people.add(alice)
+            people.add(bob)
+            people.add(carol)
+            people.sortBy(def(a, b) = a.score > b.score)
+            for p in people
+                print p.name    # Bob Alice Carol
+
+            # ── Stability test — preserve order of equal elements ──────────
+            var stable as List(int) = List()
+            stable.add(3)
+            stable.add(1)
+            stable.add(3)
+            stable.add(2)
+            stable.add(1)
+            stable.sort()
+            for n in stable
+                print n             # 1 1 2 3 3 (relative order preserved)
+
+            # ── Reverse sorting ────────────────────────────────────────────
+            var reverse_sort as List(str) = List()
+            reverse_sort.add("cat")
+            reverse_sort.add("ant")
+            reverse_sort.add("bat")
+            reverse_sort.sortBy(def(a, b) = a > b)  # reverse order (descending)
+            for w in reverse_sort
+                print w             # cat bat ant
+
+            # ── Empty list ─────────────────────────────────────────────────
+            var empty as List(int) = List()
+            empty.sort()
+            print empty.count()     # 0
+
+            # ── Single element ─────────────────────────────────────────────
+            var single as List(int) = List()
+            single.add(42)
+            single.sort()
+            print single.at(0)      # 42
+
+            # ── Already sorted ─────────────────────────────────────────────
+            var already as List(int) = List()
+            already.add(1)
+            already.add(2)
+            already.add(3)
+            already.sort()
+            for n in already
+                print n
+
+            # ── Reverse sorted ─────────────────────────────────────────────
+            var rev_input as List(int) = List()
+            rev_input.add(3)
+            rev_input.add(2)
+            rev_input.add(1)
+            rev_input.sort()
+            for n in rev_input
+                print n             # 1 2 3
+
+            # ── Duplicates ─────────────────────────────────────────────────
+            var dupes as List(int) = List()
+            dupes.add(1)
+            dupes.add(5)
+            dupes.add(1)
+            dupes.add(5)
+            dupes.add(1)
+            dupes.sort()
+            print dupes.count()     # 5
+
+            # ── Float sorting ──────────────────────────────────────────────
+            var floats as List(float) = List()
+            floats.add(3.14)
+            floats.add(2.71)
+            floats.add(1.41)
+            floats.sort()
+            for f in floats
+                print f
+
+            # ── Case-sensitive string sort ─────────────────────────────────
+            var mixed_case as List(str) = List()
+            mixed_case.add("Apple")
+            mixed_case.add("apple")
+            mixed_case.add("Banana")
+            mixed_case.sort()
+            for w in mixed_case
+                print w
+
+            # ── Multi-key sort (sort by score, then by name) ───────────────
+            var people2 as List(Person) = List()
+            var p1 = Person()
+            p1.name = "Alice"
+            p1.score = 90
+            people2.add(p1)
+            var p2 = Person()
+            p2.name = "Bob"
+            p2.score = 90
+            people2.add(p2)
+            var p3 = Person()
+            p3.name = "Charlie"
+            p3.score = 85
+            people2.add(p3)
+            people2.sortBy(def(a, b)
+                if a.score != b.score
+                    return a.score > b.score
+                return a.name > b.name
+            )
+            for p in people2
+                print p.name.concat(": ").concat(p.score.toString())
+
+class Person
+    var name as str = ""
+    var score as int = 0

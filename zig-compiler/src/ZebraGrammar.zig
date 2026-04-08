@@ -157,6 +157,9 @@ pub const NT = enum {
 
     StmtLocalVar,        // var/const inside a method body
     StmtLocalVarLambda,  // var/const = def(...) eol Block  (statement-body lambda)
+    StmtDestruct,        // var ( IdListNE ) = Expr eol  — tuple destructuring
+    StmtDestructStruct,  // var { IdListNE } = Expr eol  — struct field destructuring
+    IdListNE,            // non-empty comma-separated id list (for destructuring)
     StmtExpr,            // expression used as a statement
 
     StmtExpect,          // expect TypeRef , Expr eol
@@ -165,6 +168,7 @@ pub const NT = enum {
 
     // ── Lambda expressions ─────────────────────────────────────────────────
     LambdaExpr,       // def(params) [as T] = Expr  |  def(params) [as T] eol Block
+    LambdaBlockExpr,  // def(params) [as T] eol indent CaptureOpt StmtList dedent (block-body as Atom)
     LambdaBody,       // = Expr eol  |  eol Block
     LambdaExprBody,   // = Expr eol (expression-body form)
     LambdaStmtBody,   // eol indent CaptureOpt StmtList dedent (statement-body form)
@@ -228,6 +232,10 @@ pub const NT = enum {
     DeclUnion,          // union Name eol indent UnionVariantList dedent
     UnionVariantList,   // one or more variants
     UnionVariant,       // id eol  |  id as TypeRef eol
+
+    // ── Guard statements ──────────────────────────────────────────────────
+    StmtGuard,          // guard Expr else eol Block  (block form)
+    StmtGuardInline,    // guard Expr else, Stmt       (inline form)
 
     // ── Error propagation / try-catch ─────────────────────────────────────
     ThrowsOpt,          // ε | kw_throws  (method annotation)
@@ -381,6 +389,10 @@ const type_rules: []const Rule = &.{
 
     // Generic type: Name(T) or Name(K, V) — tokenizer emits open_call for id+(
     .{ .lhs = .TypeRef, .rhs = &.{ t(.open_call), n(.TypeRefListNE), t(.rparen) } },
+
+    // Tuple type: (T1, T2) or (T1, T2, T3, …)
+    // lparen TypeRef comma TypeRefListNE rparen
+    .{ .lhs = .TypeRef, .rhs = &.{ t(.lparen), n(.TypeRef), t(.comma), n(.TypeRefListNE), t(.rparen) } },
 
     // Comma-separated list of type references (for implements/adds)
     .{ .lhs = .TypeRefListNE, .rhs = &.{ n(.TypeRef) } },
@@ -834,6 +846,8 @@ const stmt_rules: []const Rule = &.{
     .{ .lhs = .Stmt, .rhs = &.{ n(.StmtBranch) } },
     .{ .lhs = .Stmt, .rhs = &.{ n(.StmtLocalVar) } },
     .{ .lhs = .Stmt, .rhs = &.{ n(.StmtLocalVarLambda) } },
+    .{ .lhs = .Stmt, .rhs = &.{ n(.StmtDestruct) } },
+    .{ .lhs = .Stmt, .rhs = &.{ n(.StmtDestructStruct) } },
     .{ .lhs = .Stmt, .rhs = &.{ n(.StmtAssign) } },
     .{ .lhs = .Stmt, .rhs = &.{ n(.StmtExpr) } },
     .{ .lhs = .Stmt, .rhs = &.{ n(.StmtExpect) } },
@@ -842,6 +856,8 @@ const stmt_rules: []const Rule = &.{
     .{ .lhs = .Stmt, .rhs = &.{ n(.StmtWith) } },
     .{ .lhs = .Stmt, .rhs = &.{ n(.StmtRaise) } },
     .{ .lhs = .Stmt, .rhs = &.{ n(.StmtTryCatch) } },
+    .{ .lhs = .Stmt, .rhs = &.{ n(.StmtGuard) } },
+    .{ .lhs = .Stmt, .rhs = &.{ n(.StmtGuardInline) } },
 
     // Simple one-liner statements
     .{ .lhs = .StmtReturn,   .rhs = &.{ t(.kw_return), t(.eol) } },
@@ -916,6 +932,17 @@ const stmt_rules: []const Rule = &.{
         t(.kw_const), t(.id), n(.VarTypeOpt), t(.assign), n(.Expr), t(.eol),
     } },
 
+    // destructuring: var (x, y) = expr  (tuple positional)
+    .{ .lhs = .StmtDestruct, .rhs = &.{
+        t(.kw_var), t(.lparen), n(.IdListNE), t(.rparen), t(.assign), n(.Expr), t(.eol),
+    } },
+    // struct destructuring: var {name, age} = expr  (field-name bindings)
+    .{ .lhs = .StmtDestructStruct, .rhs = &.{
+        t(.kw_var), t(.lcurly), n(.IdListNE), t(.rcurly), t(.assign), n(.Expr), t(.eol),
+    } },
+    .{ .lhs = .IdListNE, .rhs = &.{ t(.id) } },
+    .{ .lhs = .IdListNE, .rhs = &.{ n(.IdListNE), t(.comma), t(.id) } },
+
     // assignment: target op value
     .{ .lhs = .StmtAssign, .rhs = &.{ n(.Expr), n(.AssignOp), n(.Expr), t(.eol) } },
     .{ .lhs = .AssignOp,   .rhs = &.{ t(.assign) } },
@@ -949,6 +976,11 @@ const stmt_rules: []const Rule = &.{
 
     // with obj eol Block — contextual self
     .{ .lhs = .StmtWith, .rhs = &.{ t(.kw_with), n(.Expr), t(.eol), n(.Block) } },
+
+    // guard Expr else eol Block     — block form: guard x > 0 else\n    return
+    // guard Expr else, Stmt         — inline form: guard x > 0 else, return
+    .{ .lhs = .StmtGuard,       .rhs = &.{ t(.kw_guard), n(.Expr), t(.kw_else), t(.eol), n(.Block) } },
+    .{ .lhs = .StmtGuardInline, .rhs = &.{ t(.kw_guard), n(.Expr), t(.kw_else), t(.comma), n(.Stmt) } },
 
     // raise [msg] [, details] eol
     .{ .lhs = .StmtRaise, .rhs = &.{ t(.kw_raise), t(.eol) } },
@@ -1018,6 +1050,8 @@ const expr_rules: []const Rule = &.{
     // Expr4 → comparisons
     .{ .lhs = .Expr4, .rhs = &.{ n(.Expr4), t(.eq),            n(.Expr5) } },
     .{ .lhs = .Expr4, .rhs = &.{ n(.Expr4), t(.ne),            n(.Expr5) } },
+    .{ .lhs = .Expr4, .rhs = &.{ n(.Expr4), t(.bang_equals),  n(.Expr5) } }, // != alias for <>
+
     .{ .lhs = .Expr4, .rhs = &.{ n(.Expr4), t(.lt),            n(.Expr5) } },
     .{ .lhs = .Expr4, .rhs = &.{ n(.Expr4), t(.gt),            n(.Expr5) } },
     .{ .lhs = .Expr4, .rhs = &.{ n(.Expr4), t(.le),            n(.Expr5) } },
@@ -1054,6 +1088,7 @@ const expr_rules: []const Rule = &.{
 
     // Expr9 → postfix: member access, chained call, index, cast
     .{ .lhs = .Expr9, .rhs = &.{ n(.Expr9), t(.dot), t(.id) } },                             // obj.member
+    .{ .lhs = .Expr9, .rhs = &.{ n(.Expr9), t(.dot), t(.integer_lit) } },                    // tuple.0  tuple.1
     .{ .lhs = .Expr9, .rhs = &.{ n(.Expr9), t(.dot), t(.open_call), n(.ArgList), t(.rparen) } }, // obj.method(args)
     // Allow keyword names as method-call targets: obj.get(args)  obj.post(args)
     .{ .lhs = .Expr9, .rhs = &.{ n(.Expr9), t(.dot), t(.kw_get),  t(.lparen), n(.ArgList), t(.rparen) } }, // obj.get(args)
@@ -1063,10 +1098,13 @@ const expr_rules: []const Rule = &.{
     .{ .lhs = .Expr9, .rhs = &.{ n(.Expr9), t(.kw_to), n(.TypeRef) } },                       // expr to T
     .{ .lhs = .Expr9, .rhs = &.{ n(.Expr9), t(.toq) } },                                      // expr to?
     .{ .lhs = .Expr9, .rhs = &.{ n(.Expr9), t(.kw_to), t(.bang) } },                          // expr to!  (non-nil assert)
+    .{ .lhs = .Expr9, .rhs = &.{ n(.Expr9), t(.question) } },                                 // expr?  (propagate error — sugar for try expr)
     .{ .lhs = .Expr9, .rhs = &.{ n(.Atom) } },
 
     // Lambda expression: def(params) [as T] = Expr  (expression-body, single line)
     .{ .lhs = .Atom, .rhs = &.{ n(.LambdaExpr) } },
+    // Block-body lambda as argument: def(params) [as T] eol indent CaptureOpt StmtList dedent
+    .{ .lhs = .Atom, .rhs = &.{ n(.LambdaBlockExpr) } },
 
     // Atom → primary expressions
     // — Numeric literals
@@ -1095,6 +1133,8 @@ const expr_rules: []const Rule = &.{
     .{ .lhs = .Atom, .rhs = &.{ t(.open_call), n(.ArgList), t(.rparen) } },
     // — Grouped expression
     .{ .lhs = .Atom, .rhs = &.{ t(.lparen), n(.Expr), t(.rparen) } },
+    // — Tuple literal: (a, b)  (a, b, c)  …
+    .{ .lhs = .Atom, .rhs = &.{ t(.lparen), n(.Expr), t(.comma), n(.ExprListNE), t(.rparen) } },
     // — Ternary if(cond, then, else): kw_if followed by lparen (not open_call since `if` is a keyword)
     .{ .lhs = .Atom, .rhs = &.{
         t(.kw_if), t(.lparen), n(.Expr), t(.comma), n(.Expr), t(.comma), n(.Expr), t(.rparen),
@@ -1201,6 +1241,11 @@ const lambda_rules: []const Rule = &.{
     .{ .lhs = .LambdaExpr, .rhs = &.{
         t(.kw_def), t(.lparen), n(.ParamList), t(.rparen), n(.ReturnAnnotOpt),
         t(.assign), n(.Expr),
+    } },
+    // def(params) [as T] eol indent CaptureOpt StmtList dedent  — block-body lambda as arg
+    .{ .lhs = .LambdaBlockExpr, .rhs = &.{
+        t(.kw_def), t(.lparen), n(.ParamList), t(.rparen), n(.ReturnAnnotOpt),
+        t(.eol), t(.indent), n(.CaptureOpt), n(.StmtList), t(.dedent),
     } },
 };
 

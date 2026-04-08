@@ -1,0 +1,68 @@
+# Zebra IDE — self-hosted, Dear ImGui backend
+# Layout: file browser | code editor | run output (all in one flat frame)
+# State is stored as class-level shared vars (no capture needed).
+
+class IDE
+    shared var current_file as str = ""
+    shared var source_code  as str = ""
+    shared var run_output   as str = ""
+    shared var file_list    as List(str) = List()
+
+    shared
+        def loadFileList
+            var entries as List(str) = File.listDir(".")
+            IDE.file_list = List()
+            for f in entries
+                if f.endsWith(".zbr") and not f.endsWith("zebra_ide.zbr")
+                    IDE.file_list.add(f)
+
+        def loadFile(path as str)
+            IDE.current_file = path
+            IDE.source_code  = File.read(path)
+            IDE.run_output   = ""
+
+        def saveFile
+            if not IDE.current_file.isEmpty()
+                File.write(IDE.current_file, IDE.source_code)
+
+        def runFile
+            if IDE.current_file.isEmpty()
+                IDE.run_output = "(no file open)"
+                return
+            IDE.saveFile()
+            IDE.run_output = Shell.run("zebra ${IDE.current_file}")
+
+        def frame(g as Gui)
+            # ── File browser ─────────────────────────────────────────
+            g.text("Files")
+            g.separator()
+            for f in IDE.file_list
+                if g.button(f)
+                    IDE.loadFile(f)
+            if g.button("Reload")
+                IDE.loadFileList()
+            g.separator()
+
+            # ── Status line ──────────────────────────────────────────
+            if IDE.current_file.isEmpty()
+                g.text("(no file selected)")
+            else
+                g.text("Editing: ${IDE.current_file}")
+
+            # ── Code editor ──────────────────────────────────────────
+            IDE.source_code = g.inputMultiline("##editor", IDE.source_code, 760.0, 380.0)
+
+            if g.button("Save")
+                IDE.saveFile()
+            g.sameLine()
+            if g.button("Run")
+                IDE.runFile()
+            g.separator()
+
+            # ── Output ───────────────────────────────────────────────
+            g.text("Output:")
+            g.text(IDE.run_output)
+
+        def main
+            IDE.loadFileList()
+            Gui.run("Zebra IDE", 900, 700, IDE.frame)

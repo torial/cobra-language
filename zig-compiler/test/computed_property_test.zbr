@@ -1,0 +1,28 @@
+class Rectangle
+    var width as float
+    var height as float
+
+    cue init(w as float, h as float)
+        width = w
+        height = h
+
+    get area as float
+        return width * height
+
+    get perimeter as float
+        return 2.0 * (width + height)
+
+    get isSquare as bool
+        return width == height
+
+class Main
+    shared
+        def main
+            var r = Rectangle(3.0, 4.0)
+            print r.area
+            print r.perimeter
+            print r.isSquare
+
+            var sq = Rectangle(5.0, 5.0)
+            print sq.area
+            print sq.isSquare

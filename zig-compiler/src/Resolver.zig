@@ -194,7 +194,29 @@ const Resolver = struct {
 
     fn walkExtend(r: Resolver, n: *Ast.DeclExtend, scope: *Scope) anyerror!void {
         try r.resolveTypeRef(&n.target, scope);
-        for (n.members) |m| try r.walkMember(m, scope);
+        for (n.members) |m| switch (m) {
+            .method => |meth| try r.walkExtMethod(meth, scope),
+            else    => try r.walkMember(m, scope),
+        };
+    }
+
+    /// Walk an extension method.  Unlike regular methods, extension methods
+    /// have no Symbol entry in the scope, so we build a fresh inner scope,
+    /// resolve types directly, and walk the body ourselves.
+    fn walkExtMethod(r: Resolver, n: *Ast.DeclMethod, scope: *Scope) anyerror!void {
+        // Resolve param and return types against the enclosing (module) scope.
+        for (n.params) |*p| {
+            if (p.type_) |*tr| try r.resolveTypeRef(tr, scope);
+        }
+        if (n.return_type) |*rt| try r.resolveTypeRef(rt, scope);
+
+        // Build a fresh method scope and register params so the body can walk.
+        const body_scope = try r.table.newScope(.method, scope);
+        for (n.params) |*p| {
+            const psym = try r.table.newSymbol(p.name, .param, .{ .param = p });
+            _ = try body_scope.define(p.name, psym);
+        }
+        if (n.body) |body| try r.walkStmts(body, body_scope);
     }
 
     fn walkMember(r: Resolver, decl: Ast.Decl, scope: *Scope) anyerror!void {
@@ -370,6 +392,22 @@ const Resolver = struct {
                     try r.walkStmts(clause.body, clause_scope);
                 }
             },
+            .guard => |s| {
+                try r.walkExpr(s.cond, scope);
+                const guard_scope = try r.table.newScope(.block, scope);
+                try r.walkStmts(s.else_body, guard_scope);
+            },
+            .destruct => |s| {
+                try r.walkExpr(s.init, scope);
+                // Register each binding name as a local in the current scope.
+                for (s.names) |name| {
+                    const dv = try r.table.arena.create(Ast.DeclVar);
+                    dv.* = .{ .span = s.span, .mods = .{}, .name = name,
+                               .type_ = null, .init = null, .is_const = true };
+                    const sym = try r.table.newSymbol(name, .local, .{ .var_ = dv });
+                    _ = try scope.define(name, sym);
+                }
+            },
             .pass, .break_, .continue_ => {},
         }
     }
@@ -453,6 +491,7 @@ const Resolver = struct {
             },
             .old           => |e| try r.walkExpr(e.expr, scope),
             .try_          => |e| try r.walkExpr(e.expr, scope),
+            .tuple_lit     => |e| { for (e.elems) |el| try r.walkExpr(el, scope); },
             .string_interp => |e| {
                 for (e.parts) |p| switch (p) {
                     .expr    => |ex| try r.walkExpr(ex, scope),
@@ -578,6 +617,7 @@ const Resolver = struct {
             // Nested lambdas have their own capture boundary — don't recurse.
             .lambda => {},
             .try_          => |e| try r.checkCaptureBoundary(e.expr, lambda_local),
+            .tuple_lit     => |e| { for (e.elems) |el| try r.checkCaptureBoundary(el, lambda_local); },
             // Atomics: nothing to check.
             .int_lit, .float_lit, .bool_lit, .char_lit,
             .string_lit, .zig_lit, .nil, .this,
@@ -661,6 +701,11 @@ const Resolver = struct {
                 for (s.body)    |st| try r.checkCaptureBoundaryStmt(st, lambda_local);
                 for (s.clauses) |cl| for (cl.body) |st| try r.checkCaptureBoundaryStmt(st, lambda_local);
             },
+            .guard => |s| {
+                try r.checkCaptureBoundary(s.cond, lambda_local);
+                for (s.else_body) |st| try r.checkCaptureBoundaryStmt(st, lambda_local);
+            },
+            .destruct => |s| try r.checkCaptureBoundary(s.init, lambda_local),
             .contract, .pass, .break_, .continue_ => {},
         }
     }
@@ -679,6 +724,7 @@ const Resolver = struct {
                 for (g.args) |*arg| try r.resolveTypeRef(arg, scope);
             },
             .void_, .same => {},
+            .tuple => |*ttr| { for (ttr.elems) |*el| try r.resolveTypeRef(el, scope); },
         }
     }
 

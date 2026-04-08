@@ -5,3 +5,11 @@ class MathUtils
 
         def square(x as int) as int
             return x * x
+
+        def cube(x as int) as int
+            return x * x * x
+
+        def max(a as int, b as int) as int
+            if a > b
+                return a
+            return b

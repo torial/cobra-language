@@ -1,0 +1,16 @@
+class Main
+    shared
+        def check(x as str) as int
+            var result = 0
+            if x.contains("a")
+                result = 1
+            else if x.contains("b")
+                result = 2
+            else
+                result = 3
+            return result
+
+        def main
+            print Main.check("apple")
+            print Main.check("bat")
+            print Main.check("cat")

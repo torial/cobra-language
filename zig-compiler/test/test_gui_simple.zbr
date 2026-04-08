@@ -1,0 +1,7 @@
+class Main
+    shared
+        def frame(g as Gui)
+            g.text("Hello from GUI")
+
+        def main
+            Gui.run("Test", 400, 300, frame)

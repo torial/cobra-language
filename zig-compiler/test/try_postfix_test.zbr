@@ -1,0 +1,16 @@
+class Math
+    shared
+        def safeDiv(a as int, b as int) as int throws
+            if b == 0
+                raise "division by zero"
+            return a / b
+
+class Main
+    shared
+        def main throws
+            # ? postfix propagates errors (sugar for try)
+            var result = Math.safeDiv(10, 2)?
+            print result
+
+            var result2 = Math.safeDiv(10, 0)?
+            print result2

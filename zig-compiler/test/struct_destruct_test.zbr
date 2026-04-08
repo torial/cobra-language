@@ -1,0 +1,33 @@
+class Point
+    var x as int = 0
+    var y as int = 0
+    var z as int = 0
+
+class Person
+    var name as str = ""
+    var age as int = 0
+
+class Program
+    shared
+        def main
+            # Basic struct destructuring
+            var p = Point()
+            p.x = 10
+            p.y = 20
+            var {x, y} = p
+            print x
+            print y
+
+            # Struct destructuring with string field
+            var alice = Person()
+            alice.name = "Alice"
+            alice.age = 30
+            var {name, age} = alice
+            print name
+            print age
+
+            # Partial extraction — only the z field
+            var p2 = Point()
+            p2.z = 99
+            var {z} = p2
+            print z

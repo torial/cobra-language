@@ -78,6 +78,20 @@ pub const Type = union(enum) {
     regex,
     /// `Gui` — GUI context passed to `Gui.run` frame callback; also the `Gui` namespace type.
     gui_context,
+    /// `Shell` — process execution namespace.
+    shell,
+    /// `File` — file I/O namespace.
+    file,
+    /// `[]str` — immutable slice of strings (e.g. `Net.resolve` return value).
+    str_slice,
+
+    // ── Optional ──────────────────────────────────────────────────────────────
+    /// `?T` — nilable wrapper around another type.
+    optional: *const Type,
+
+    // ── Tuple ─────────────────────────────────────────────────────────────────
+    /// `(T1, T2, …)` — tuple with ordered element types.
+    tuple: []const Type,
 
     // ── Special ───────────────────────────────────────────────────────────────
     /// Cannot determine type: upstream error or unsupported construct.
@@ -98,6 +112,7 @@ pub const Type = union(enum) {
             .uint_n  => |wa| switch (b) { .uint_n  => |wb| wa == wb, else => false },
             .float_n => |wa| switch (b) { .float_n => |wb| wa == wb, else => false },
             .named          => |sa| switch (b) { .named   => |sb| sa == sb, else => false },
+            .optional       => |ia| switch (b) { .optional => |ib| ia.eql(ib.*), else => false },
             .string_builder => b == .string_builder,
             .http_request   => b == .http_request,
             .http_response  => b == .http_response,
@@ -105,6 +120,17 @@ pub const Type = union(enum) {
             .udp_socket     => b == .udp_socket,
             .regex          => b == .regex,
             .gui_context    => b == .gui_context,
+            .shell          => b == .shell,
+            .file           => b == .file,
+            .str_slice      => b == .str_slice,
+            .tuple => |ea| switch (b) {
+                .tuple => |eb| blk: {
+                    if (ea.len != eb.len) break :blk false;
+                    for (ea, eb) |ta, tb| if (!ta.eql(tb)) break :blk false;
+                    break :blk true;
+                },
+                else => false,
+            },
             .unknown        => b == .unknown,
         };
     }
@@ -127,6 +153,11 @@ pub const Type = union(enum) {
         if (from == .udp_socket and to == .udp_socket) return true;
         if (from == .regex      and to == .regex)      return true;
         if (from == .gui_context and to == .gui_context) return true;
+        // optional(T) is assignable to optional(T), and nil (.optional(.void_)) to any optional
+        if (from == .optional and to == .optional) return isAssignable(from.optional.*, to.optional.*);
+        if (from == .optional and from.optional.* == .void_) return to == .optional; // nil → ?T
+        // T is assignable to ?T (wrapping in optional)
+        if (to == .optional) return isAssignable(from, to.optional.*);
         return eql(from, to);
     }
 
@@ -151,6 +182,11 @@ pub const Type = union(enum) {
             .udp_socket     => "UdpSocket",
             .regex          => "Regex",
             .gui_context    => "Gui",
+            .shell          => "Shell",
+            .file           => "File",
+            .str_slice      => "[]str",
+            .optional       => "?T",
+            .tuple          => "tuple",
             .unknown        => "<unknown>",
         };
     }
@@ -176,6 +212,134 @@ pub const Type = union(enum) {
     }
 };
 
+// ── Cross-file module interface ───────────────────────────────────────────────
+
+/// Exported type surface of a compiled Zebra module, carried across compilation
+/// boundaries so the root file's TypeChecker can resolve cross-module calls.
+///
+/// Keys use "ClassName.memberName" convention.  Only primitive return/field types
+/// are preserved (int, str, bool, etc.); user-defined types resolve to `.unknown`
+/// since Symbol pointers from the dep's arena cannot safely outlive it.
+pub const ModuleInterface = struct {
+    /// Method return types: "ClassName.methodName" → Type
+    methods: std.StringHashMap(Type),
+    /// Field / property types: "ClassName.fieldName" → Type
+    fields:  std.StringHashMap(Type),
+
+    pub fn deinit(self: *ModuleInterface) void {
+        const alloc = self.methods.allocator;
+        var mk = self.methods.keyIterator();
+        while (mk.next()) |k| alloc.free(k.*);
+        self.methods.deinit();
+        var fk = self.fields.keyIterator();
+        while (fk.next()) |k| alloc.free(k.*);
+        self.fields.deinit();
+    }
+};
+
+/// Walk `module`'s declarations and extract the publicly visible type surface
+/// into a `ModuleInterface`.  All resulting `Type` values are primitives or
+/// `.unknown`; no pointers into the dep's arena are retained.
+///
+/// Call this before freeing the dep's `Resolver.ResolveResult`.
+pub fn extractModuleInterface(
+    module:  Ast.Module,
+    resolve: *const Resolver.ResolveResult,
+    alloc:   Allocator,
+) !ModuleInterface {
+    var methods = std.StringHashMap(Type).init(alloc);
+    errdefer methods.deinit();
+    var fields = std.StringHashMap(Type).init(alloc);
+    errdefer fields.deinit();
+
+    try extractFromDecls(module.decls, resolve, alloc, &methods, &fields);
+    return .{ .methods = methods, .fields = fields };
+}
+
+fn extractFromDecls(
+    decls:   []const Ast.Decl,
+    resolve: *const Resolver.ResolveResult,
+    alloc:   Allocator,
+    methods: *std.StringHashMap(Type),
+    fields:  *std.StringHashMap(Type),
+) !void {
+    for (decls) |decl| switch (decl) {
+        .class  => |c| try extractFromMembers(c.name, c.members, resolve, alloc, methods, fields),
+        .struct_ => |s| try extractFromMembers(s.name, s.members, resolve, alloc, methods, fields),
+        .namespace => |ns| try extractFromDecls(ns.decls, resolve, alloc, methods, fields),
+        else => {},
+    };
+}
+
+fn extractFromMembers(
+    class_name: []const u8,
+    members:    []const Ast.Decl,
+    resolve:    *const Resolver.ResolveResult,
+    alloc:      Allocator,
+    methods:    *std.StringHashMap(Type),
+    fields:     *std.StringHashMap(Type),
+) !void {
+    for (members) |m| switch (m) {
+        .method => |meth| {
+            const ret = simpleTypeFromRef(
+                if (meth.return_type) |*rt| rt else null,
+                resolve, alloc,
+            );
+            // Key ownership: HashMap stores the slice pointer; do NOT free here.
+            // ModuleInterface.deinit() walks and frees keys.
+            const key = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ class_name, meth.name });
+            try methods.put(key, ret);
+        },
+        .var_  => |v| {
+            const t = simpleTypeFromRef(if (v.type_) |*tr| tr else null, resolve, alloc);
+            const key = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ class_name, v.name });
+            try fields.put(key, t);
+        },
+        .property => |p| {
+            const t = simpleTypeFromRef(if (p.type_) |*tr| tr else null, resolve, alloc);
+            const key = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ class_name, p.name });
+            try fields.put(key, t);
+        },
+        else => {},
+    };
+}
+
+/// Convert a `TypeRef` to a `Type` using only the resolver's builtin table.
+/// Returns `.unknown` for user-defined types (Symbol pointers can't safely
+/// cross compilation boundaries) and for compound types not yet modelled.
+fn simpleTypeFromRef(
+    tr:      ?*const Ast.TypeRef,
+    resolve: *const Resolver.ResolveResult,
+    alloc:   Allocator,
+) Type {
+    const t = tr orelse return .void_;
+    return switch (t.*) {
+        .void_  => .void_,
+        .named  => |*n| blk: {
+            const resolved = resolve.types.get(n) orelse break :blk .unknown;
+            break :blk switch (resolved) {
+                .builtin => builtinType(n.name),
+                .symbol  => .unknown, // user-defined type; Symbol lives in dep's arena
+            };
+        },
+        .nilable => |inner| blk: {
+            const inner_t = simpleTypeFromRef(inner, resolve, alloc);
+            if (inner_t == .unknown) break :blk .unknown;
+            const boxed = alloc.create(Type) catch break :blk .unknown;
+            boxed.* = inner_t;
+            break :blk Type{ .optional = boxed };
+        },
+        .tuple => |ttr| blk: {
+            const elems = alloc.alloc(Type, ttr.elems.len) catch break :blk .unknown;
+            for (ttr.elems, elems) |*el, *out|
+                out.* = simpleTypeFromRef(el, resolve, alloc);
+            break :blk Type{ .tuple = elems };
+        },
+        // Compound types deferred.
+        .stream, .error_union, .generic, .same => .unknown,
+    };
+}
+
 // ── Result ────────────────────────────────────────────────────────────────────
 
 pub const TypeCheckResult = struct {
@@ -183,6 +347,10 @@ pub const TypeCheckResult = struct {
     expr_types: std.AutoHashMap(*const Ast.Expr, Type),
     diags:      []const Diagnostic,
     diag_alloc: Allocator,
+    /// "ClassName.propName" → void — getter properties that should be called as obj.prop().
+    getter_methods: std.StringHashMap(void),
+    /// "TypeName.methodName" → DeclMethod* — extension methods from `extend` blocks.
+    ext_methods: std.StringHashMap(*const Ast.DeclMethod),
 
     pub fn hasErrors(self: TypeCheckResult) bool {
         for (self.diags) |d| if (d.kind == .err) return true;
@@ -193,43 +361,179 @@ pub const TypeCheckResult = struct {
         for (self.diags) |d| self.diag_alloc.free(d.message);
         self.diag_alloc.free(self.diags);
         self.expr_types.deinit();
+        self.getter_methods.deinit();
+        self.ext_methods.deinit();
     }
 };
+
+// ── Union variant scanning ────────────────────────────────────────────────────
+
+fn collectUnionVariants(
+    module: Ast.Module,
+    out:    *std.StringHashMap([]const []const u8),
+    alloc:  Allocator,
+) !void {
+    try collectUnionVariantsInDecls(module.decls, out, alloc);
+}
+
+fn collectUnionVariantsInDecls(
+    decls: []const Ast.Decl,
+    out:   *std.StringHashMap([]const []const u8),
+    alloc: Allocator,
+) !void {
+    for (decls) |decl| switch (decl) {
+        .union_ => |u| {
+            var names = try alloc.alloc([]const u8, u.variants.len);
+            for (u.variants, 0..) |v, i| names[i] = v.name;
+            try out.put(u.name, names);
+        },
+        .namespace => |n| try collectUnionVariantsInDecls(n.decls, out, alloc),
+        .class     => |c| try collectUnionVariantsInDecls(c.members, out, alloc),
+        else       => {},
+    };
+}
+
+// ── Nil narrowing helpers ─────────────────────────────────────────────────────
+
+const NilNarrow = struct { name: []const u8, expr: *const Ast.Expr };
+
+/// If `cond` is `x != nil` (for_then=true) or `x == nil` (for_then=false),
+/// returns the variable name and its Expr node (for type lookup). Null otherwise.
+fn nilNarrowedVarExpr(cond: *const Ast.Expr, for_then: bool) ?NilNarrow {
+    if (cond.* != .binary) return null;
+    const b = cond.binary;
+    const want_op: Ast.BinaryOp = if (for_then) .ne else .eq;
+    if (b.op != want_op) return null;
+    if (b.left.* == .ident and b.right.* == .nil)
+        return .{ .name = b.left.ident.name, .expr = b.left };
+    if (b.right.* == .ident and b.left.* == .nil)
+        return .{ .name = b.right.ident.name, .expr = b.right };
+    return null;
+}
+
+// ── Getter method scanning ────────────────────────────────────────────────────
+
+/// Scan all class declarations and record "ClassName.propName" for every getter property.
+fn collectGetterMethods(
+    module: Ast.Module,
+    out:    *std.StringHashMap(void),
+    alloc:  Allocator,
+) !void {
+    try collectGetterMethodsInDecls(module.decls, out, alloc);
+}
+
+fn collectGetterMethodsInDecls(
+    decls:      []const Ast.Decl,
+    out:        *std.StringHashMap(void),
+    alloc:      Allocator,
+) !void {
+    for (decls) |decl| switch (decl) {
+        .class => |c| {
+            for (c.members) |m| switch (m) {
+                .property => |p| if (p.getter != null) {
+                    const key = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ c.name, p.name });
+                    try out.put(key, {});
+                },
+                else => {},
+            };
+            try collectGetterMethodsInDecls(c.members, out, alloc);
+        },
+        .namespace => |n| try collectGetterMethodsInDecls(n.decls, out, alloc),
+        else => {},
+    };
+}
+
+// ── Extension method scanning ────────────────────────────────────────────────
+
+/// Scan all `extend` declarations and record "TypeName.methodName" → DeclMethod*.
+fn collectExtMethods(
+    module: Ast.Module,
+    out:    *std.StringHashMap(*const Ast.DeclMethod),
+    alloc:  Allocator,
+) !void {
+    try collectExtMethodsInDecls(module.decls, out, alloc);
+}
+
+fn collectExtMethodsInDecls(
+    decls: []const Ast.Decl,
+    out:   *std.StringHashMap(*const Ast.DeclMethod),
+    alloc: Allocator,
+) !void {
+    for (decls) |decl| switch (decl) {
+        .extend => |ext| {
+            const tname = switch (ext.target) {
+                .named   => |n| n.name,
+                .generic => |g| g.name,
+                else     => continue,
+            };
+            for (ext.members) |m| switch (m) {
+                .method => |meth| {
+                    const key = try std.fmt.allocPrint(alloc, "{s}.{s}", .{tname, meth.name});
+                    try out.put(key, meth);
+                },
+                else => {},
+            };
+        },
+        .namespace => |n| try collectExtMethodsInDecls(n.decls, out, alloc),
+        else => {},
+    };
+}
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Run Pass 3 on `module` using the already-populated `resolve` result.
 ///
-/// - `map_alloc`  — owns the `expr_types` hash-map entries.
-/// - `diag_alloc` — owns the `diags` slice and message strings.
+/// - `map_alloc`         — owns the `expr_types` hash-map entries.
+/// - `diag_alloc`        — owns the `diags` slice and message strings.
+/// - `imported_modules`  — module interfaces from `use`d deps (may be null).
+///                         Keys are the Zebra dotted use-path (e.g. `"Math"`).
 pub fn typeCheckPass3(
-    module:     Ast.Module,
-    resolve:    *const Resolver.ResolveResult,
-    map_alloc:  Allocator,
-    diag_alloc: Allocator,
+    module:           Ast.Module,
+    resolve:          *const Resolver.ResolveResult,
+    map_alloc:        Allocator,
+    diag_alloc:       Allocator,
+    imported_modules: ?*const std.StringHashMap(ModuleInterface),
 ) anyerror!TypeCheckResult {
-    var expr_types     = std.AutoHashMap(*const Ast.Expr, Type).init(map_alloc);
-    var loop_var_types = std.StringHashMap(Type).init(map_alloc);
+    var expr_types      = std.AutoHashMap(*const Ast.Expr, Type).init(map_alloc);
+    var loop_var_types  = std.StringHashMap(Type).init(map_alloc);
     defer loop_var_types.deinit();
-    var diags          = std.ArrayList(Diagnostic){};
+    var list_elem_types = std.StringHashMap(Type).init(map_alloc);
+    defer list_elem_types.deinit();
+    var union_variants  = std.StringHashMap([]const []const u8).init(map_alloc);
+    defer union_variants.deinit();
+    try collectUnionVariants(module, &union_variants, map_alloc);
+    var getter_methods  = std.StringHashMap(void).init(map_alloc);
+    try collectGetterMethods(module, &getter_methods, map_alloc);
+    var ext_methods     = std.StringHashMap(*const Ast.DeclMethod).init(map_alloc);
+    try collectExtMethods(module, &ext_methods, map_alloc);
+    var narrowed_types  = std.StringHashMap(Type).init(map_alloc);
+    defer narrowed_types.deinit();
+    var diags           = std.ArrayList(Diagnostic){};
 
     const tc = TypeChecker{
-        .resolve        = resolve,
-        .map_alloc      = map_alloc,
-        .diag_alloc     = diag_alloc,
-        .expr_types     = &expr_types,
-        .diags          = &diags,
-        .return_type    = .void_,
-        .owner_sym      = null,
-        .loop_var_types = &loop_var_types,
+        .resolve          = resolve,
+        .map_alloc        = map_alloc,
+        .diag_alloc       = diag_alloc,
+        .expr_types       = &expr_types,
+        .diags            = &diags,
+        .return_type      = .void_,
+        .owner_sym        = null,
+        .loop_var_types   = &loop_var_types,
+        .list_elem_types  = &list_elem_types,
+        .union_variants   = &union_variants,
+        .narrowed_types   = &narrowed_types,
+        .ext_methods      = &ext_methods,
+        .imported_modules = imported_modules,
     };
 
     try tc.checkModule(module);
 
     return .{
-        .expr_types = expr_types,
-        .diags      = try diags.toOwnedSlice(diag_alloc),
-        .diag_alloc = diag_alloc,
+        .expr_types     = expr_types,
+        .diags          = try diags.toOwnedSlice(diag_alloc),
+        .diag_alloc     = diag_alloc,
+        .getter_methods = getter_methods,
+        .ext_methods    = ext_methods,
     };
 }
 
@@ -253,12 +557,52 @@ const TypeChecker = struct {
     /// Transient element-type overrides for active loop variables.
     /// Keyed by variable name (string).  Shared across TypeChecker copies.
     loop_var_types: *std.StringHashMap(Type),
+    /// Element type for variables that are List(T) at runtime but whose type
+    /// resolves to .unknown in loop_var_types (generic types aren't tracked).
+    /// `inferForInElemType` checks this for bare ident iterators.
+    list_elem_types: *std.StringHashMap(Type),
+    /// Union type name → slice of variant name strings.
+    /// Used for exhaustiveness checking on `branch`.
+    union_variants: *const std.StringHashMap([]const []const u8),
+    /// Nil-narrowed variable name → unwrapped inner Type.
+    /// When `x != nil` is the condition of an `if`, `x` is pushed here for the then_body.
+    narrowed_types: *std.StringHashMap(Type),
+    /// "TypeName.methodName" → DeclMethod* from all `extend` blocks in the module.
+    ext_methods: *const std.StringHashMap(*const Ast.DeclMethod),
+    /// Non-null inside `extend T` method bodies: the inferred type of `this`/`self`.
+    ext_self_type: ?Type = null,
+    /// Type surfaces of `use`d modules, keyed by Zebra dotted path (e.g. `"Math"`).
+    /// Null when no module interfaces were provided (deps not compiled with type extraction).
+    imported_modules: ?*const std.StringHashMap(ModuleInterface) = null,
 
     fn withReturn(tc: TypeChecker, ret: Type) TypeChecker {
         var c = tc; c.return_type = ret; return c;
     }
     fn withOwner(tc: TypeChecker, owner: ?*const Symbol) TypeChecker {
         var c = tc; c.owner_sym = owner; return c;
+    }
+    fn withExtSelf(tc: TypeChecker, self_type: Type) TypeChecker {
+        var c = tc; c.ext_self_type = self_type; return c;
+    }
+
+    /// Map a Type to its Zebra type name for extension method lookup.
+    fn extTypeName(_: TypeChecker, t: Type) ?[]const u8 {
+        return switch (t) {
+            .string         => "String",
+            .int            => "int",
+            .uint           => "uint",
+            .float          => "float",
+            .bool           => "bool",
+            .char           => "char",
+            .string_builder => "StringBuilder",
+            .named          => |sym| switch (sym.decl) {
+                .class     => |c| c.name,
+                .struct_   => |s| s.name,
+                .interface => |i| i.name,
+                else       => null,
+            },
+            else => null,
+        };
     }
 
     // ── Module ────────────────────────────────────────────────────────────────
@@ -312,7 +656,11 @@ const TypeChecker = struct {
     }
 
     fn checkExtend(tc: TypeChecker, n: *Ast.DeclExtend) anyerror!void {
-        for (n.members) |m| try tc.checkMember(m);
+        // Derive the self type from the target so `this` inside method bodies
+        // resolves to the correct type (e.g. `.string` for `extend String`).
+        const self_type = tc.typeFromRef(&n.target);
+        const etc = tc.withExtSelf(self_type);
+        for (n.members) |m| try etc.checkMember(m);
     }
 
     fn checkMember(tc: TypeChecker, decl: Ast.Decl) anyerror!void {
@@ -387,12 +735,34 @@ const TypeChecker = struct {
         switch (stmt) {
             .if_      => |s| {
                 try tc.checkBoolExpr(s.cond);
-                try tc.checkStmts(s.then_body);
+                // Nil narrowing: if `x != nil`, unwrap `x` inside then_body.
+                // After checkBoolExpr, expr_types has the type of `x` (should be .optional).
+                const narrow_then = nilNarrowedVarExpr(s.cond, true);
+                const narrow_else = nilNarrowedVarExpr(s.cond, false);
+                if (narrow_then) |nr| {
+                    const opt_type = tc.expr_types.get(nr.expr) orelse .unknown;
+                    const inner = if (opt_type == .optional) opt_type.optional.* else .unknown;
+                    if (inner != .unknown) try tc.narrowed_types.put(nr.name, inner);
+                    try tc.checkStmts(s.then_body);
+                    if (inner != .unknown) _ = tc.narrowed_types.remove(nr.name);
+                } else {
+                    try tc.checkStmts(s.then_body);
+                }
                 for (s.else_ifs) |ei| {
                     try tc.checkBoolExpr(ei.cond);
                     try tc.checkStmts(ei.body);
                 }
-                if (s.else_body) |eb| try tc.checkStmts(eb);
+                if (s.else_body) |eb| {
+                    if (narrow_else) |nr| {
+                        const opt_type = tc.expr_types.get(nr.expr) orelse .unknown;
+                        const inner = if (opt_type == .optional) opt_type.optional.* else .unknown;
+                        if (inner != .unknown) try tc.narrowed_types.put(nr.name, inner);
+                        try tc.checkStmts(eb);
+                        if (inner != .unknown) _ = tc.narrowed_types.remove(nr.name);
+                    } else {
+                        try tc.checkStmts(eb);
+                    }
+                }
             },
             .while_   => |s| {
                 try tc.checkBoolExpr(s.cond);
@@ -401,14 +771,57 @@ const TypeChecker = struct {
             },
             .for_in   => |s| {
                 _ = try tc.inferExpr(s.iter);
-                const elem = tc.inferForInElemType(s.iter);
-                if (elem != .unknown) {
-                    for (s.vars) |vname| try tc.loop_var_types.put(vname, elem);
-                }
-                if (s.where) |w| try tc.checkBoolExpr(w);
-                try tc.checkStmts(s.body);
-                if (elem != .unknown) {
-                    for (s.vars) |vname| _ = tc.loop_var_types.remove(vname);
+                // Special-case HashMap(K,V) two-var iteration: first var = key, second = value.
+                const is_hashmap_two_var = blk: {
+                    if (s.vars.len < 2) break :blk false;
+                    if (s.iter.* != .ident) break :blk false;
+                    const sym = tc.resolve.exprs.get(&s.iter.ident) orelse break :blk false;
+                    const dt: ?Ast.TypeRef = switch (sym.decl) {
+                        .var_  => |dv| dv.type_,
+                        .param => |p|  p.type_,
+                        else   => null,
+                    };
+                    if (dt == null) break :blk false;
+                    break :blk dt.? == .generic and std.mem.eql(u8, dt.?.generic.name, "HashMap");
+                };
+                if (is_hashmap_two_var) {
+                    // Register key and value types from HashMap generic args.
+                    const dt = blk: {
+                        const sym = tc.resolve.exprs.get(&s.iter.ident).?;
+                        break :blk switch (sym.decl) { .var_ => |dv| dv.type_.?, .param => |p| p.type_.?, else => unreachable };
+                    };
+                    const key_type = if (dt.generic.args.len > 0) tc.typeFromRef(&dt.generic.args[0]) else .unknown;
+                    const val_type = if (dt.generic.args.len > 1) tc.typeFromRef(&dt.generic.args[1]) else .unknown;
+                    if (key_type != .unknown) try tc.loop_var_types.put(s.vars[0], key_type);
+                    if (val_type != .unknown) try tc.loop_var_types.put(s.vars[1], val_type);
+                    // If value type is List(T), record element type so inner for-in loops
+                    // on the value variable get the correct print format specifier.
+                    if (dt.generic.args.len >= 2) {
+                        const val_tr = dt.generic.args[1];
+                        if (val_tr == .generic and
+                            std.mem.eql(u8, val_tr.generic.name, "List") and
+                            val_tr.generic.args.len > 0)
+                        {
+                            const elem_t = tc.typeFromRef(&val_tr.generic.args[0]);
+                            if (elem_t != .unknown)
+                                try tc.list_elem_types.put(s.vars[1], elem_t);
+                        }
+                    }
+                    if (s.where) |w| try tc.checkBoolExpr(w);
+                    try tc.checkStmts(s.body);
+                    _ = tc.loop_var_types.remove(s.vars[0]);
+                    _ = tc.loop_var_types.remove(s.vars[1]);
+                    _ = tc.list_elem_types.remove(s.vars[1]);
+                } else {
+                    const elem = tc.inferForInElemType(s.iter);
+                    if (elem != .unknown) {
+                        for (s.vars) |vname| try tc.loop_var_types.put(vname, elem);
+                    }
+                    if (s.where) |w| try tc.checkBoolExpr(w);
+                    try tc.checkStmts(s.body);
+                    if (elem != .unknown) {
+                        for (s.vars) |vname| _ = tc.loop_var_types.remove(vname);
+                    }
                 }
             },
             .for_num  => |s| {
@@ -421,12 +834,77 @@ const TypeChecker = struct {
                 _ = tc.loop_var_types.remove(s.var_);
             },
             .branch   => |s| {
-                _ = try tc.inferExpr(s.expr);
+                const subj_type = try tc.inferExpr(s.expr);
+                // For Result(T, E) subjects: determine payload types for `as` bindings.
+                var result_ok_type: ?Type = null;
+                var result_err_type: ?Type = null;
+                if (s.expr.* == .ident) {
+                    if (tc.resolve.exprs.get(&s.expr.ident)) |sym| {
+                        const declared_tr: ?Ast.TypeRef = switch (sym.decl) {
+                            .var_  => |v| v.type_,
+                            .param => |p| p.type_,
+                            else   => null,
+                        };
+                        if (declared_tr) |dtr| {
+                            if (dtr == .generic and std.mem.eql(u8, dtr.generic.name, "Result") and dtr.generic.args.len >= 2) {
+                                result_ok_type = tc.typeFromRef(&dtr.generic.args[0]);
+                                result_err_type = tc.typeFromRef(&dtr.generic.args[1]);
+                            }
+                        }
+                    }
+                }
                 for (s.on) |on| {
                     for (on.values) |v| _ = try tc.inferExpr(v);
+                    // Push binding type into narrowed_types so body stmts see the payload type.
+                    if (on.binding) |bname| {
+                        if (on.values.len == 1 and on.values[0].* == .member) {
+                            const variant = on.values[0].member.member;
+                            if (std.mem.eql(u8, variant, "ok")) {
+                                if (result_ok_type) |t| try tc.narrowed_types.put(bname, t);
+                            } else if (std.mem.eql(u8, variant, "err")) {
+                                if (result_err_type) |t| try tc.narrowed_types.put(bname, t);
+                            }
+                        }
+                    }
                     try tc.checkStmts(on.body);
+                    if (on.binding) |bname| _ = tc.narrowed_types.remove(bname);
                 }
                 if (s.else_) |eb| try tc.checkStmts(eb);
+                // Exhaustiveness check: only when subject is a named union and
+                // there is no catch-all else clause.
+                if (s.else_ == null) {
+                    if (subj_type == .named) {
+                        const sym = subj_type.named;
+                        if (sym.kind == .union_) {
+                            const type_name = sym.decl.union_.name;
+                            if (tc.union_variants.get(type_name)) |variants| {
+                                // Collect covered variant names from on-clauses.
+                                var covered = std.StringHashMap(void).init(tc.diag_alloc);
+                                defer covered.deinit();
+                                for (s.on) |on| {
+                                    for (on.values) |v| {
+                                        if (v.* == .member) covered.put(v.member.member, {}) catch {};
+                                    }
+                                }
+                                // Emit a diagnostic for each uncovered variant.
+                                for (variants) |vname| {
+                                    if (covered.get(vname) == null) {
+                                        const msg = try std.fmt.allocPrint(
+                                            tc.diag_alloc,
+                                            "branch on '{s}' does not cover variant '{s}' (add 'on {s}.{s}' or an 'else' clause)",
+                                            .{ type_name, vname, type_name, vname },
+                                        );
+                                        try tc.diags.append(tc.diag_alloc, .{
+                                            .span = s.span,
+                                            .kind = .err,
+                                            .message = msg,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             },
             .return_  => |s| try tc.checkReturn(s),
             .assert   => |s| {
@@ -450,6 +928,9 @@ const TypeChecker = struct {
                     switch (det_type) {
                         .string  => {}, // string.toString() is itself — always OK
                         .unknown => {}, // can't check statically, suppress
+                        // Primitives are always displayable via Zig's std.fmt — allow them.
+                        .int, .uint, .float, .bool, .char,
+                        .int_n, .uint_n, .float_n => {},
                         .named   => |sym| {
                             const has_to_string = if (sym.own_scope) |scope|
                                 scope.lookupLocal("toString") != null
@@ -468,6 +949,51 @@ const TypeChecker = struct {
             .try_catch => |s| {
                 try tc.checkStmts(s.body);
                 for (s.clauses) |cl| try tc.checkStmts(cl.body);
+            },
+            .guard => |s| {
+                _ = try tc.inferExpr(s.cond);
+                try tc.checkStmts(s.else_body);
+            },
+            .destruct => |s| {
+                const init_type = try tc.inferExpr(s.init);
+                switch (s.kind) {
+                    .tuple => {
+                        if (init_type == .tuple) {
+                            if (init_type.tuple.len != s.names.len)
+                                try tc.emitError(s.span,
+                                    "destructuring expects {} names but tuple has {} elements",
+                                    .{ s.names.len, init_type.tuple.len });
+                        } else if (init_type != .unknown) {
+                            try tc.emitError(s.span,
+                                "destructuring requires a tuple, got '{s}'", .{init_type.name()});
+                        }
+                    },
+                    .struct_ => {
+                        // Struct destructuring: `var {name, age} = expr`
+                        // The RHS must be a named type (class/struct).  We don't
+                        // validate individual field names here — Zig will catch
+                        // unknown fields at compile time.
+                        if (init_type != .named and init_type != .unknown) {
+                            try tc.emitError(s.span,
+                                "struct destructuring requires a class or struct, got '{s}'",
+                                .{init_type.name()});
+                        }
+                        // Register each binding's type in loop_var_types so that
+                        // subsequent statements (e.g. `print name`) can infer the
+                        // correct format specifier.
+                        if (init_type == .named) {
+                            if (init_type.named.own_scope) |scope| {
+                                for (s.names) |fname| {
+                                    if (scope.lookupLocal(fname)) |fsym| {
+                                        const ftype = tc.symbolType(fsym);
+                                        if (ftype != .unknown)
+                                            try tc.loop_var_types.put(fname, ftype);
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
             },
             .pass, .break_, .continue_ => {},
         }
@@ -539,7 +1065,8 @@ const TypeChecker = struct {
                 break :blk .string;
             },
             .nil            => .unknown, // context-dependent nilable
-            .this           => if (tc.owner_sym) |s| Type{ .named = s } else .unknown,
+            .this           => tc.ext_self_type orelse
+                              if (tc.owner_sym) |s| Type{ .named = s } else .unknown,
             .zig_lit        => .unknown, // opaque backend literal
             .ident          => |*e| tc.inferIdent(e),
             .member         => |e| try tc.inferMember(e),
@@ -561,7 +1088,11 @@ const TypeChecker = struct {
             .unary          => |e| try tc.inferUnary(e),
             .cast           => |e| blk: { _ = try tc.inferExpr(e.expr); break :blk tc.typeFromRef(&e.target); },
             .to_nilable     => |e| blk: { _ = try tc.inferExpr(e.expr); break :blk .unknown; },
-            .to_non_nil     => |e| try tc.inferExpr(e.expr),
+            .to_non_nil     => |e| blk: {
+                // `expr to!` — force-unwrap optional; result is the inner type.
+                const inner = try tc.inferExpr(e.expr);
+                break :blk if (inner == .optional) inner.optional.* else inner;
+            },
             .is_nil         => |e| blk: { _ = try tc.inferExpr(e.expr); break :blk .bool; },
             .orelse_        => |e| try tc.inferOrelse(e),
             .catch_         => |e| try tc.inferCatch(e),
@@ -574,10 +1105,18 @@ const TypeChecker = struct {
             .old            => |e| try tc.inferExpr(e.expr),
             // try expr — propagates error; result type is the unwrapped value type
             .try_           => |e| try tc.inferExpr(e.expr),
+            // Tuple literal: infer each element type and build a tuple Type.
+            .tuple_lit      => |e| blk: {
+                const elems = try tc.map_alloc.alloc(Type, e.elems.len);
+                for (e.elems, elems) |el, *out| out.* = try tc.inferExpr(el);
+                break :blk Type{ .tuple = elems };
+            },
         };
     }
 
     fn inferIdent(tc: TypeChecker, e: *const Ast.ExprIdent) Type {
+        // Check if this ident is nil-narrowed in the current scope.
+        if (tc.narrowed_types.get(e.name)) |narrowed| return narrowed;
         const sym = tc.resolve.exprs.get(e) orelse return .unknown;
         const t = tc.symbolType(sym);
         if (t != .unknown) return t;
@@ -586,7 +1125,35 @@ const TypeChecker = struct {
     }
 
     fn inferMember(tc: TypeChecker, e: *Ast.ExprMember) anyerror!Type {
+        // Cross-module field access: Math.PI where `use Math` imported a dep.
+        if (e.object.* == .ident) {
+            const mod_sym_opt: ?*const Symbol = switch (e.object.*) {
+                .ident => |*id| tc.resolve.exprs.get(id),
+                else   => null,
+            };
+            if (mod_sym_opt) |mod_sym| if (mod_sym.kind == .module) {
+                _ = try tc.inferExpr(e.object);
+                if (tc.imported_modules) |imp| {
+                    if (imp.get(mod_sym.name)) |iface| {
+                        const key = try std.fmt.allocPrint(tc.map_alloc,
+                            "{s}.{s}", .{ mod_sym.name, e.member });
+                        defer tc.map_alloc.free(key);
+                        if (iface.fields.get(key))  |t| return t;
+                        if (iface.methods.get(key)) |t| return t;
+                    }
+                }
+                return .unknown;
+            };
+        }
         const obj_type = try tc.inferExpr(e.object);
+        // Tuple index access: p.0, p.1, …
+        if (obj_type == .tuple) {
+            const idx = std.fmt.parseInt(usize, e.member, 10) catch return .unknown;
+            if (idx < obj_type.tuple.len) return obj_type.tuple[idx];
+            try tc.emitError(e.span, "tuple index {} out of bounds (tuple has {} elements)",
+                .{ idx, obj_type.tuple.len });
+            return .unknown;
+        }
         // `len` property on strings and StringBuilder → usize (represented as .uint)
         if (std.mem.eql(u8, e.member, "len") and
             (obj_type == .string or obj_type == .string_builder)) return .uint;
@@ -629,15 +1196,49 @@ const TypeChecker = struct {
                     const obj_type = tc.expr_types.get(callee.member.object) orelse .unknown;
                     if (obj_type == .string) return .char;
                 }
-                // re.findAll(s) → each element is a string
-                if (std.mem.eql(u8, m, "findAll")) {
+                // re.findAll(s) / re.groups(s) → each element is a string
+                if (std.mem.eql(u8, m, "findAll") or std.mem.eql(u8, m, "groups")) {
                     const obj_type = tc.expr_types.get(callee.member.object) orelse .unknown;
                     if (obj_type == .regex) return .string;
                 }
+                // Net.resolve(host) → each element is a string (IP address)
+                if (std.mem.eql(u8, m, "resolve")) {
+                    if (callee.member.object.* == .ident and
+                        std.mem.eql(u8, callee.member.object.ident.name, "Net")) return .string;
+                }
             }
         }
-        // list.items (member access on a List(T)) → element type; currently unknown without generics tracking
-        // list (bare List ident) → element type currently unknown
+        // str_slice variable (e.g. result of Net.resolve stored in a var) → string elements.
+        if (iter.* == .ident) {
+            const t = tc.expr_types.get(iter) orelse .unknown;
+            if (t == .str_slice) return .string;
+        }
+        // Loop variable known to be List(T) via list_elem_types (e.g. value var from
+        // for k, v in HashMap(K, List(T))) — return its recorded element type.
+        if (iter.* == .ident) {
+            if (tc.list_elem_types.get(iter.ident.name)) |elem_t| return elem_t;
+        }
+        // Bare identifier declared as List(T) — extract element type from the
+        // variable's type annotation so that for-in loops print correctly.
+        if (iter.* == .ident) {
+            if (tc.resolve.exprs.get(&iter.ident)) |sym| {
+                const decl_type_opt: ?Ast.TypeRef = switch (sym.decl) {
+                    .var_  => |dv| dv.type_,
+                    .param => |p|  p.type_,
+                    else   => null,
+                };
+                if (decl_type_opt) |dt| {
+                    if (dt == .generic and
+                        std.mem.eql(u8, dt.generic.name, "List") and
+                        dt.generic.args.len > 0)
+                    {
+                        const elem_tr = &dt.generic.args[0];
+                        const t = tc.typeFromRef(elem_tr);
+                        if (t != .unknown) return t;
+                    }
+                }
+            }
+        }
         // for_num loop var → int (handled at the call site)
         return .unknown;
     }
@@ -664,7 +1265,14 @@ const TypeChecker = struct {
                     _ = try tc.inferExpr(mem.object);
                     if (std.mem.eql(u8, mem.member, "read"))      return .string;
                     if (std.mem.eql(u8, mem.member, "readLines")) return .unknown; // List(str)
+                    if (std.mem.eql(u8, mem.member, "listDir"))   return .unknown; // List(str)
                     if (std.mem.eql(u8, mem.member, "exists"))    return .bool;
+                    return .void_;
+                }
+                // Shell.* static methods.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Shell")) {
+                    _ = try tc.inferExpr(mem.object);
+                    if (std.mem.eql(u8, mem.member, "run")) return .string;
                     return .void_;
                 }
                 // Http.* static methods.
@@ -692,6 +1300,18 @@ const TypeChecker = struct {
                     if (std.mem.eql(u8, mem.member, "socket")) return .udp_socket;
                     return .void_;
                 }
+                // Result.ok(v) / Result.err(v) — constructors; return type depends on context.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Result")) {
+                    _ = try tc.inferExpr(mem.object);
+                    for (e.args) |a| _ = try tc.inferExpr(a.value);
+                    return .unknown; // full generic Result type not modelled yet
+                }
+                // Net.* static methods.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Net")) {
+                    _ = try tc.inferExpr(mem.object);
+                    if (std.mem.eql(u8, mem.member, "resolve")) return .str_slice;
+                    return .void_;
+                }
                 // Regex.* static methods.
                 if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Regex")) {
                     _ = try tc.inferExpr(mem.object);
@@ -716,6 +1336,27 @@ const TypeChecker = struct {
                     if (std.mem.eql(u8, mem.member, "errln"))   return .void_;
                     return .void_;
                 }
+                // Cross-module call: Math.square(5) where `use Math` imported a dep.
+                // Detected by the receiver being a bare ident whose symbol kind is .module.
+                if (mem.object.* == .ident) {
+                    const mod_sym_opt: ?*const Symbol = switch (mem.object.*) {
+                        .ident => |*id| tc.resolve.exprs.get(id),
+                        else   => null,
+                    };
+                    if (mod_sym_opt) |mod_sym| if (mod_sym.kind == .module) {
+                        _ = try tc.inferExpr(mem.object);
+                        if (tc.imported_modules) |imp| {
+                            if (imp.get(mod_sym.name)) |iface| {
+                                const key = try std.fmt.allocPrint(tc.map_alloc,
+                                    "{s}.{s}", .{ mod_sym.name, mem.member });
+                                defer tc.map_alloc.free(key);
+                                if (iface.methods.get(key)) |ret| return ret;
+                                if (iface.fields.get(key))  |ret| return ret;
+                            }
+                        }
+                        return .unknown;
+                    };
+                }
                 // Stdlib method call: infer return type from receiver type + method name.
                 const obj_type = try tc.inferExpr(mem.object);
                 // User-defined class/struct methods: look up declared return type.
@@ -727,7 +1368,62 @@ const TypeChecker = struct {
                                 const decl = member_sym.decl.method;
                                 return tc.typeFromOptRef(if (decl.return_type) |*rt| rt else null);
                             }
+                            // Union variant constructor: Shape.circle(...) → Shape
+                            if (member_sym.kind == .union_variant) return obj_type;
                             return tc.symbolType(member_sym);
+                        }
+                    }
+                    // No scope match but object is a union — still a variant constructor.
+                    if (class_sym.kind == .union_) return obj_type;
+                }
+                // Extension method lookup: "TypeName.method" in ext_methods map.
+                if (tc.extTypeName(obj_type)) |tname| {
+                    const key = try std.fmt.allocPrint(tc.map_alloc, "{s}.{s}", .{tname, mem.member});
+                    defer tc.map_alloc.free(key);
+                    if (tc.ext_methods.get(key)) |ext_meth| {
+                        return tc.typeFromOptRef(if (ext_meth.return_type) |*rt| rt else null);
+                    }
+                }
+                // Result(T, E) method inference: look up the receiver's declared type.
+                if (mem.object.* == .ident) {
+                    if (tc.resolve.exprs.get(&mem.object.ident)) |sym| {
+                        const declared_tr: ?Ast.TypeRef = switch (sym.decl) {
+                            .var_   => |v| v.type_,
+                            .param  => |p| p.type_,
+                            else    => null,
+                        };
+                        if (declared_tr) |dtr| {
+                            // List(T).at(i) → T
+                            if (dtr == .generic and std.mem.eql(u8, dtr.generic.name, "List") and
+                                std.mem.eql(u8, mem.member, "at") and dtr.generic.args.len >= 1)
+                            {
+                                return tc.typeFromRef(&dtr.generic.args[0]);
+                            }
+                            // HashMap(K,V).fetch(k) → V
+                            if (dtr == .generic and std.mem.eql(u8, dtr.generic.name, "HashMap") and
+                                std.mem.eql(u8, mem.member, "fetch") and dtr.generic.args.len >= 2)
+                            {
+                                return tc.typeFromRef(&dtr.generic.args[1]);
+                            }
+                            if (dtr == .generic and std.mem.eql(u8, dtr.generic.name, "Result")) {
+                                const gtr = dtr.generic;
+                                if (std.mem.eql(u8, mem.member, "okValue") and gtr.args.len >= 1) {
+                                    const inner = tc.typeFromRef(&gtr.args[0]);
+                                    const boxed = tc.map_alloc.create(Type) catch return .unknown;
+                                    boxed.* = inner;
+                                    return Type{ .optional = boxed };
+                                }
+                                if (std.mem.eql(u8, mem.member, "errValue") and gtr.args.len >= 2) {
+                                    const inner = tc.typeFromRef(&gtr.args[1]);
+                                    const boxed = tc.map_alloc.create(Type) catch return .unknown;
+                                    boxed.* = inner;
+                                    return Type{ .optional = boxed };
+                                }
+                                if (std.mem.eql(u8, mem.member, "unwrap") and gtr.args.len >= 1)
+                                    return tc.typeFromRef(&gtr.args[0]);
+                                if (std.mem.eql(u8, mem.member, "unwrapOr") and gtr.args.len >= 1)
+                                    return tc.typeFromRef(&gtr.args[0]);
+                            }
                         }
                     }
                 }
@@ -787,6 +1483,7 @@ const TypeChecker = struct {
             if (std.mem.eql(u8, method, "match"))   return .bool;
             if (std.mem.eql(u8, method, "find"))    return .string;
             if (std.mem.eql(u8, method, "findAll")) return .unknown; // []const []const u8 slice — not modelled
+            if (std.mem.eql(u8, method, "groups"))  return .unknown; // []const []const u8 slice — not modelled
             if (std.mem.eql(u8, method, "replace")) return .string;
             return .void_;
         }
@@ -795,10 +1492,24 @@ const TypeChecker = struct {
             if (std.mem.eql(u8, method, "button"))   return .bool;
             if (std.mem.eql(u8, method, "checkbox")) return .bool;
             if (std.mem.eql(u8, method, "slider"))   return .float;
-            if (std.mem.eql(u8, method, "input"))    return .string;
+            if (std.mem.eql(u8, method, "input"))         return .string;
+            if (std.mem.eql(u8, method, "inputMultiline")) return .string;
             // void-returning widgets
             return .void_;  // text, separator, sameLine, spacing, indent, unindent, panel, window
         }
+        // Shell methods
+        if (obj_type == .shell) {
+            if (std.mem.eql(u8, method, "run")) return .string;
+            return .void_;
+        }
+        // File methods (static-style)
+        if (obj_type == .file) {
+            if (std.mem.eql(u8, method, "listDir")) return .unknown; // List(str) — not modelled
+            return .unknown;
+        }
+        // Result(T, E) methods — obj_type is .unknown since generics not modelled; check by method name
+        if (std.mem.eql(u8, method, "isOk") or std.mem.eql(u8, method, "isErr")) return .bool;
+        // unwrap/unwrapOr/okValue/errValue return .unknown (inner type not tracked)
         // toString() on any type → string
         if (std.mem.eql(u8, method, "toString")) return .string;
         // List / HashMap methods
@@ -808,8 +1519,12 @@ const TypeChecker = struct {
         const bool_methods = std.StaticStringMap(void).initComptime(&.{
             .{ "contains", {} },
         });
-        if (count_methods.get(method) != null) return .int;
-        if (bool_methods.get(method)  != null) return .bool;
+        const void_list_methods = std.StaticStringMap(void).initComptime(&.{
+            .{ "sort", {} }, .{ "sortBy", {} },
+        });
+        if (count_methods.get(method)      != null) return .int;
+        if (bool_methods.get(method)       != null) return .bool;
+        if (void_list_methods.get(method)  != null) return .void_;
         return .unknown;
     }
 
@@ -881,11 +1596,12 @@ const TypeChecker = struct {
     fn inferOrelse(tc: TypeChecker, e: *Ast.ExprOrelse) anyerror!Type {
         const et = try tc.inferExpr(e.expr);
         const ft = try tc.inferExpr(e.fallback);
-        // The fallback should be assignable to the non-nilable form of expr's type.
-        // Since we don't model nilable types yet, just verify the fallback is compatible.
-        if (et != .unknown and ft != .unknown and !Type.isAssignable(ft, et))
-            try tc.emitMismatch(spanOf(e.fallback), ft, et);
-        return et;
+        // Unwrap: `opt orelse fallback` has the inner (non-optional) type.
+        const inner = if (et == .optional) et.optional.* else et;
+        // Fallback must be assignable to the inner type.
+        if (inner != .unknown and ft != .unknown and !Type.isAssignable(ft, inner))
+            try tc.emitMismatch(spanOf(e.fallback), ft, inner);
+        return inner;
     }
 
     fn inferCatch(tc: TypeChecker, e: *Ast.ExprCatch) anyerror!Type {
@@ -908,7 +1624,9 @@ const TypeChecker = struct {
     }
 
     fn inferLambda(tc: TypeChecker, e: *Ast.ExprLambda) anyerror!Type {
-        const ret = tc.typeFromOptRef(if (e.return_type) |*rt| rt else null);
+        // When the lambda has no explicit return type, use .unknown so that
+        // `return expr` inside the body isn't checked against void.
+        const ret: Type = if (e.return_type) |*rt| tc.typeFromRef(rt) else .unknown;
         const inner = tc.withReturn(ret);
         switch (e.body) {
             .expr  => |ex| _ = try inner.inferExpr(ex),
@@ -977,10 +1695,21 @@ const TypeChecker = struct {
                     .symbol  => |s| .{ .named = s },
                 };
             },
+            .nilable => |inner| blk: {
+                const inner_type = tc.typeFromRef(inner);
+                const boxed = tc.map_alloc.create(Type) catch break :blk .unknown;
+                boxed.* = inner_type;
+                break :blk Type{ .optional = boxed };
+            },
             // Compound types deferred to a later pass.
-            .nilable, .stream, .error_union, .generic => .unknown,
+            .stream, .error_union, .generic => .unknown,
             .void_ => .void_,
             .same  => if (tc.owner_sym) |s| Type{ .named = s } else .unknown,
+            .tuple => |ttr| blk: {
+                const elems = tc.map_alloc.alloc(Type, ttr.elems.len) catch break :blk .unknown;
+                for (ttr.elems, elems) |*el, *out| out.* = tc.typeFromRef(el);
+                break :blk Type{ .tuple = elems };
+            },
         };
     }
 
@@ -1030,6 +1759,7 @@ fn spanOf(expr: *const Ast.Expr) Ast.Span {
         .all_any       => |e| e.span,
         .old           => |e| e.span,
         .try_          => |e| e.span,
+        .tuple_lit     => |e| e.span,
     };
 }
 
@@ -1043,6 +1773,8 @@ fn builtinType(n: []const u8) Type {
     if (std.mem.eql(u8, n, "UdpSocket"))     return .udp_socket;
     if (std.mem.eql(u8, n, "Regex"))         return .regex;
     if (std.mem.eql(u8, n, "Gui"))          return .gui_context;
+    if (std.mem.eql(u8, n, "Shell"))        return .shell;
+    if (std.mem.eql(u8, n, "File"))         return .file;
     return switch (Builtins.scalarKind(n)) {
         .int        => .int,
         .uint       => .uint,
@@ -1093,7 +1825,7 @@ fn checkSnippet(src: []const u8) anyerror!TestResult {
 
     var resolve = try Resolver.resolvePass2(module, &bind.table, alloc, alloc);
 
-    const tc = try typeCheckPass3(module, &resolve, alloc, alloc);
+    const tc = try typeCheckPass3(module, &resolve, alloc, alloc, null);
     return .{ .resolve = resolve, .tc = tc, .sym_arena = sym_arena };
 }
 
