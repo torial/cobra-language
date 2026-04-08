@@ -1,0 +1,28 @@
+class Main
+    shared
+        def main
+            # Anchors ^ and $
+            var anchored = Regex.compile("^hello$")
+            print anchored.match("hello")        # true
+            print anchored.match("hello world")  # false
+
+            # Start anchor only
+            var starts = Regex.compile("^\\d+")
+            print starts.find("42 abc")          # 42
+            print starts.find("abc 42")          # (empty — no match at start)
+
+            # {n} exact count
+            var exact = Regex.compile("\\d{4}")
+            print exact.match("2026")            # true
+            print exact.match("123")             # false
+
+            # {n,m} range
+            var range_re = Regex.compile("a{2,4}")
+            print range_re.match("aa")           # true
+            print range_re.match("aaaa")         # true
+            print range_re.match("a")            # false
+
+            # Non-capturing group (?:...)
+            var nc = Regex.compile("(?:ab)+")
+            print nc.match("abab")               # true
+            print nc.match("ab")                 # true

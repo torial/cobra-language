@@ -225,7 +225,7 @@ fn _net_resolve(host: []const u8) []const []const u8 {
     return _result.toOwnedSlice(std.heap.page_allocator) catch &.{};
 }
 // ─── Thompson NFA regex engine ───────────────────────────────────────────────
-const _RNodeKind = enum(u8) { match, lit, dot, cls, split, save };
+const _RNodeKind = enum(u8) { match, lit, dot, cls, split, save, bol, eol_a };
 const _RNode = struct {
     kind: _RNodeKind, c: u8 = 0, bits: [32]u8 = [_]u8{0} ** 32,
     neg: bool = false, slot: u8 = 0, out1: u32 = 0xFFFF_FFFF, out2: u32 = 0xFFFF_FFFF,
@@ -274,8 +274,18 @@ const _RC = struct {
     fn parseAtom(c: *_RC) error{OutOfMemory}!?_RFrag {
         const ch = c.peek() orelse return null;
         switch (ch) {
+            '^' => { _ = c.eat(); const idx = try c.addNode(.{ .kind = .bol }); return _RFrag.one(idx, idx); },
+            '$' => { _ = c.eat(); const idx = try c.addNode(.{ .kind = .eol_a }); return _RFrag.one(idx, idx); },
             '(' => {
-                _ = c.eat(); const slot: u8 = c.n_caps * 2; c.n_caps += 1;
+                _ = c.eat();
+                // Non-capturing group (?:...)
+                if (c.peek() == '?' and c.pos + 1 < c.pat.len and c.pat[c.pos + 1] == ':') {
+                    c.pos += 2;
+                    if (try c.parseAlt()) |inner| { _ = c.expect(')'); return inner; }
+                    _ = c.expect(')'); return null;
+                }
+                // Capturing group
+                const slot: u8 = c.n_caps * 2; c.n_caps += 1;
                 const open = try c.addNode(.{ .kind = .save, .slot = slot });
                 if (try c.parseAlt()) |inner| {
                     c.patchFrag(inner, try c.addNode(.{ .kind = .save, .slot = slot + 1 }));
@@ -307,6 +317,7 @@ const _RC = struct {
         }
     }
     fn parsePieceFixed(c: *_RC) error{OutOfMemory}!?_RFrag {
+        const atom_pos = c.pos;
         const atom = try c.parseAtom() orelse return null;
         const q = c.peek() orelse return atom;
         switch (q) {
@@ -326,6 +337,45 @@ const _RC = struct {
                 _ = c.eat();
                 const sp = try c.addNode(.{ .kind = .split, .out1 = atom.start, .out2 = 0xFFFF_FFFF });
                 return _RFrag.two(sp, atom.outs[0], sp | 0x8000_0000);
+            },
+            '{' => {
+                _ = c.eat();
+                var n: u32 = 0;
+                while (c.peek()) |d| { if (d < '0' or d > '9') break; n = n *% 10 +% (d - '0'); _ = c.eat(); }
+                var m: u32 = n; var unbounded = false;
+                if (c.expect(',')) {
+                    if (c.peek() == '}') { unbounded = true; }
+                    else { m = 0; while (c.peek()) |d| { if (d < '0' or d > '9') break; m = m *% 10 +% (d - '0'); _ = c.eat(); } }
+                }
+                _ = c.expect('}');
+                if (n == 0 and m == 0 and !unbounded) return atom; // degenerate {0}
+                const after_q = c.pos;
+                // build result: start with the already-parsed atom (counts as copy 1)
+                var result: _RFrag = atom;
+                // mandatory copies 2..n
+                var i: u32 = 1;
+                while (i < n) : (i += 1) {
+                    c.pos = atom_pos; const next = try c.parseAtom() orelse break; c.pos = after_q;
+                    c.patchFrag(result, next.start);
+                    result = .{ .start = result.start, .outs = next.outs, .n = next.n };
+                }
+                // optional copies n+1..m
+                var j: u32 = 0;
+                while (j < m -| n) : (j += 1) {
+                    c.pos = atom_pos; const next = try c.parseAtom() orelse break; c.pos = after_q;
+                    const sp = try c.addNode(.{ .kind = .split, .out1 = next.start, .out2 = 0xFFFF_FFFF });
+                    c.patchFrag(result, sp);
+                    var f2 = _RFrag{ .start = result.start }; f2.outs[0] = next.outs[0]; f2.outs[1] = sp | 0x8000_0000; f2.n = 2; result = f2;
+                }
+                // unbounded: add * at end
+                if (unbounded) {
+                    c.pos = atom_pos; const last_a = try c.parseAtom() orelse { c.pos = after_q; return result; }; c.pos = after_q;
+                    const sp = try c.addNode(.{ .kind = .split, .out1 = last_a.start, .out2 = 0xFFFF_FFFF });
+                    c.patch(last_a, sp);
+                    c.patchFrag(result, sp);
+                    var f3 = _RFrag{ .start = result.start }; f3.outs[0] = sp | 0x8000_0000; f3.n = 1; return f3;
+                }
+                return result;
             },
             else => return atom,
         }
@@ -351,12 +401,14 @@ const _RC = struct {
 };
 const Regex = struct {
     nodes: []_RNode, start: u32, alloc: std.mem.Allocator,
-    fn closure(re: *const Regex, cur: *std.ArrayListUnmanaged(u32), vis: []bool, alloc: std.mem.Allocator, idx: u32) error{OutOfMemory}!void {
-        if (idx == 0xFFFF_FFFF or vis[idx]) return;
+    fn closure(re: *const Regex, cur: *std.ArrayListUnmanaged(u32), vis: []bool, alloc: std.mem.Allocator, idx: u32, pos: usize, input_len: usize) error{OutOfMemory}!void {
+        if (idx == 0xFFFF_FFFF or idx >= re.nodes.len or vis[idx]) return;
         vis[idx] = true;
         switch (re.nodes[idx].kind) {
-            .split => { try re.closure(cur, vis, alloc, re.nodes[idx].out1); try re.closure(cur, vis, alloc, re.nodes[idx].out2); },
-            .save  => try re.closure(cur, vis, alloc, re.nodes[idx].out1),
+            .split => { try re.closure(cur, vis, alloc, re.nodes[idx].out1, pos, input_len); try re.closure(cur, vis, alloc, re.nodes[idx].out2, pos, input_len); },
+            .save  => try re.closure(cur, vis, alloc, re.nodes[idx].out1, pos, input_len),
+            .bol   => if (pos == 0) try re.closure(cur, vis, alloc, re.nodes[idx].out1, pos, input_len),
+            .eol_a => if (pos == input_len) try re.closure(cur, vis, alloc, re.nodes[idx].out1, pos, input_len),
             else   => try cur.append(alloc, idx),
         }
     }
@@ -365,7 +417,7 @@ const Regex = struct {
         var cur: std.ArrayListUnmanaged(u32) = .{}; var nxt: std.ArrayListUnmanaged(u32) = .{};
         defer cur.deinit(alloc); defer nxt.deinit(alloc);
         const vis = try alloc.alloc(bool, re.nodes.len); defer alloc.free(vis);
-        @memset(vis, false); try re.closure(&cur, vis, alloc, re.start);
+        @memset(vis, false); try re.closure(&cur, vis, alloc, re.start, from, input.len);
         var last: ?usize = null;
         for (cur.items) |si| if (re.nodes[si].kind == .match) { last = from; break; };
         var pos = from;
@@ -374,7 +426,7 @@ const Regex = struct {
             for (cur.items) |si| {
                 const nd = &re.nodes[si];
                 const ok = switch (nd.kind) { .lit => nd.c == ch, .dot => ch != '\n', .cls => _rClsMatch(nd, ch), else => false };
-                if (ok) try re.closure(&nxt, vis, alloc, nd.out1);
+                if (ok) try re.closure(&nxt, vis, alloc, nd.out1, pos + 1, input.len);
             }
             std.mem.swap(std.ArrayListUnmanaged(u32), &cur, &nxt);
             for (cur.items) |si| if (re.nodes[si].kind == .match) { last = pos + 1; break; };
@@ -449,7 +501,7 @@ const _RegThread = struct { state: u32, saves: [_MAX_SAVE_SLOTS]usize };
 fn _re_eclosure_s(
     re: *const Regex, cur: *std.ArrayListUnmanaged(_RegThread),
     vis: []bool, alloc: std.mem.Allocator,
-    state: u32, saves: [_MAX_SAVE_SLOTS]usize, pos: usize,
+    state: u32, saves: [_MAX_SAVE_SLOTS]usize, pos: usize, input_len: usize,
 ) std.mem.Allocator.Error!void {
     if (state == 0xFFFF_FFFF or state >= re.nodes.len) return;
     if (vis[state]) return;
@@ -457,14 +509,16 @@ fn _re_eclosure_s(
     const nd = &re.nodes[state];
     switch (nd.kind) {
         .split => {
-            try _re_eclosure_s(re, cur, vis, alloc, nd.out1, saves, pos);
-            try _re_eclosure_s(re, cur, vis, alloc, nd.out2, saves, pos);
+            try _re_eclosure_s(re, cur, vis, alloc, nd.out1, saves, pos, input_len);
+            try _re_eclosure_s(re, cur, vis, alloc, nd.out2, saves, pos, input_len);
         },
         .save => {
             var ns = saves;
             if (nd.slot < _MAX_SAVE_SLOTS) ns[nd.slot] = pos;
-            try _re_eclosure_s(re, cur, vis, alloc, nd.out1, ns, pos);
+            try _re_eclosure_s(re, cur, vis, alloc, nd.out1, ns, pos, input_len);
         },
+        .bol   => if (pos == 0) try _re_eclosure_s(re, cur, vis, alloc, nd.out1, saves, pos, input_len),
+        .eol_a => if (pos == input_len) try _re_eclosure_s(re, cur, vis, alloc, nd.out1, saves, pos, input_len),
         else => try cur.append(alloc, .{ .state = state, .saves = saves }),
     }
 }
@@ -478,7 +532,7 @@ fn _re_match_with_saves(re: *const Regex, input: []const u8, from: usize) ?[_MAX
     const vis = alloc.alloc(bool, re.nodes.len) catch return null;
     defer alloc.free(vis);
     @memset(vis, false);
-    _re_eclosure_s(re, &cur, vis, alloc, re.start, empty, from) catch return null;
+    _re_eclosure_s(re, &cur, vis, alloc, re.start, empty, from, input.len) catch return null;
     var last: ?[_MAX_SAVE_SLOTS]usize = null;
     for (cur.items) |t| { if (re.nodes[t.state].kind == .match) { last = t.saves; break; } }
     var pos = from;
@@ -487,7 +541,7 @@ fn _re_match_with_saves(re: *const Regex, input: []const u8, from: usize) ?[_MAX
         for (cur.items) |t| {
             const nd = &re.nodes[t.state];
             const ok = switch (nd.kind) { .lit => nd.c == ch, .dot => ch != '\n', .cls => _rClsMatch(nd, ch), else => false };
-            if (ok) _re_eclosure_s(re, &nxt, vis, alloc, nd.out1, t.saves, pos + 1) catch {};
+            if (ok) _re_eclosure_s(re, &nxt, vis, alloc, nd.out1, t.saves, pos + 1, input.len) catch {};
         }
         std.mem.swap(std.ArrayListUnmanaged(_RegThread), &cur, &nxt);
         for (cur.items) |t| { if (re.nodes[t.state].kind == .match) { last = t.saves; break; } }
