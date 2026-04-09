@@ -1711,7 +1711,7 @@ const Builder = struct {
                 .kw_or     => mk.bin(b, s, .or_,     left, right),
                 .kw_and    => mk.bin(b, s, .and_,    left, right),
                 .kw_is     => mk.bin(b, s, .eq,      left, right),
-                .kw_in     => mk.bin(b, s, .eq,      left, right),
+                .kw_in     => mk.bin(b, s, .in_,     left, right),
                 .eq        => mk.bin(b, s, .eq,      left, right),
                 .ne,
                 .bang_equals => mk.bin(b, s, .ne, left, right), // <> and != both mean not-equal
@@ -1757,7 +1757,7 @@ const Builder = struct {
         if (kids.len == 4 and isLeafKind(kids[1], .kw_not) and isLeafKind(kids[2], .kw_in)) {
             const inner_bin = try b.box(Ast.ExprBinary, .{
                 .span  = s,
-                .op    = .eq,
+                .op    = .in_,
                 .left  = try b.box(Ast.Expr, try b.buildExpr(kids[0])),
                 .right = try b.box(Ast.Expr, try b.buildExpr(kids[3])),
             });
@@ -2150,20 +2150,39 @@ const Builder = struct {
     }
 
     fn flattenArgListNE(b: Builder, node: TN, out: *std.ArrayList(Ast.Arg)) !void {
-        // Expr | ArgListNE , Expr
+        // Expr                        → kids.len == 1  (positional)
+        // id : Expr                   → kids.len == 3, kids[1] is colon (named)
+        // ArgListNE , Expr            → kids.len == 3, kids[1] is comma (list + positional)
+        // ArgListNE , id : Expr       → kids.len == 5 (list + named)
         const kids = ch(node);
         if (kids.len == 1) {
-            try out.append(b.arena,.{
+            try out.append(b.arena, .{
                 .span  = spanOf(kids[0], b.tokens),
                 .name  = null,
                 .value = try b.box(Ast.Expr, try b.buildExpr(kids[0])),
             });
-        } else {
+        } else if (kids.len == 3 and isLeafKind(kids[1], .colon)) {
+            // Single named arg: id : Expr
+            try out.append(b.arena, .{
+                .span  = spanOf(kids[2], b.tokens),
+                .name  = leafText(kids[0], b.tokens),
+                .value = try b.box(Ast.Expr, try b.buildExpr(kids[2])),
+            });
+        } else if (kids.len == 3) {
+            // ArgListNE , Expr — positional continuation
             try b.flattenArgListNE(kids[0], out);
-            try out.append(b.arena,.{
+            try out.append(b.arena, .{
                 .span  = spanOf(kids[2], b.tokens),
                 .name  = null,
                 .value = try b.box(Ast.Expr, try b.buildExpr(kids[2])),
+            });
+        } else {
+            // ArgListNE , id : Expr — named continuation (kids.len == 5)
+            try b.flattenArgListNE(kids[0], out);
+            try out.append(b.arena, .{
+                .span  = spanOf(kids[4], b.tokens),
+                .name  = leafText(kids[2], b.tokens),
+                .value = try b.box(Ast.Expr, try b.buildExpr(kids[4])),
             });
         }
     }

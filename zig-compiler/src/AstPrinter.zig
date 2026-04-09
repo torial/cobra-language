@@ -591,6 +591,7 @@ const Printer = struct {
             .ge     => ">=",
             .and_   => "and",
             .or_    => "or",
+            .in_    => "in",
             .dotdot => "..",
         };
         try p.w("({s} ", .{op});

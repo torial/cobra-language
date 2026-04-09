@@ -1220,6 +1220,9 @@ const list_rules: []const Rule = &.{
     .{ .lhs = .ArgList,   .rhs = &.{ n(.ArgListNE) } },
     .{ .lhs = .ArgListNE, .rhs = &.{ n(.Expr) } },
     .{ .lhs = .ArgListNE, .rhs = &.{ n(.ArgListNE), t(.comma), n(.Expr) } },
+    // Named argument: label: Expr
+    .{ .lhs = .ArgListNE, .rhs = &.{ t(.id), t(.colon), n(.Expr) } },
+    .{ .lhs = .ArgListNE, .rhs = &.{ n(.ArgListNE), t(.comma), t(.id), t(.colon), n(.Expr) } },
 
     // ExprList — for print, branch on, etc.
     .{ .lhs = .ExprList,   .rhs = &.{} }, // ε

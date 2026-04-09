@@ -75,4 +75,17 @@ These fail WITH A COMPILER ERROR — that IS the test passing:
 
 ---
 
+---
+
+### BUG-007: `String + String` string concatenation not handled — FIXED
+- **Status:** Fixed 2026-04-09
+- **Was:** `+` operator on strings fell through to the numeric `else` branch in `genBinary`, emitting `(a + b)` which Zig rejects for `[]const u8`. TypeChecker also rejected `String + String` as arithmetic.
+- **Fix:**
+  - TypeChecker `inferBinary`: added `if (e.op == .add and lt == .string) break :blk .string` before the numeric guard.
+  - CodeGen `genBinary`: added dedicated `.add` case — if left operand is string, emits `_str_concat(a, b, _allocator)`.
+  - Preamble: added `_str_concat(a, b, alloc)` using `std.mem.concat`.
+- **Note:** String concat was previously untested; all prior tests used interpolation `"${var}"` or `StringBuilder`. Now `greeting + ", " + name` style works.
+
+---
+
 *Last updated: 2026-04-09*

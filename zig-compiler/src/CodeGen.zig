@@ -235,8 +235,8 @@ fn binaryOpStr(op: Ast.BinaryOp) []const u8 {
         .ge      => ">=",
         .and_    => "and",
         .or_     => "or",
-        // int_div, pow, dotdot handled specially in genBinary.
-        .int_div, .pow, .dotdot => unreachable,
+        // int_div, pow, dotdot, in_ handled specially in genBinary.
+        .int_div, .pow, .dotdot, .in_ => unreachable,
     };
 }
 
@@ -972,6 +972,40 @@ const Generator = struct {
             \\fn _zebra_ge(a: anytype, b: anytype) bool {
             \\    if (comptime @TypeOf(a) == []const u8) return std.mem.order(u8, a, b) != .lt;
             \\    return a >= b;
+            \\}
+            \\/// `item in container` — membership test for List, string (substring), HashMap.
+            \\fn _zebra_in(item: anytype, container: anytype) bool {
+            \\    const C = @TypeOf(container);
+            \\    const I = @TypeOf(item);
+            \\    // Struct types: ArrayList (has .items field) or HashMap (has .contains decl).
+            \\    if (comptime @typeInfo(C) == .@"struct") {
+            \\        if (comptime @hasField(C, "items")) {
+            \\            for (container.items) |elem| {
+            \\                if (comptime I == []const u8 or @typeInfo(I) == .pointer) {
+            \\                    if (std.mem.eql(u8, elem, item)) return true;
+            \\                } else {
+            \\                    if (elem == item) return true;
+            \\                }
+            \\            }
+            \\            return false;
+            \\        }
+            \\        if (comptime @hasDecl(C, "contains")) return container.contains(item);
+            \\        return false;
+            \\    }
+            \\    // Pointer/array types: string substring check (coerce to []const u8).
+            \\    return std.mem.indexOf(u8, @as([]const u8, container), @as([]const u8, item)) != null;
+            \\}
+            \\/// `s + t` — string concatenation.
+            \\fn _str_concat(a: []const u8, b: []const u8, alloc: std.mem.Allocator) []const u8 {
+            \\    return std.mem.concat(alloc, u8, &.{ a, b }) catch @panic("OOM");
+            \\}
+            \\/// `s * n` — repeat string s n times.
+            \\fn _str_repeat(s: []const u8, n: anytype, alloc: std.mem.Allocator) []const u8 {
+            \\    const count: usize = @intCast(n);
+            \\    if (count == 0 or s.len == 0) return "";
+            \\    const buf = alloc.alloc(u8, s.len * count) catch @panic("OOM");
+            \\    for (0..count) |i| @memcpy(buf[i * s.len ..][0..s.len], s);
+            \\    return buf;
             \\}
         );
         // ── Result(T, E) — functional error type ──────────────────────────────
@@ -6189,6 +6223,78 @@ const Generator = struct {
         try g.w.writeAll(e.name);
     }
 
+    /// Return the `[]const Param` for a callee expression, or null if unavailable.
+    /// Used to support named/default arguments at call sites.
+    fn lookupParams(g: Generator, e: *Ast.ExprCall) ?[]const Ast.Param {
+        if (e.callee.* == .ident) {
+            if (g.resolve.exprs.get(&e.callee.ident)) |sym| {
+                return switch (sym.decl) {
+                    .method => |m| m.params,
+                    else    => null,
+                };
+            }
+        }
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            const obj_type = if (g.tc) |tc| tc.expr_types.get(mem.object) orelse .unknown else .unknown;
+            if (obj_type == .named) {
+                const class_sym = obj_type.named;
+                if (class_sym.own_scope) |scope| {
+                    if (scope.lookupLocal(mem.member)) |method_sym| {
+                        if (method_sym.kind == .method) return method_sym.decl.method.params;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Emit a comma-separated argument list, honouring named args and defaults.
+    /// If params is null or no arg is named, falls back to positional emission.
+    fn genArgs(g: Generator, params: ?[]const Ast.Param, args: []const Ast.Arg) anyerror!void {
+        const has_named = for (args) |a| { if (a.name != null) break true; } else false;
+        if (!has_named) {
+            for (args, 0..) |a, i| {
+                if (i > 0) try g.w.writeAll(", ");
+                try g.genExpr(a.value);
+            }
+            return;
+        }
+        if (params) |ps| {
+            // Build a resolved array indexed by param position.
+            var resolved = try g.alloc.alloc(?*const Ast.Expr, ps.len);
+            defer g.alloc.free(resolved);
+            @memset(resolved, null);
+            var positional_idx: usize = 0;
+            for (args) |a| {
+                if (a.name) |name| {
+                    for (ps, 0..) |p, pi| {
+                        if (std.mem.eql(u8, p.name, name)) { resolved[pi] = a.value; break; }
+                    }
+                } else {
+                    while (positional_idx < ps.len and resolved[positional_idx] != null) : (positional_idx += 1) {}
+                    if (positional_idx < ps.len) { resolved[positional_idx] = a.value; positional_idx += 1; }
+                }
+            }
+            for (resolved, 0..) |maybe_expr, i| {
+                if (i > 0) try g.w.writeAll(", ");
+                if (maybe_expr) |expr| {
+                    try g.genExpr(expr);
+                } else if (i < ps.len and ps[i].default != null) {
+                    try g.genExpr(ps[i].default.?);
+                } else {
+                    try g.w.writeAll("undefined"); // missing required arg
+                }
+            }
+        } else {
+            // No param info — emit positionally in order written.
+            for (args, 0..) |a, i| {
+                if (i > 0) try g.w.writeAll(", ");
+                try g.genExpr(a.value);
+            }
+        }
+    }
+
     fn genCall(g: Generator, e: *Ast.ExprCall) anyerror!void {
         // Union construction: TypeName.variant(value) → TypeName{ .variant = value }
         // or TypeName.variant() → TypeName{ .variant = {} } for unit variants.
@@ -6468,10 +6574,7 @@ const Generator = struct {
                 if (cv.contains(e.callee.ident.name)) {
                     try g.w.writeAll(e.callee.ident.name);
                     try g.w.writeAll(".call(");
-                    for (e.args, 0..) |a, i| {
-                        if (i > 0) try g.w.writeAll(", ");
-                        try g.genExpr(a.value);
-                    }
+                    try g.genArgs(null, e.args);
                     try g.w.writeAll(")");
                     return;
                 }
@@ -6492,10 +6595,11 @@ const Generator = struct {
                     } else {
                         try g.w.print("self.{s}(", .{ident.name});
                     }
-                    for (e.args, 0..) |a, i| {
-                        if (i > 0) try g.w.writeAll(", ");
-                        try g.genExpr(a.value);
-                    }
+                    const bare_params: ?[]const Ast.Param = switch (sym.decl) {
+                        .method => |m| m.params,
+                        else    => null,
+                    };
+                    try g.genArgs(bare_params, e.args);
                     try g.w.writeAll(")");
                     return;
                 }
@@ -6503,10 +6607,7 @@ const Generator = struct {
         }
         try g.genExpr(e.callee);
         try g.w.writeAll("(");
-        for (e.args, 0..) |a, i| {
-            if (i > 0) try g.w.writeAll(", ");
-            try g.genExpr(a.value);
-        }
+        try g.genArgs(g.lookupParams(e), e.args);
         try g.w.writeAll(")");
     }
 
@@ -6528,6 +6629,25 @@ const Generator = struct {
                     try g.w.writeAll("@divTrunc(");
                     try g.genExpr(e.left);
                     try g.w.writeAll(", ");
+                    try g.genExpr(e.right);
+                    try g.w.writeAll(")");
+                }
+            },
+            .add => {
+                // str + str → string concatenation via _str_concat; otherwise numeric add.
+                const left_is_str = if (g.tc) |tc|
+                    (tc.expr_types.get(e.left) orelse .unknown) == .string
+                else false;
+                if (left_is_str) {
+                    try g.w.writeAll("_str_concat(");
+                    try g.genExpr(e.left);
+                    try g.w.writeAll(", ");
+                    try g.genExpr(e.right);
+                    try g.w.writeAll(", _allocator)");
+                } else {
+                    try g.w.writeAll("(");
+                    try g.genExpr(e.left);
+                    try g.w.writeAll(" + ");
                     try g.genExpr(e.right);
                     try g.w.writeAll(")");
                 }
@@ -6593,6 +6713,32 @@ const Generator = struct {
                 try g.w.writeAll(", ");
                 try g.genExpr(e.right);
                 try g.w.writeAll(")");
+            },
+            .in_ => {
+                try g.w.writeAll("_zebra_in(");
+                try g.genExpr(e.left);   // item (needle)
+                try g.w.writeAll(", ");
+                try g.genExpr(e.right);  // container (haystack)
+                try g.w.writeAll(")");
+            },
+            .mul => {
+                // str * int → string repetition; otherwise numeric multiply.
+                const left_is_str = if (g.tc) |tc|
+                    (tc.expr_types.get(e.left) orelse .unknown) == .string
+                else false;
+                if (left_is_str) {
+                    try g.w.writeAll("_str_repeat(");
+                    try g.genExpr(e.left);
+                    try g.w.writeAll(", ");
+                    try g.genExpr(e.right);
+                    try g.w.writeAll(", _allocator)");
+                } else {
+                    try g.w.writeAll("(");
+                    try g.genExpr(e.left);
+                    try g.w.writeAll(" * ");
+                    try g.genExpr(e.right);
+                    try g.w.writeAll(")");
+                }
             },
             else => {
                 try g.w.writeAll("(");

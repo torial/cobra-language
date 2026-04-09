@@ -90,6 +90,10 @@ pub const Type = union(enum) {
     json_value,
     /// `[]JsonValue` — JSON array slice returned by `getList`.
     json_array,
+    /// `DateTime` — epoch-ms point in time.
+    date_time,
+    /// `CalendarView` — calendar-specific lens over a `DateTime`.
+    calendar_view,
 
     // ── Optional ──────────────────────────────────────────────────────────────
     /// `?T` — nilable wrapper around another type.
@@ -131,6 +135,8 @@ pub const Type = union(enum) {
             .str_slice      => b == .str_slice,
             .sys_run_result => b == .sys_run_result,
             .json_value     => b == .json_value,
+            .date_time      => b == .date_time,
+            .calendar_view  => b == .calendar_view,
             .json_array     => b == .json_array,
             .tuple => |ea| switch (b) {
                 .tuple => |eb| blk: {
@@ -160,7 +166,9 @@ pub const Type = union(enum) {
         if (from == .http_response and to == .http_response) return true;
         if (from == .tcp_conn   and to == .tcp_conn)   return true;
         if (from == .udp_socket and to == .udp_socket) return true;
-        if (from == .regex      and to == .regex)      return true;
+        if (from == .regex      and to == .regex)       return true;
+        if (from == .date_time     and to == .date_time)     return true;
+        if (from == .calendar_view and to == .calendar_view) return true;
         if (from == .gui_context and to == .gui_context) return true;
         // optional(T) is assignable to optional(T), and nil (.optional(.void_)) to any optional
         if (from == .optional and to == .optional) return isAssignable(from.optional.*, to.optional.*);
@@ -197,6 +205,8 @@ pub const Type = union(enum) {
             .sys_run_result => "SysRunResult",
             .json_value     => "JsonValue",
             .json_array     => "[]JsonValue",
+            .date_time      => "DateTime",
+            .calendar_view  => "CalendarView",
             .optional       => "?T",
             .tuple          => "tuple",
             .unknown        => "<unknown>",
@@ -1182,6 +1192,25 @@ const TypeChecker = struct {
             if (std.mem.eql(u8, e.member, "status")) return .uint;
             if (std.mem.eql(u8, e.member, "text"))   return .string;
         }
+        // DateTime field access.
+        if (obj_type == .date_time) {
+            if (std.mem.eql(u8, e.member, "year")   or
+                std.mem.eql(u8, e.member, "month")  or
+                std.mem.eql(u8, e.member, "day")    or
+                std.mem.eql(u8, e.member, "hour")   or
+                std.mem.eql(u8, e.member, "minute") or
+                std.mem.eql(u8, e.member, "second") or
+                std.mem.eql(u8, e.member, "weekday")) return .int;
+        }
+        // CalendarView field access.
+        if (obj_type == .calendar_view) {
+            if (std.mem.eql(u8, e.member, "year")    or
+                std.mem.eql(u8, e.member, "month")   or
+                std.mem.eql(u8, e.member, "day")     or
+                std.mem.eql(u8, e.member, "weekday")) return .int;
+            if (std.mem.eql(u8, e.member, "monthName") or
+                std.mem.eql(u8, e.member, "era"))        return .string;
+        }
         // SysRunResult field access.
         if (obj_type == .sys_run_result) {
             if (std.mem.eql(u8, e.member, "exit_code")) return .int;
@@ -1382,6 +1411,16 @@ const TypeChecker = struct {
                     if (std.mem.eql(u8, mem.member, "errln"))   return .void_;
                     return .void_;
                 }
+                // DateTime.* static methods.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "DateTime")) {
+                    _ = try tc.inferExpr(mem.object);
+                    for (e.args) |a| _ = try tc.inferExpr(a.value);
+                    return .date_time; // now(), fromEpoch(), of()
+                }
+                // Calendar.* constant access → string constant in Zig.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Calendar")) {
+                    return .string;
+                }
                 // Json.* static methods.
                 if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Json")) {
                     _ = try tc.inferExpr(mem.object);
@@ -1564,6 +1603,25 @@ const TypeChecker = struct {
             if (std.mem.eql(u8, method, "run")) return .string;
             return .void_;
         }
+        // DateTime methods
+        if (obj_type == .date_time) {
+            if (std.mem.eql(u8, method, "addDays")    or
+                std.mem.eql(u8, method, "addMonths")  or
+                std.mem.eql(u8, method, "addYears")   or
+                std.mem.eql(u8, method, "addHours")   or
+                std.mem.eql(u8, method, "addMinutes") or
+                std.mem.eql(u8, method, "addSeconds")) return .date_time;
+            if (std.mem.eql(u8, method, "before") or
+                std.mem.eql(u8, method, "after")  or
+                std.mem.eql(u8, method, "equals"))    return .bool;
+            if (std.mem.eql(u8, method, "daysBetween") or
+                std.mem.eql(u8, method, "secondsBetween") or
+                std.mem.eql(u8, method, "toEpoch"))       return .int;
+            if (std.mem.eql(u8, method, "toIso8601") or
+                std.mem.eql(u8, method, "format"))        return .string;
+            if (std.mem.eql(u8, method, "inCalendar"))    return .calendar_view;
+            return .void_;
+        }
         // JsonValue methods
         if (obj_type == .json_value) {
             if (std.mem.eql(u8, method, "getStr"))   return .string;
@@ -1610,8 +1668,8 @@ const TypeChecker = struct {
         const rt = try tc.inferExpr(e.right);
 
         return switch (e.op) {
-            // Comparisons always produce bool.
-            .eq, .ne, .lt, .le, .gt, .ge => .bool,
+            // Comparisons and membership always produce bool.
+            .eq, .ne, .lt, .le, .gt, .ge, .in_ => .bool,
 
             // Logical: operands must be bool.
             .and_, .or_ => blk: {
@@ -1622,8 +1680,23 @@ const TypeChecker = struct {
                 break :blk .bool;
             },
 
+            // String repetition: str * int → string.
+            .mul => blk: {
+                if (lt == .string and (rt.isIntFamily() or rt.isUintFamily())) break :blk .string;
+                if (lt == .unknown or rt == .unknown) break :blk .unknown;
+                if (!lt.isNumeric())
+                    try tc.emitError(spanOf(e.left), "arithmetic requires numeric type, got '{s}'", .{lt.name()});
+                if (!rt.isNumeric())
+                    try tc.emitError(spanOf(e.right), "arithmetic requires numeric type, got '{s}'", .{rt.name()});
+                if (lt.isNumeric() and rt.isNumeric() and !Type.eql(lt, rt))
+                    try tc.emitError(e.span, "arithmetic operands must have the same type: '{s}' vs '{s}'", .{ lt.name(), rt.name() });
+                break :blk if (lt.isNumeric()) lt else .unknown;
+            },
+
             // Arithmetic: operands must be numeric and the same type.
-            .add, .sub, .mul, .div, .int_div, .mod, .pow => blk: {
+            .add, .sub, .div, .int_div, .mod, .pow => blk: {
+                // String + String → string concatenation.
+                if (e.op == .add and lt == .string) break :blk .string;
                 if (lt == .unknown or rt == .unknown) break :blk .unknown;
                 if (!lt.isNumeric())
                     try tc.emitError(spanOf(e.left), "arithmetic requires numeric type, got '{s}'", .{lt.name()});
@@ -1854,6 +1927,8 @@ fn builtinType(n: []const u8) Type {
     if (std.mem.eql(u8, n, "File"))          return .file;
     if (std.mem.eql(u8, n, "SysRunResult")) return .sys_run_result;
     if (std.mem.eql(u8, n, "JsonValue"))   return .json_value;
+    if (std.mem.eql(u8, n, "DateTime"))    return .date_time;
+    if (std.mem.eql(u8, n, "CalendarView")) return .calendar_view;
     return switch (Builtins.scalarKind(n)) {
         .int        => .int,
         .uint       => .uint,

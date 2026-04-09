@@ -670,6 +670,7 @@ pub const BinaryOp = enum {
     ge,
     and_,
     or_,
+    in_,    // x in container  — membership test
     dotdot, // range / spread
 };
 

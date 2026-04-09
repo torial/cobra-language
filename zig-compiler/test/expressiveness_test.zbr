@@ -1,0 +1,39 @@
+class Greeter
+    def greet(name as String, greeting as String = "Hello")
+        print(greeting + ", " + name + "!")
+
+    def check(value as int, lo as int, hi as int) as bool
+        return value >= lo and value <= hi
+
+class Program
+    shared
+        def main
+            var g as Greeter = Greeter()
+
+            # Named args — different orders, with default
+            g.greet(name: "Alice")
+            g.greet(name: "Bob", greeting: "Hey")
+            g.greet(greeting: "Hi", name: "Carol")
+
+            # Named args on method returning bool
+            var ok = g.check(value: 5, lo: 1, hi: 10)
+            print(ok.toString())
+
+            # in / not in — string substring
+            var s = "hello world"
+            print(("world" in s).toString())
+            print(("xyz" in s).toString())
+            print(("xyz" not in s).toString())
+
+            # String repetition
+            var sep = "=" * 20
+            print(sep)
+            print("-" * 5)
+
+            # List membership
+            var nums as List(int) = List()
+            nums.add(10)
+            nums.add(20)
+            nums.add(30)
+            print((20 in nums).toString())
+            print((99 in nums).toString())
