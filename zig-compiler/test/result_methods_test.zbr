@@ -1,0 +1,52 @@
+class Main
+    shared
+        def main
+            # --- isOk / isErr ---
+            var ok_r as Result(int, str) = Result.ok(42)
+            var err_r as Result(int, str) = Result.err("oops")
+            assert ok_r.isOk()  == true,  "ok.isOk"
+            assert ok_r.isErr() == false, "ok.isErr"
+            assert err_r.isOk()  == false, "err.isOk"
+            assert err_r.isErr() == true,  "err.isErr"
+
+            # --- unwrap / unwrapOr ---
+            assert ok_r.unwrap()       == 42,  "unwrap ok"
+            assert ok_r.unwrapOr(0)    == 42,  "unwrapOr ok"
+            assert err_r.unwrapOr(99)  == 99,  "unwrapOr err"
+
+            # --- okValue / errValue ---
+            var ov = ok_r.okValue()
+            assert ov != nil, "okValue non-nil"
+            var ev = err_r.errValue()
+            assert ev != nil, "errValue non-nil"
+
+            # --- map (inline lambda, no capture) ---
+            var mapped = ok_r.map(def(x as int) as int
+                return x * 2
+            )
+            assert mapped.isOk()   == true, "map isOk"
+            assert mapped.unwrap() == 84,   "map value"
+
+            var mapped_err = err_r.map(def(x as int) as int
+                return x * 2
+            )
+            assert mapped_err.isErr() == true, "map err propagates"
+
+            # --- flatMap (inline lambda) ---
+            var chained = ok_r.flatMap(def(x as int) as Result(int, str)
+                if x == 0
+                    return Result.err("zero")
+                return Result.ok(100 / x)
+            )
+            assert chained.isOk()   == true, "flatMap ok"
+            assert chained.unwrap() == 2,    "flatMap value (100/42 = 2)"
+
+            var zero_r as Result(int, str) = Result.ok(0)
+            var chained_err = zero_r.flatMap(def(x as int) as Result(int, str)
+                if x == 0
+                    return Result.err("zero")
+                return Result.ok(100 / x)
+            )
+            assert chained_err.isErr() == true, "flatMap propagates err from f"
+
+            print "result_methods_test: all assertions passed"

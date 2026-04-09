@@ -1584,6 +1584,8 @@ const TypeChecker = struct {
         }
         // Result(T, E) methods — obj_type is .unknown since generics not modelled; check by method name
         if (std.mem.eql(u8, method, "isOk") or std.mem.eql(u8, method, "isErr")) return .bool;
+        // map/flatMap return .unknown (result type depends on the transform function, not tracked)
+        if (std.mem.eql(u8, method, "map") or std.mem.eql(u8, method, "flatMap")) return .unknown;
         // unwrap/unwrapOr/okValue/errValue return .unknown (inner type not tracked)
         // toString() on any type → string
         if (std.mem.eql(u8, method, "toString")) return .string;

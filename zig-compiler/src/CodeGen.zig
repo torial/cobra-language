@@ -981,6 +981,27 @@ const Generator = struct {
             \\        pub fn errValue(self: @This()) ?E {
             \\            return switch (self) { .ok => null, .err => |e| e };
             \\        }
+            \\        /// map(f) — apply f to the ok value; propagate err unchanged.
+            \\        /// f may be a fn pointer or a capture-closure struct with a `call` method.
+            \\        pub fn map(self: @This(), f: anytype) _Result(
+            \\            @TypeOf(if (comptime @typeInfo(@TypeOf(f)) == .@"fn") f(@as(T, undefined)) else f.call(@as(T, undefined))), E
+            \\        ) {
+            \\            const _is_fn = comptime @typeInfo(@TypeOf(f)) == .@"fn";
+            \\            return switch (self) {
+            \\                .ok  => |v| .{ .ok = if (_is_fn) f(v) else f.call(v) },
+            \\                .err => |e| .{ .err = e },
+            \\            };
+            \\        }
+            \\        /// flatMap(f) — apply f to the ok value; f must return Result(U, E).
+            \\        pub fn flatMap(self: @This(), f: anytype) @TypeOf(
+            \\            if (comptime @typeInfo(@TypeOf(f)) == .@"fn") f(@as(T, undefined)) else f.call(@as(T, undefined))
+            \\        ) {
+            \\            const _is_fn = comptime @typeInfo(@TypeOf(f)) == .@"fn";
+            \\            return switch (self) {
+            \\                .ok  => |v| if (_is_fn) f(v) else f.call(v),
+            \\                .err => |e| .{ .err = e },
+            \\            };
+            \\        }
             \\    };
             \\}
             \\
@@ -1268,10 +1289,19 @@ const Generator = struct {
         try g.w.writeAll("    const s = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0) catch |e| @panic(@errorName(e));\n");
         try g.w.writeAll("    return .{ .handle = s };\n");
         try g.w.writeAll("}\n");
-        try g.w.writeAll("fn _udp_send(sock: UdpSocket, host: []const u8, port: u16, data: []const u8) void {\n");
-        try g.w.writeAll("    const dest = std.net.Address.parseIp4(host, port) catch |e| @panic(@errorName(e));\n");
-        try g.w.writeAll("    _ = std.posix.sendto(sock.handle, data, 0, &dest.any, dest.getOsSockLen()) catch |e| @panic(@errorName(e));\n");
-        try g.w.writeAll("}\n");
+        try g.w.writeAll(
+            \\fn _udp_send(sock: UdpSocket, host: []const u8, port: u16, data: []const u8) void {
+            \\    const dest = blk: {
+            \\        if (std.net.Address.parseIp(host, port)) |a| break :blk a else |_| {}
+            \\        const _list = std.net.getAddressList(std.heap.page_allocator, host, port) catch |e| @panic(@errorName(e));
+            \\        defer _list.deinit();
+            \\        if (_list.addrs.len == 0) @panic("UDP send: hostname resolution failed");
+            \\        break :blk _list.addrs[0];
+            \\    };
+            \\    _ = std.posix.sendto(sock.handle, data, 0, &dest.any, dest.getOsSockLen()) catch |e| @panic(@errorName(e));
+            \\}
+            \\
+        );
         try g.w.writeAll("fn _udp_recv(sock: UdpSocket, max_bytes: usize) []const u8 {\n");
         try g.w.writeAll("    const buf = std.heap.page_allocator.alloc(u8, max_bytes) catch @panic(\"OOM\");\n");
         try g.w.writeAll("    const n = std.posix.recv(sock.handle, buf, 0) catch |e| @panic(@errorName(e));\n");
@@ -4109,6 +4139,7 @@ const Generator = struct {
         const known = std.StaticStringMap(void).initComptime(&.{
             .{ "isOk", {} }, .{ "isErr", {} }, .{ "unwrap", {} },
             .{ "unwrapOr", {} }, .{ "okValue", {} }, .{ "errValue", {} },
+            .{ "map", {} }, .{ "flatMap", {} },
         });
         if (!known.has(method)) return false;
         try g.genExpr(obj);
