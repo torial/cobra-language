@@ -666,6 +666,12 @@ fn scanMutationsInExpr(
                     // Regex — all methods are non-mutating
                     .{ "match",          {} }, .{ "find",           {} },
                     .{ "findAll",        {} }, .{ "replace",        {} },
+                    // JsonValue read-only accessors
+                    .{ "getStr",         {} }, .{ "getInt",         {} },
+                    .{ "getFloat",       {} }, .{ "getBool",        {} },
+                    .{ "getObj",         {} }, .{ "getList",        {} },
+                    .{ "isNull",         {} }, .{ "isObject",       {} },
+                    .{ "isArray",        {} }, .{ "stringify",      {} },
                 });
                 // Extension methods are pass-by-value: never require var on the receiver.
                 const is_ext_method = blk: {
@@ -1036,6 +1042,80 @@ const Generator = struct {
             \\        else    => -1,
             \\    };
             \\    return .{ .exit_code = _ec, .stdout = _r.stdout, .stderr = _r.stderr };
+            \\}
+            \\
+        );
+        // ── JSON stdlib ──────────────────────────────────────────────────────
+        try g.w.writeAll(
+            \\const JsonValue = std.json.Value;
+            \\fn _json_parse(src: []const u8) ?JsonValue {
+            \\    // parseFromSliceLeaky uses allocator directly (no arena), intentionally leaked.
+            \\    return std.json.parseFromSliceLeaky(JsonValue, std.heap.page_allocator, src, .{}) catch return null;
+            \\}
+            \\fn _json_stringify(v: JsonValue) []const u8 {
+            \\    return std.json.Stringify.valueAlloc(std.heap.page_allocator, v, .{}) catch "{}";
+            \\}
+            \\fn _json_object() JsonValue { return .{ .object = std.json.ObjectMap.init(std.heap.page_allocator) }; }
+            \\fn _json_array() JsonValue  { return .{ .array = std.json.Array.init(std.heap.page_allocator) }; }
+            \\fn _json_get_str(v: JsonValue, key: []const u8) []const u8 {
+            \\    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .string => |s| return s, else => {} }, else => {} }
+            \\    return "";
+            \\}
+            \\fn _json_get_int(v: JsonValue, key: []const u8) i64 {
+            \\    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .integer => |n| return n, else => {} }, else => {} }
+            \\    return 0;
+            \\}
+            \\fn _json_get_float(v: JsonValue, key: []const u8) f64 {
+            \\    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) {
+            \\        .float => |f| return f, .integer => |n| return @floatFromInt(n), else => {} }, else => {} }
+            \\    return 0.0;
+            \\}
+            \\fn _json_get_bool(v: JsonValue, key: []const u8) bool {
+            \\    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .bool => |b| return b, else => {} }, else => {} }
+            \\    return false;
+            \\}
+            \\fn _json_get_obj(v: JsonValue, key: []const u8) JsonValue {
+            \\    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .object => return it, else => {} }, else => {} }
+            \\    return .{ .object = std.json.ObjectMap.init(std.heap.page_allocator) };
+            \\}
+            \\fn _json_get_list(v: JsonValue, key: []const u8) []JsonValue {
+            \\    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .array => |a| return a.items, else => {} }, else => {} }
+            \\    return &[_]JsonValue{};
+            \\}
+            \\fn _json_is_null(v: JsonValue) bool   { return v == .null; }
+            \\fn _json_is_object(v: JsonValue) bool  { return switch (v) { .object => true, else => false }; }
+            \\fn _json_is_array(v: JsonValue) bool   { return switch (v) { .array  => true, else => false }; }
+            \\fn _json_put_str(v: *JsonValue, key: []const u8, val: []const u8) void {
+            \\    if (v.* != .object) return;
+            \\    v.object.put(std.heap.page_allocator.dupe(u8, key) catch return, .{ .string = val }) catch {};
+            \\}
+            \\fn _json_put_int(v: *JsonValue, key: []const u8, val: i64) void {
+            \\    if (v.* != .object) return;
+            \\    v.object.put(std.heap.page_allocator.dupe(u8, key) catch return, .{ .integer = val }) catch {};
+            \\}
+            \\fn _json_put_float(v: *JsonValue, key: []const u8, val: f64) void {
+            \\    if (v.* != .object) return;
+            \\    v.object.put(std.heap.page_allocator.dupe(u8, key) catch return, .{ .float = val }) catch {};
+            \\}
+            \\fn _json_put_bool(v: *JsonValue, key: []const u8, val: bool) void {
+            \\    if (v.* != .object) return;
+            \\    v.object.put(std.heap.page_allocator.dupe(u8, key) catch return, .{ .bool = val }) catch {};
+            \\}
+            \\fn _json_arr_str(v: *JsonValue, val: []const u8) void {
+            \\    if (v.* != .array) return;
+            \\    v.array.append(.{ .string = val }) catch {};
+            \\}
+            \\fn _json_arr_int(v: *JsonValue, val: i64) void {
+            \\    if (v.* != .array) return;
+            \\    v.array.append(.{ .integer = val }) catch {};
+            \\}
+            \\fn _json_arr_float(v: *JsonValue, val: f64) void {
+            \\    if (v.* != .array) return;
+            \\    v.array.append(.{ .float = val }) catch {};
+            \\}
+            \\fn _json_arr_bool(v: *JsonValue, val: bool) void {
+            \\    if (v.* != .array) return;
+            \\    v.array.append(.{ .bool = val }) catch {};
             \\}
             \\
         );
@@ -3064,10 +3144,11 @@ const Generator = struct {
                 if (isStringTypeName(n.name)) return g.genStringMethod(object, method, args);
                 if (std.mem.eql(u8, n.name, "StringBuilder")) return g.genStringBuilderMethod(object, method, args);
                 if (std.mem.eql(u8, n.name, "char")) return g.genCharMethod(object, method, args);
-                if (std.mem.eql(u8, n.name, "TcpConn"))   return g.genTcpMethod(object, method, args);
+                if (std.mem.eql(u8, n.name, "TcpConn"))    return g.genTcpMethod(object, method, args);
                 if (std.mem.eql(u8, n.name, "UdpSocket"))  return g.genUdpMethod(object, method, args);
                 if (std.mem.eql(u8, n.name, "Regex"))      return g.genRegexMethod(object, method, args);
                 if (std.mem.eql(u8, n.name, "Gui"))        return g.genGuiWidgetMethod(object, method, args);
+                if (std.mem.eql(u8, n.name, "JsonValue"))  return g.genJsonMethod(object, method, args);
                 // toString() on int/float/bool — format as string.
                 if (std.mem.eql(u8, method, "toString")) {
                     const fmt = if (std.mem.eql(u8, n.name, "float") or
@@ -3391,6 +3472,111 @@ const Generator = struct {
     // ── Shell static methods ──────────────────────────────────────────────────
 
     /// Emit a static `Shell.*` call.
+    // ── Json static methods ──────────────────────────────────────────────────
+
+    fn genJsonCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "parse")) {
+            try g.w.writeAll("_json_parse(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"{}\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "stringify")) {
+            try g.w.writeAll("_json_stringify(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("_json_object()");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "object")) {
+            try g.w.writeAll("_json_object()");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "array")) {
+            try g.w.writeAll("_json_array()");
+            return true;
+        }
+        return false;
+    }
+
+    // ── JsonValue instance methods ───────────────────────────────────────────
+
+    fn genJsonMethod(
+        g:      Generator,
+        object: *const Ast.Expr,
+        method: []const u8,
+        args:   []const Ast.Arg,
+    ) anyerror!bool {
+        // Read-only accessors: emit _json_get_*(v, key)
+        const read_map = std.StaticStringMap([]const u8).initComptime(&.{
+            .{ "getStr",   "_json_get_str"   },
+            .{ "getInt",   "_json_get_int"   },
+            .{ "getFloat", "_json_get_float" },
+            .{ "getBool",  "_json_get_bool"  },
+            .{ "getObj",   "_json_get_obj"   },
+            .{ "getList",  "_json_get_list"  },
+        });
+        if (read_map.get(method)) |fn_name| {
+            try g.w.writeAll(fn_name);
+            try g.w.writeAll("(");
+            try g.genExpr(object);
+            try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        // Predicate methods: emit _json_is_*(v)
+        if (std.mem.eql(u8, method, "isNull")) {
+            try g.w.writeAll("_json_is_null("); try g.genExpr(object); try g.w.writeAll(")"); return true;
+        }
+        if (std.mem.eql(u8, method, "isObject")) {
+            try g.w.writeAll("_json_is_object("); try g.genExpr(object); try g.w.writeAll(")"); return true;
+        }
+        if (std.mem.eql(u8, method, "isArray")) {
+            try g.w.writeAll("_json_is_array("); try g.genExpr(object); try g.w.writeAll(")"); return true;
+        }
+        // Stringify: emit _json_stringify(v)
+        if (std.mem.eql(u8, method, "stringify")) {
+            try g.w.writeAll("_json_stringify("); try g.genExpr(object); try g.w.writeAll(")"); return true;
+        }
+        // Mutating methods on object: emit _json_put_*(v_ptr, key, val)
+        const put_map = std.StaticStringMap([]const u8).initComptime(&.{
+            .{ "put",      "_json_put_str"   },
+            .{ "putInt",   "_json_put_int"   },
+            .{ "putFloat", "_json_put_float" },
+            .{ "putBool",  "_json_put_bool"  },
+        });
+        if (put_map.get(method)) |fn_name| {
+            try g.w.writeAll(fn_name);
+            try g.w.writeAll("(&");
+            try g.genExpr(object);
+            for (args) |a| {
+                try g.w.writeAll(", ");
+                try g.genExpr(a.value);
+            }
+            try g.w.writeAll(")");
+            return true;
+        }
+        // Mutating methods on array: emit _json_arr_*(v_ptr, val)
+        const arr_map = std.StaticStringMap([]const u8).initComptime(&.{
+            .{ "append",      "_json_arr_str"   },
+            .{ "appendInt",   "_json_arr_int"   },
+            .{ "appendFloat", "_json_arr_float" },
+            .{ "appendBool",  "_json_arr_bool"  },
+        });
+        if (arr_map.get(method)) |fn_name| {
+            try g.w.writeAll(fn_name);
+            try g.w.writeAll("(&");
+            try g.genExpr(object);
+            for (args) |a| {
+                try g.w.writeAll(", ");
+                try g.genExpr(a.value);
+            }
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
     ///
     ///   Shell.run(cmd)  → []u8  stdout+stderr combined; cross-platform (cmd/sh)
     fn genShellCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
@@ -5671,6 +5857,13 @@ const Generator = struct {
                 if (try g.genHttpCall(mem.member, e.args)) return;
             }
         }
+        // Json static calls: Json.parse(s), Json.stringify(v), Json.object(), Json.array().
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Json")) {
+                if (try g.genJsonCall(mem.member, e.args)) return;
+            }
+        }
         // HttpResponse factory: HttpResponse.ok(body), HttpResponse.notFound(body), etc.
         if (e.callee.* == .member) {
             const mem = e.callee.member;
@@ -5816,6 +6009,7 @@ const Generator = struct {
                     .regex       => if (try g.genRegexMethod(mem.object, mem.member, e.args)) return,
                     .gui_context => if (try g.genGuiWidgetMethod(mem.object, mem.member, e.args)) return,
                     .str_slice  => if (try g.genStrSliceMethod(mem.object, mem.member)) return,
+                    .json_value => if (try g.genJsonMethod(mem.object, mem.member, e.args)) return,
                     .unknown    => if (try g.genListMethod(mem.object, mem.member, e.args)) return,
                     else        => {},
                 }
@@ -5977,7 +6171,24 @@ const Generator = struct {
 
     fn genStringLit(g: Generator, e: Ast.ExprStringLit) anyerror!void {
         switch (e.kind) {
-            .plain => try g.w.writeAll(e.text),
+            .plain => {
+                // If the Zebra source used single-quotes, re-emit as double-quoted Zig string.
+                // Zig only allows single-quotes for character literals (single codepoint).
+                if (e.text.len >= 2 and e.text[0] == '\'') {
+                    const inner = e.text[1 .. e.text.len - 1]; // strip outer single quotes
+                    try g.w.writeByte('"');
+                    for (inner) |c| switch (c) {
+                        '"'  => try g.w.writeAll("\\\""),
+                        '\n' => try g.w.writeAll("\\n"),
+                        '\r' => try g.w.writeAll("\\r"),
+                        '\t' => try g.w.writeAll("\\t"),
+                        else => try g.w.writeByte(c),
+                    };
+                    try g.w.writeByte('"');
+                } else {
+                    try g.w.writeAll(e.text);
+                }
+            },
             .raw   => {
                 // r"..." / r'...' — backslashes are literal, not escape sequences.
                 // e.text is the full source token including the r prefix and quotes.
@@ -6435,6 +6646,8 @@ fn printFmt(tc: ?*const TypeChecker.TypeCheckResult, catch_var: []const u8, expr
         .file,
         .str_slice,
         .sys_run_result,
+        .json_value,
+        .json_array,
         .optional,
         .tuple                         => "{any}",
     };

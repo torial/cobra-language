@@ -71,6 +71,9 @@ pub const NAMES = std.StaticStringMap(void).initComptime(&.{
     .{ "Math",          {} },
     // Sys process result
     .{ "SysRunResult",  {} },
+    // Stdlib JSON
+    .{ "Json",          {} },
+    .{ "JsonValue",     {} },
     // Stdlib regex
     .{ "Regex",         {} },
     // Stdlib UI

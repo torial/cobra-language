@@ -86,6 +86,10 @@ pub const Type = union(enum) {
     str_slice,
     /// `SysRunResult` — result of `sys.run(argv)` with exit_code/stdout/stderr fields.
     sys_run_result,
+    /// `JsonValue` — a parsed JSON value (wraps `std.json.Value`).
+    json_value,
+    /// `[]JsonValue` — JSON array slice returned by `getList`.
+    json_array,
 
     // ── Optional ──────────────────────────────────────────────────────────────
     /// `?T` — nilable wrapper around another type.
@@ -126,6 +130,8 @@ pub const Type = union(enum) {
             .file           => b == .file,
             .str_slice      => b == .str_slice,
             .sys_run_result => b == .sys_run_result,
+            .json_value     => b == .json_value,
+            .json_array     => b == .json_array,
             .tuple => |ea| switch (b) {
                 .tuple => |eb| blk: {
                     if (ea.len != eb.len) break :blk false;
@@ -189,6 +195,8 @@ pub const Type = union(enum) {
             .file           => "File",
             .str_slice      => "[]str",
             .sys_run_result => "SysRunResult",
+            .json_value     => "JsonValue",
+            .json_array     => "[]JsonValue",
             .optional       => "?T",
             .tuple          => "tuple",
             .unknown        => "<unknown>",
@@ -1194,6 +1202,13 @@ const TypeChecker = struct {
 
     /// Infer the element type that loop variables will have when iterating `iter`.
     fn inferForInElemType(tc: TypeChecker, iter: *const Ast.Expr) Type {
+        // for tag in v.getList("key")  — []JsonValue call → json_value elements
+        if (iter.* == .call) {
+            if (iter.call.callee.* == .member) {
+                const m = iter.call.callee.member.member;
+                if (std.mem.eql(u8, m, "getList")) return .json_value;
+            }
+        }
         // str.split(delim) / str.lines() → each element is a string
         // str.chars() → each element is a char (u21 Unicode codepoint)
         if (iter.* == .call) {
@@ -1220,10 +1235,12 @@ const TypeChecker = struct {
                 }
             }
         }
-        // str_slice variable (e.g. result of Net.resolve stored in a var) → string elements.
+        // str_slice / json_array variable — check expr_types first, then narrowed_types.
         if (iter.* == .ident) {
-            const t = tc.expr_types.get(iter) orelse .unknown;
-            if (t == .str_slice) return .string;
+            const t = tc.expr_types.get(iter) orelse
+                tc.narrowed_types.get(iter.ident.name) orelse .unknown;
+            if (t == .str_slice)  return .string;
+            if (t == .json_array) return .json_value;
         }
         // Loop variable known to be List(T) via list_elem_types (e.g. value var from
         // for k, v in HashMap(K, List(T))) — return its recorded element type.
@@ -1363,6 +1380,20 @@ const TypeChecker = struct {
                     if (std.mem.eql(u8, mem.member, "exit"))    return .void_;
                     if (std.mem.eql(u8, mem.member, "err"))     return .void_;
                     if (std.mem.eql(u8, mem.member, "errln"))   return .void_;
+                    return .void_;
+                }
+                // Json.* static methods.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Json")) {
+                    _ = try tc.inferExpr(mem.object);
+                    for (e.args) |a| _ = try tc.inferExpr(a.value);
+                    if (std.mem.eql(u8, mem.member, "parse")) {
+                        const boxed = tc.map_alloc.create(Type) catch return .json_value;
+                        boxed.* = .json_value;
+                        return .{ .optional = boxed };
+                    }
+                    if (std.mem.eql(u8, mem.member, "stringify")) return .string;
+                    if (std.mem.eql(u8, mem.member, "object"))    return .json_value;
+                    if (std.mem.eql(u8, mem.member, "array"))     return .json_value;
                     return .void_;
                 }
                 // Cross-module call: Math.square(5) where `use Math` imported a dep.
@@ -1532,6 +1563,19 @@ const TypeChecker = struct {
         if (obj_type == .shell) {
             if (std.mem.eql(u8, method, "run")) return .string;
             return .void_;
+        }
+        // JsonValue methods
+        if (obj_type == .json_value) {
+            if (std.mem.eql(u8, method, "getStr"))   return .string;
+            if (std.mem.eql(u8, method, "getInt"))   return .int;
+            if (std.mem.eql(u8, method, "getFloat")) return .float;
+            if (std.mem.eql(u8, method, "getBool"))  return .bool;
+            if (std.mem.eql(u8, method, "getObj"))   return .json_value;
+            if (std.mem.eql(u8, method, "getList")) return .json_array;
+            if (std.mem.eql(u8, method, "isNull"))   return .bool;
+            if (std.mem.eql(u8, method, "isObject")) return .bool;
+            if (std.mem.eql(u8, method, "isArray"))  return .bool;
+            return .void_;  // put/putInt/putFloat/putBool/append/appendInt/appendFloat/appendBool
         }
         // File methods (static-style)
         if (obj_type == .file) {
@@ -1807,6 +1851,7 @@ fn builtinType(n: []const u8) Type {
     if (std.mem.eql(u8, n, "Shell"))         return .shell;
     if (std.mem.eql(u8, n, "File"))          return .file;
     if (std.mem.eql(u8, n, "SysRunResult")) return .sys_run_result;
+    if (std.mem.eql(u8, n, "JsonValue"))   return .json_value;
     return switch (Builtins.scalarKind(n)) {
         .int        => .int,
         .uint       => .uint,

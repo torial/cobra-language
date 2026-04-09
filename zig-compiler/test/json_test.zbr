@@ -1,0 +1,75 @@
+class Main
+    shared
+        def main
+            # --- Parse and read ---
+            var json = '{"name": "Alice", "age": 30, "score": 9.5, "active": true}'
+            var data = Json.parse(json)
+            assert data != nil, "parse returned nil"
+
+            var d = data to!
+            assert d.getStr("name") == "Alice", "getStr name"
+            assert d.getInt("age") == 30, "getInt age"
+            assert d.getFloat("score") > 9.4, "getFloat score"
+            assert d.getBool("active") == true, "getBool active"
+
+            # --- Missing key returns zero-value ---
+            assert d.getStr("missing") == "", "missing str key"
+            assert d.getInt("missing") == 0, "missing int key"
+            assert d.getBool("missing") == false, "missing bool key"
+
+            # --- Nested object ---
+            var nested = '{"user": {"id": 42, "tag": "admin"}}'
+            var nd = Json.parse(nested) to!
+            var user = nd.getObj("user")
+            assert user.getInt("id") == 42, "nested getInt"
+            assert user.getStr("tag") == "admin", "nested getStr"
+
+            # --- Array iteration ---
+            var arr_json = '{"tags": ["alpha", "beta", "gamma"]}'
+            var ad = Json.parse(arr_json) to!
+            var tags = ad.getList("tags")
+            var count as int = 0
+            for tag in tags
+                if tag.isNull()
+                    count = count + 0
+                else
+                    count = count + 1
+            assert count == 3, "array element count"
+
+            # --- Type predicates ---
+            var obj = Json.object()
+            assert obj.isObject() == true, "isObject"
+            assert obj.isArray()  == false, "isArray on object"
+            assert obj.isNull()   == false, "isNull on object"
+
+            var arr = Json.array()
+            assert arr.isArray()  == true, "isArray"
+
+            # --- Object builder ---
+            var builder = Json.object()
+            builder.put("city", "Springfield")
+            builder.putInt("pop", 50000)
+            builder.putFloat("lat", 37.5)
+            builder.putBool("capital", false)
+
+            var out = Json.stringify(builder)
+            assert out.contains("Springfield"), "stringify contains city"
+            assert out.contains("50000"), "stringify contains pop"
+
+            # --- Array builder ---
+            var list = Json.array()
+            list.append("one")
+            list.appendInt(2)
+            list.appendFloat(3.0)
+            list.appendBool(true)
+
+            var list_out = Json.stringify(list)
+            assert list_out.contains("one"), "array stringify contains one"
+
+            # --- Round-trip ---
+            var rt_json = '{"x": 1, "y": 2}'
+            var rt = Json.parse(rt_json) to!
+            var rt_str = Json.stringify(rt)
+            assert rt_str.contains("\"x\""), "roundtrip contains x key"
+
+            print "json_test: all assertions passed"
