@@ -1007,27 +1007,39 @@ const Generator = struct {
             \\
         );
         // ── String padding helpers ──────────────────────────────────────────
-        try g.w.writeAll("fn _pad_left(s: []const u8, width: usize, fill: u8, alloc: std.mem.Allocator) []const u8 {\n");
-        try g.w.writeAll("    if (s.len >= width) return s;\n");
-        try g.w.writeAll("    const buf = alloc.alloc(u8, width) catch @panic(\"OOM\");\n");
-        try g.w.writeAll("    @memset(buf[0 .. width - s.len], fill);\n");
-        try g.w.writeAll("    @memcpy(buf[width - s.len ..], s);\n");
-        try g.w.writeAll("    return buf;\n}\n");
-        try g.w.writeAll("fn _pad_right(s: []const u8, width: usize, fill: u8, alloc: std.mem.Allocator) []const u8 {\n");
-        try g.w.writeAll("    if (s.len >= width) return s;\n");
-        try g.w.writeAll("    const buf = alloc.alloc(u8, width) catch @panic(\"OOM\");\n");
-        try g.w.writeAll("    @memcpy(buf[0 .. s.len], s);\n");
-        try g.w.writeAll("    @memset(buf[s.len ..], fill);\n");
-        try g.w.writeAll("    return buf;\n}\n");
-        try g.w.writeAll("fn _pad_center(s: []const u8, width: usize, fill: u8, alloc: std.mem.Allocator) []const u8 {\n");
-        try g.w.writeAll("    if (s.len >= width) return s;\n");
-        try g.w.writeAll("    const pad = width - s.len;\n");
-        try g.w.writeAll("    const lpad = pad / 2;\n");
-        try g.w.writeAll("    const buf = alloc.alloc(u8, width) catch @panic(\"OOM\");\n");
-        try g.w.writeAll("    @memset(buf[0 .. lpad], fill);\n");
-        try g.w.writeAll("    @memcpy(buf[lpad .. lpad + s.len], s);\n");
-        try g.w.writeAll("    @memset(buf[lpad + s.len ..], fill);\n");
-        try g.w.writeAll("    return buf;\n}\n\n");
+        // fill is `anytype`: comptime char literal (' ') or a 1-char string ("*").
+        // _pad_fill() normalises both to u8.
+        try g.w.writeAll(
+            \\fn _pad_fill(fill: anytype) u8 {
+            \\    if (comptime @typeInfo(@TypeOf(fill)) == .pointer) return fill[0];
+            \\    return @as(u8, @intCast(fill));
+            \\}
+            \\fn _pad_left(s: []const u8, width: usize, fill: anytype, alloc: std.mem.Allocator) []const u8 {
+            \\    if (s.len >= width) return s;
+            \\    const buf = alloc.alloc(u8, width) catch @panic("OOM");
+            \\    @memset(buf[0 .. width - s.len], _pad_fill(fill));
+            \\    @memcpy(buf[width - s.len ..], s);
+            \\    return buf;
+            \\}
+            \\fn _pad_right(s: []const u8, width: usize, fill: anytype, alloc: std.mem.Allocator) []const u8 {
+            \\    if (s.len >= width) return s;
+            \\    const buf = alloc.alloc(u8, width) catch @panic("OOM");
+            \\    @memcpy(buf[0 .. s.len], s);
+            \\    @memset(buf[s.len ..], _pad_fill(fill));
+            \\    return buf;
+            \\}
+            \\fn _pad_center(s: []const u8, width: usize, fill: anytype, alloc: std.mem.Allocator) []const u8 {
+            \\    if (s.len >= width) return s;
+            \\    const pad = width - s.len;
+            \\    const lpad = pad / 2;
+            \\    const buf = alloc.alloc(u8, width) catch @panic("OOM");
+            \\    @memset(buf[0 .. lpad], _pad_fill(fill));
+            \\    @memcpy(buf[lpad .. lpad + s.len], s);
+            \\    @memset(buf[lpad + s.len ..], _pad_fill(fill));
+            \\    return buf;
+            \\}
+            \\
+        );
         // ── List sort helpers ───────────────────────────────────────────────
         try g.w.writeAll(
             \\fn _zebra_sort_natural(comptime T: type, items: []T) void {
