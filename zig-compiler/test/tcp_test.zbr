@@ -1,9 +1,11 @@
 class Main
     shared
         def main
-            var conn as TcpConn = Tcp.connect("httpbin.org", 80)
-            conn.write("GET /get HTTP/1.0\r\nHost: httpbin.org\r\n\r\n")
-            var data as str = conn.read()
-            conn.close()
-            print data.len              # some positive number
-            print data.startsWith("HTTP/1")   # true
+            # Tcp.connect returns ?TcpConn — nil on connection failure
+            var conn = Tcp.connect("httpbin.org", 80)
+            if conn != nil
+                conn.write("GET /get HTTP/1.0\r\nHost: httpbin.org\r\n\r\n")
+                var data as str = conn.read()
+                conn.close()
+                print data.len              # some positive number
+                print data.startsWith("HTTP/1")   # true

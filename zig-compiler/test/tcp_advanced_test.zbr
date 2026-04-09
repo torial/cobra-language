@@ -1,0 +1,21 @@
+class Main
+    shared
+        def main
+            # readLine — reads until \n, strips \r\n
+            var conn = Tcp.connect("httpbin.org", 80)
+            if conn != nil
+                conn.write("GET /get HTTP/1.0\r\nHost: httpbin.org\r\n\r\n")
+                # First line of HTTP response is the status line
+                var status_line as str = conn.readLine()
+                conn.close()
+                print status_line.startsWith("HTTP/1")  # true
+                print status_line.len > 0               # true
+
+            # readBytes(n) — reads exactly n bytes (or fewer on EOF)
+            var conn2 = Tcp.connect("httpbin.org", 80)
+            if conn2 != nil
+                conn2.write("GET /get HTTP/1.0\r\nHost: httpbin.org\r\n\r\n")
+                var chunk as str = conn2.readBytes(12)
+                conn2.close()
+                print chunk.startsWith("HTTP/")         # true
+                print chunk.len > 0                     # true

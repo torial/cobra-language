@@ -1278,8 +1278,11 @@ const TypeChecker = struct {
                 // Http.* static methods.
                 if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Http")) {
                     _ = try tc.inferExpr(mem.object);
-                    if (std.mem.eql(u8, mem.member, "get"))   return .http_response;
-                    if (std.mem.eql(u8, mem.member, "post"))  return .http_response;
+                    if (std.mem.eql(u8, mem.member, "get") or std.mem.eql(u8, mem.member, "post")) {
+                        const boxed = tc.map_alloc.create(Type) catch return .http_response;
+                        boxed.* = .http_response;
+                        return .{ .optional = boxed };
+                    }
                     if (std.mem.eql(u8, mem.member, "serve")) return .void_;
                     return .void_;
                 }
@@ -1291,7 +1294,11 @@ const TypeChecker = struct {
                 // Tcp.* static methods.
                 if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Tcp")) {
                     _ = try tc.inferExpr(mem.object);
-                    if (std.mem.eql(u8, mem.member, "connect")) return .tcp_conn;
+                    if (std.mem.eql(u8, mem.member, "connect")) {
+                        const boxed = tc.map_alloc.create(Type) catch return .tcp_conn;
+                        boxed.* = .tcp_conn;
+                        return .{ .optional = boxed };
+                    }
                     return .void_;
                 }
                 // Udp.* static methods.
@@ -1470,7 +1477,9 @@ const TypeChecker = struct {
         }
         // TcpConn methods
         if (obj_type == .tcp_conn) {
-            if (std.mem.eql(u8, method, "read")) return .string;
+            if (std.mem.eql(u8, method, "read"))      return .string;
+            if (std.mem.eql(u8, method, "readLine"))  return .string;
+            if (std.mem.eql(u8, method, "readBytes")) return .string;
             return .void_;  // write, close
         }
         // UdpSocket methods

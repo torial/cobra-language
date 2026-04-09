@@ -660,6 +660,7 @@ fn scanMutationsInExpr(
                     .{ "toLower",        {} },
                     // TCP / UDP — don't reassign the handle, so the variable stays const
                     .{ "write",          {} }, .{ "read",           {} },
+                    .{ "readLine",       {} }, .{ "readBytes",      {} },
                     .{ "send",           {} }, .{ "recv",           {} },
                     .{ "close",          {} },
                     // Regex — all methods are non-mutating
@@ -1022,89 +1023,103 @@ const Generator = struct {
             \\
         );
         // ── HTTP networking helpers ─────────────────────────────────────────
-        // HttpResponse text is heap-allocated for program duration (page_allocator avoids GPA leak tracking).
+        // Returns ?HttpResponse (null on any network/TLS error).
+        // ca_bundle is populated on first HTTPS call via next_https_rescan_certs=true (Zig default).
         try g.w.writeAll("const HttpResponse = struct { status: u16, text: []const u8 };\n");
-        try g.w.writeAll("fn _http_request(method: std.http.Method, url: []const u8, payload: ?[]const u8) HttpResponse {\n");
+        try g.w.writeAll("fn _http_request(method: std.http.Method, url: []const u8, payload: ?[]const u8) ?HttpResponse {\n");
         try g.w.writeAll("    var _hc = std.http.Client{ .allocator = _allocator };\n");
         try g.w.writeAll("    defer _hc.deinit();\n");
         try g.w.writeAll("    var _hb = std.io.Writer.Allocating.init(std.heap.page_allocator);\n");
-        try g.w.writeAll("    const _hr = _hc.fetch(.{ .location = .{ .url = url }, .method = method, .payload = payload, .response_writer = &_hb.writer }) catch |e| @panic(@errorName(e));\n");
+        try g.w.writeAll("    const _hr = _hc.fetch(.{ .location = .{ .url = url }, .method = method, .payload = payload, .response_writer = &_hb.writer }) catch return null;\n");
         try g.w.writeAll("    return .{ .status = @intFromEnum(_hr.status), .text = _hb.written() };\n");
         try g.w.writeAll("}\n");
-        try g.w.writeAll("fn _http_get(url: []const u8) HttpResponse { return _http_request(.GET, url, null); }\n");
-        try g.w.writeAll("fn _http_post(url: []const u8, payload: []const u8) HttpResponse { return _http_request(.POST, url, payload); }\n");
+        try g.w.writeAll("fn _http_get(url: []const u8) ?HttpResponse { return _http_request(.GET, url, null); }\n");
+        try g.w.writeAll("fn _http_post(url: []const u8, payload: []const u8) ?HttpResponse { return _http_request(.POST, url, payload); }\n");
         // ── HTTP server ─────────────────────────────────────────────────────
+        // Threaded: each accepted connection is dispatched to a std.Thread.
+        // page_allocator is used per-thread (thread-safe, unbounded lifetime).
         try g.w.writeAll("const HttpRequest = struct { method: []const u8, path: []const u8, content: []const u8 };\n");
         try g.w.writeAll(
             \\fn _http_serve(port: u16, handler: anytype) void {
+            \\    const Handler = @TypeOf(handler);
+            \\    const _Ctx = struct {
+            \\        conn: std.net.Server.Connection,
+            \\        handler: Handler,
+            \\        fn run(ctx: *@This()) void {
+            \\            defer std.heap.page_allocator.destroy(ctx);
+            \\            defer ctx.conn.stream.close();
+            \\            const _alloc = std.heap.page_allocator;
+            \\            // Read request headers (scan for \r\n\r\n).
+            \\            var _hd: [16384]u8 = undefined;
+            \\            var _hl: usize = 0;
+            \\            while (_hl < _hd.len - 4096) {
+            \\                const _n = std.posix.recv(ctx.conn.stream.handle, _hd[_hl..@min(_hl+4096, _hd.len)], 0) catch break;
+            \\                if (_n == 0) break;
+            \\                _hl += _n;
+            \\                if (std.mem.indexOf(u8, _hd[0.._hl], "\r\n\r\n") != null) break;
+            \\            }
+            \\            const _hdrs_end = (std.mem.indexOf(u8, _hd[0.._hl], "\r\n\r\n") orelse (_hl -| 4)) + 4;
+            \\            const _head = _hd[0.._hdrs_end];
+            \\            var _peeked: usize = if (_hl > _hdrs_end) _hl - _hdrs_end else 0;
+            \\            // Parse request line: METHOD PATH VERSION
+            \\            const _rl_end = std.mem.indexOf(u8, _head, "\r\n") orelse _hl;
+            \\            var _rp = std.mem.splitScalar(u8, _head[0.._rl_end], ' ');
+            \\            const _method = _rp.next() orelse "GET";
+            \\            const _raw_path = _rp.next() orelse "/";
+            \\            const _path = _raw_path[0 .. (std.mem.indexOfScalar(u8, _raw_path, '?') orelse _raw_path.len)];
+            \\            // Parse Content-Length.
+            \\            var _cl: usize = 0;
+            \\            var _hdr_it = std.mem.splitSequence(u8, _head, "\r\n");
+            \\            _ = _hdr_it.next();
+            \\            while (_hdr_it.next()) |_hl_| {
+            \\                if (_hl_.len == 0) break;
+            \\                const _cp = std.mem.indexOfScalar(u8, _hl_, ':') orelse continue;
+            \\                const _hn = std.mem.trim(u8, _hl_[0.._cp], " ");
+            \\                const _hv = std.mem.trim(u8, _hl_[_cp+1..], " ");
+            \\                if (std.ascii.eqlIgnoreCase(_hn, "content-length"))
+            \\                    _cl = std.fmt.parseInt(usize, _hv, 10) catch 0;
+            \\            }
+            \\            var _body: []const u8 = "";
+            \\            if (_cl > 0) {
+            \\                const _bb = _alloc.alloc(u8, _cl) catch @panic("OOM");
+            \\                const _pre = @min(_peeked, _cl);
+            \\                if (_pre > 0) @memcpy(_bb[0.._pre], _hd[_hdrs_end.._hdrs_end+_pre]);
+            \\                var _bi: usize = _pre;
+            \\                while (_bi < _cl) {
+            \\                    const _rn = std.posix.recv(ctx.conn.stream.handle, _bb[_bi..], 0) catch break;
+            \\                    if (_rn == 0) break;
+            \\                    _bi += _rn;
+            \\                }
+            \\                _body = _bb[0.._bi];
+            \\                _ = &_peeked;
+            \\            }
+            \\            const _req = HttpRequest{ .method = _method, .path = _path, .content = _body };
+            \\            const _resp = if (comptime @typeInfo(@TypeOf(ctx.handler)) == .@"fn") ctx.handler(_req) else ctx.handler.call(_req);
+            \\            const _st: []const u8 = switch (_resp.status) {
+            \\                200 => "OK", 201 => "Created", 204 => "No Content",
+            \\                301 => "Moved Permanently", 302 => "Found",
+            \\                400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
+            \\                404 => "Not Found", 405 => "Method Not Allowed",
+            \\                500 => "Internal Server Error",
+            \\                else => "Unknown",
+            \\            };
+            \\            const _out = std.fmt.allocPrint(_alloc,
+            \\                "HTTP/1.1 {d} {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
+            \\                .{ _resp.status, _st, _resp.text.len, _resp.text }) catch @panic("OOM");
+            \\            ctx.conn.stream.writeAll(_out) catch {};
+            \\        }
+            \\    };
             \\    const _alloc = std.heap.page_allocator;
             \\    var _srv = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port).listen(.{ .reuse_address = true }) catch |e| @panic(@errorName(e));
             \\    defer _srv.deinit();
             \\    while (true) {
-            \\        var _conn = _srv.accept() catch continue;
-            \\        defer _conn.stream.close();
-            \\        // Read request head using recv (works on Windows sockets).
-            \\        // We read into a large buffer and scan for \r\n\r\n.
-            \\        var _hd: [16384]u8 = undefined;
-            \\        var _hl: usize = 0;
-            \\        while (_hl < _hd.len - 4096) {
-            \\            const _n = std.posix.recv(_conn.stream.handle, _hd[_hl..@min(_hl+4096, _hd.len)], 0) catch break;
-            \\            if (_n == 0) break;
-            \\            _hl += _n;
-            \\            if (std.mem.indexOf(u8, _hd[0.._hl], "\r\n\r\n") != null) break;
-            \\        }
-            \\        const _hdrs_end = (std.mem.indexOf(u8, _hd[0.._hl], "\r\n\r\n") orelse (_hl -| 4)) + 4;
-            \\        const _head = _hd[0.._hdrs_end];
-            \\        // Bytes already read after the headers (peeked body).
-            \\        var _peeked: usize = if (_hl > _hdrs_end) _hl - _hdrs_end else 0;
-            \\        // Parse request line: METHOD PATH VERSION
-            \\        const _rl_end = std.mem.indexOf(u8, _head, "\r\n") orelse _hl;
-            \\        var _rp = std.mem.splitScalar(u8, _head[0.._rl_end], ' ');
-            \\        const _method = _rp.next() orelse "GET";
-            \\        const _raw_path = _rp.next() orelse "/";
-            \\        const _path = _raw_path[0 .. (std.mem.indexOfScalar(u8, _raw_path, '?') orelse _raw_path.len)];
-            \\        // Parse Content-Length for request body.
-            \\        var _cl: usize = 0;
-            \\        var _hdr_it = std.mem.splitSequence(u8, _head, "\r\n");
-            \\        _ = _hdr_it.next();
-            \\        while (_hdr_it.next()) |_hl_| {
-            \\            if (_hl_.len == 0) break;
-            \\            const _cp = std.mem.indexOfScalar(u8, _hl_, ':') orelse continue;
-            \\            const _hn = std.mem.trim(u8, _hl_[0.._cp], " ");
-            \\            const _hv = std.mem.trim(u8, _hl_[_cp+1..], " ");
-            \\            if (std.ascii.eqlIgnoreCase(_hn, "content-length"))
-            \\                _cl = std.fmt.parseInt(usize, _hv, 10) catch 0;
-            \\        }
-            \\        var _body: []const u8 = "";
-            \\        if (_cl > 0) {
-            \\            const _bb = _alloc.alloc(u8, _cl) catch @panic("OOM");
-            \\            // Copy any body bytes already read with the headers.
-            \\            const _pre = @min(_peeked, _cl);
-            \\            if (_pre > 0) @memcpy(_bb[0.._pre], _hd[_hdrs_end.._hdrs_end+_pre]);
-            \\            var _bi: usize = _pre;
-            \\            while (_bi < _cl) {
-            \\                const _rn = std.posix.recv(_conn.stream.handle, _bb[_bi..], 0) catch break;
-            \\                if (_rn == 0) break;
-            \\                _bi += _rn;
-            \\            }
-            \\            _body = _bb[0.._bi];
-            \\            _ = &_peeked; // suppress unused warning
-            \\        }
-            \\        // Invoke handler and write response.
-            \\        const _req = HttpRequest{ .method = _method, .path = _path, .content = _body };
-            \\        const _resp = if (comptime @typeInfo(@TypeOf(handler)) == .@"fn") handler(_req) else handler.call(_req);
-            \\        const _st: []const u8 = switch (_resp.status) {
-            \\            200 => "OK", 201 => "Created", 204 => "No Content",
-            \\            301 => "Moved Permanently", 302 => "Found",
-            \\            400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
-            \\            404 => "Not Found", 405 => "Method Not Allowed",
-            \\            500 => "Internal Server Error",
-            \\            else => "Unknown",
+            \\        const _conn = _srv.accept() catch continue;
+            \\        const _ctx = _alloc.create(_Ctx) catch { _conn.stream.close(); continue; };
+            \\        _ctx.* = .{ .conn = _conn, .handler = handler };
+            \\        _ = std.Thread.spawn(.{}, _Ctx.run, .{_ctx}) catch {
+            \\            _alloc.destroy(_ctx);
+            \\            _conn.stream.close();
             \\        };
-            \\        const _out = std.fmt.allocPrint(_alloc,
-            \\            "HTTP/1.1 {d} {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
-            \\            .{ _resp.status, _st, _resp.text.len, _resp.text }) catch @panic("OOM");
-            \\        _conn.stream.writeAll(_out) catch {};
             \\    }
             \\}
             \\
@@ -1112,8 +1127,8 @@ const Generator = struct {
         try g.w.writeAll("\n");
         // ── TCP helpers ────────────────────────────────────────────────────
         try g.w.writeAll("const TcpConn = struct { stream: std.net.Stream };\n");
-        try g.w.writeAll("fn _tcp_connect(host: []const u8, port: u16) TcpConn {\n");
-        try g.w.writeAll("    const s = std.net.tcpConnectToHost(_allocator, host, port) catch |e| @panic(@errorName(e));\n");
+        try g.w.writeAll("fn _tcp_connect(host: []const u8, port: u16) ?TcpConn {\n");
+        try g.w.writeAll("    const s = std.net.tcpConnectToHost(_allocator, host, port) catch return null;\n");
         try g.w.writeAll("    return .{ .stream = s };\n");
         try g.w.writeAll("}\n");
         try g.w.writeAll("fn _tcp_write(conn: TcpConn, data: []const u8) void {\n");
@@ -1125,6 +1140,29 @@ const Generator = struct {
         try g.w.writeAll("    var _hb = std.io.Writer.Allocating.init(std.heap.page_allocator);\n");
         try g.w.writeAll("    _ = _rd.interface().streamRemaining(&_hb.writer) catch |e| @panic(@errorName(e));\n");
         try g.w.writeAll("    return _hb.written();\n");
+        try g.w.writeAll("}\n");
+        // On Windows, stream.read() uses ReadFile which fails on sockets.
+        // Use std.posix.recv instead (same as _http_serve).
+        try g.w.writeAll("fn _tcp_read_line(conn: TcpConn) []const u8 {\n");
+        try g.w.writeAll("    var _buf: std.ArrayList(u8) = .{};\n");
+        try g.w.writeAll("    while (true) {\n");
+        try g.w.writeAll("        var _b: [1]u8 = undefined;\n");
+        try g.w.writeAll("        const _n = std.posix.recv(conn.stream.handle, &_b, 0) catch break;\n");
+        try g.w.writeAll("        if (_n == 0) break;\n");
+        try g.w.writeAll("        if (_b[0] == '\\n') break;\n");
+        try g.w.writeAll("        if (_b[0] != '\\r') _buf.append(std.heap.page_allocator, _b[0]) catch break;\n");
+        try g.w.writeAll("    }\n");
+        try g.w.writeAll("    return _buf.items;\n");
+        try g.w.writeAll("}\n");
+        try g.w.writeAll("fn _tcp_read_bytes(conn: TcpConn, n: usize) []const u8 {\n");
+        try g.w.writeAll("    const _buf = std.heap.page_allocator.alloc(u8, n) catch @panic(\"OOM\");\n");
+        try g.w.writeAll("    var _total: usize = 0;\n");
+        try g.w.writeAll("    while (_total < n) {\n");
+        try g.w.writeAll("        const _got = std.posix.recv(conn.stream.handle, _buf[_total..], 0) catch break;\n");
+        try g.w.writeAll("        if (_got == 0) break;\n");
+        try g.w.writeAll("        _total += _got;\n");
+        try g.w.writeAll("    }\n");
+        try g.w.writeAll("    return _buf[0.._total];\n");
         try g.w.writeAll("}\n");
         try g.w.writeAll("fn _tcp_close(conn: TcpConn) void { conn.stream.close(); }\n\n");
         // ── UDP helpers ────────────────────────────────────────────────────
@@ -3364,6 +3402,20 @@ const Generator = struct {
         if (std.mem.eql(u8, method, "read")) {
             try g.w.writeAll("_tcp_read(");
             try g.genExpr(obj);
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "readLine")) {
+            try g.w.writeAll("_tcp_read_line(");
+            try g.genExpr(obj);
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "readBytes")) {
+            try g.w.writeAll("_tcp_read_bytes(");
+            try g.genExpr(obj);
+            try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("1024");
             try g.w.writeAll(")");
             return true;
         }

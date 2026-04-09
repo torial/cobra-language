@@ -1,0 +1,10 @@
+class Main
+    shared
+        def main
+            # HTTPS — TLS certs loaded automatically by Zig's http.Client
+            var r = Http.get("https://httpbin.org/get")
+            if r != nil
+                print r.status              # 200
+                print r.text.len > 0        # true
+            if r == nil
+                print "HTTPS failed"        # should not print

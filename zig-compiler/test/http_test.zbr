@@ -1,11 +1,13 @@
 class Main
     shared
         def main
-            # ── Http.get ─────────────────────────────────────────────────────
-            var response as HttpResponse = Http.get("http://httpbin.org/get")
-            print response.status       # 200
-            print response.text.len     # some positive number
+            # Http.get returns ?HttpResponse — nil on network error
+            var response = Http.get("http://httpbin.org/get")
+            if response != nil
+                print response.status       # 200
+                print response.text.len     # some positive number
 
-            # ── Http.post ────────────────────────────────────────────────────
-            var r2 as HttpResponse = Http.post("http://httpbin.org/post", "hello=world")
-            print r2.status             # 200
+            # Http.post
+            var r2 = Http.post("http://httpbin.org/post", "hello=world")
+            if r2 != nil
+                print r2.status             # 200
