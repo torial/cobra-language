@@ -5776,8 +5776,20 @@ const Generator = struct {
         switch (e.kind) {
             .plain => try g.w.writeAll(e.text),
             .raw   => {
-                // r"..." → strip the 'r' prefix; Zig double-quoted strings work here.
-                try g.w.writeAll(e.text[1..]);
+                // r"..." / r'...' — backslashes are literal, not escape sequences.
+                // e.text is the full source token including the r prefix and quotes.
+                // Emit as a Zig double-quoted string with backslashes doubled.
+                const content = e.text[2 .. e.text.len - 1]; // strip r, open-quote, close-quote
+                try g.w.writeByte('"');
+                for (content) |c| switch (c) {
+                    '\\' => try g.w.writeAll("\\\\"),
+                    '"'  => try g.w.writeAll("\\\""),
+                    '\n' => try g.w.writeAll("\\n"),
+                    '\r' => try g.w.writeAll("\\r"),
+                    '\t' => try g.w.writeAll("\\t"),
+                    else => try g.w.writeByte(c),
+                };
+                try g.w.writeByte('"');
             },
             .nosub => {
                 // ns"..." → strip 'ns' prefix.

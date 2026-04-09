@@ -1,0 +1,25 @@
+class Main
+    shared
+        def main
+            # r"..." — no double-backslash needed
+            var re1 = Regex.compile(r"\d+")
+            print re1.match("42")             # true
+            print re1.match("abc")            # false
+
+            # Equivalent to compile("\\d+")
+            var re2 = Regex.compile("\\d+")
+            print re1.match("99") == re2.match("99")   # true
+
+            # More complex raw patterns
+            var email = Regex.compile(r"[\w.+-]+@[\w-]+\.[a-z]{2,}")
+            print email.match("user@example.com")       # true
+            print email.match("notanemail")             # false
+
+            # Raw with anchors and word boundaries
+            var wb = Regex.compile(r"\bword\b")
+            print wb.find("a word here")     # word
+            print wb.find("swordfish")       # (empty)
+
+            # Raw single-quote syntax also works
+            var re3 = Regex.compile(r'\w+')
+            print re3.find("hello world")    # hello
