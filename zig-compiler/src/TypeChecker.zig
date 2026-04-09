@@ -84,6 +84,8 @@ pub const Type = union(enum) {
     file,
     /// `[]str` — immutable slice of strings (e.g. `Net.resolve` return value).
     str_slice,
+    /// `SysRunResult` — result of `sys.run(argv)` with exit_code/stdout/stderr fields.
+    sys_run_result,
 
     // ── Optional ──────────────────────────────────────────────────────────────
     /// `?T` — nilable wrapper around another type.
@@ -123,6 +125,7 @@ pub const Type = union(enum) {
             .shell          => b == .shell,
             .file           => b == .file,
             .str_slice      => b == .str_slice,
+            .sys_run_result => b == .sys_run_result,
             .tuple => |ea| switch (b) {
                 .tuple => |eb| blk: {
                     if (ea.len != eb.len) break :blk false;
@@ -185,6 +188,7 @@ pub const Type = union(enum) {
             .shell          => "Shell",
             .file           => "File",
             .str_slice      => "[]str",
+            .sys_run_result => "SysRunResult",
             .optional       => "?T",
             .tuple          => "tuple",
             .unknown        => "<unknown>",
@@ -1170,6 +1174,12 @@ const TypeChecker = struct {
             if (std.mem.eql(u8, e.member, "status")) return .uint;
             if (std.mem.eql(u8, e.member, "text"))   return .string;
         }
+        // SysRunResult field access.
+        if (obj_type == .sys_run_result) {
+            if (std.mem.eql(u8, e.member, "exit_code")) return .int;
+            if (std.mem.eql(u8, e.member, "stdout"))    return .string;
+            if (std.mem.eql(u8, e.member, "stderr"))    return .string;
+        }
         // Look up the member name in the object type's own scope.
         if (obj_type == .named) {
             const sym = obj_type.named;
@@ -1349,6 +1359,7 @@ const TypeChecker = struct {
                     _ = try tc.inferExpr(mem.object);
                     if (std.mem.eql(u8, mem.member, "getenv"))  return .unknown; // ?str
                     if (std.mem.eql(u8, mem.member, "args"))    return .unknown; // List(str)
+                    if (std.mem.eql(u8, mem.member, "run"))     return .sys_run_result;
                     if (std.mem.eql(u8, mem.member, "exit"))    return .void_;
                     if (std.mem.eql(u8, mem.member, "err"))     return .void_;
                     if (std.mem.eql(u8, mem.member, "errln"))   return .void_;
@@ -1793,8 +1804,9 @@ fn builtinType(n: []const u8) Type {
     if (std.mem.eql(u8, n, "UdpSocket"))     return .udp_socket;
     if (std.mem.eql(u8, n, "Regex"))         return .regex;
     if (std.mem.eql(u8, n, "Gui"))          return .gui_context;
-    if (std.mem.eql(u8, n, "Shell"))        return .shell;
-    if (std.mem.eql(u8, n, "File"))         return .file;
+    if (std.mem.eql(u8, n, "Shell"))         return .shell;
+    if (std.mem.eql(u8, n, "File"))          return .file;
+    if (std.mem.eql(u8, n, "SysRunResult")) return .sys_run_result;
     return switch (Builtins.scalarKind(n)) {
         .int        => .int,
         .uint       => .uint,

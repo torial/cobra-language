@@ -1,0 +1,20 @@
+class Main
+    shared
+        def main
+            # sys.run with explicit argv (Windows: cmd /c echo)
+            var argv as List(str) = List()
+            argv.add("cmd")
+            argv.add("/c")
+            argv.add("echo hello")
+            var result as SysRunResult = sys.run(argv)
+            print result.exit_code == 0              # true
+            print result.stdout.contains("hello")    # true
+            print result.stderr.len == 0             # true
+
+            # Bad command should give non-zero exit code
+            var bad as List(str) = List()
+            bad.add("cmd")
+            bad.add("/c")
+            bad.add("exit 42")
+            var bad_result as SysRunResult = sys.run(bad)
+            print bad_result.exit_code == 42         # true

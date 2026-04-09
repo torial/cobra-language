@@ -1022,6 +1022,23 @@ const Generator = struct {
             \\}
             \\
         );
+        // ── sys.run — subprocess spawn + capture ───────────────────────────
+        try g.w.writeAll(
+            \\const SysRunResult = struct { exit_code: i64, stdout: []const u8, stderr: []const u8 };
+            \\fn _sys_run(argv: std.ArrayList([]const u8)) SysRunResult {
+            \\    const _r = std.process.Child.run(.{
+            \\        .allocator = _allocator,
+            \\        .argv = argv.items,
+            \\        .max_output_bytes = 16 * 1024 * 1024,
+            \\    }) catch return SysRunResult{ .exit_code = -1, .stdout = "", .stderr = "spawn failed" };
+            \\    const _ec: i64 = switch (_r.term) {
+            \\        .Exited => |code| @intCast(code),
+            \\        else    => -1,
+            \\    };
+            \\    return .{ .exit_code = _ec, .stdout = _r.stdout, .stderr = _r.stderr };
+            \\}
+            \\
+        );
         // ── HTTP networking helpers ─────────────────────────────────────────
         // Returns ?HttpResponse (null on any network/TLS error).
         // ca_bundle is populated on first HTTPS call via next_https_rescan_certs=true (Zig default).
@@ -3358,6 +3375,13 @@ const Generator = struct {
         if (std.mem.eql(u8, method, "getenv")) {
             try g.w.writeAll("std.posix.getenv(");
             if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "run")) {
+            // sys.run(argv as List(str)) → _SysRunResult
+            try g.w.writeAll("_sys_run(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("undefined");
             try g.w.writeAll(")");
             return true;
         }
@@ -6410,6 +6434,7 @@ fn printFmt(tc: ?*const TypeChecker.TypeCheckResult, catch_var: []const u8, expr
         .shell,
         .file,
         .str_slice,
+        .sys_run_result,
         .optional,
         .tuple                         => "{any}",
     };

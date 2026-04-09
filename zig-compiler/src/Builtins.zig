@@ -69,6 +69,8 @@ pub const NAMES = std.StaticStringMap(void).initComptime(&.{
     .{ "Net",           {} },
     // Stdlib math
     .{ "Math",          {} },
+    // Sys process result
+    .{ "SysRunResult",  {} },
     // Stdlib regex
     .{ "Regex",         {} },
     // Stdlib UI
