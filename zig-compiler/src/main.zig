@@ -27,6 +27,26 @@ const Resolver    = @import("Resolver.zig");
 const TypeChecker = @import("TypeChecker.zig");
 const CodeGen     = @import("CodeGen.zig");
 
+// ── Version ───────────────────────────────────────────────────────────────────
+//
+// Milestone versioning: each learner-readiness checkpoint = 0.1 increment.
+// Format: "<zebra>-zig<major>.<minor>"
+//   0.1  Math stdlib
+//   0.2  JSON stdlib
+//   0.3  Date/time stdlib
+//   0.4  CSV stdlib
+//   0.5  Source-mapped error messages
+//   0.6  REPL
+//   0.7  Escape analysis (replace scanReturnedNames heuristic)
+//   0.8  User-defined generics (struct(T))
+//   0.9  Book reconciliation (all examples compile)
+//   1.0  Language stability / changelog commitment
+
+const ZEBRA_VERSION = std.fmt.comptimePrint("0.1-zig{d}.{d}", .{
+    builtin.zig_version.major,
+    builtin.zig_version.minor,
+});
+
 // ── CLI mode ──────────────────────────────────────────────────────────────────
 
 const Mode = enum {
@@ -61,7 +81,10 @@ pub fn main() void {
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "-c")) {
+        if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
+            std.debug.print("zebra {s}\n", .{ZEBRA_VERSION});
+            std.process.exit(0);
+        } else if (std.mem.eql(u8, arg, "-c")) {
             mode = .compile_only;
         } else if (std.mem.eql(u8, arg, "--emit-zig")) {
             mode = .emit_zig;
@@ -107,6 +130,7 @@ pub fn main() void {
             \\  zebra --shared <source-file>               compile to shared library + .h header
             \\  zebra --release <source-file>              compile with -OReleaseFast
             \\  zebra --gui-backend=stub|glfw <source>     select GUI backend (default: stub)
+            \\  zebra --version                            print version and exit
             \\
         , .{});
         std.process.exit(1);
