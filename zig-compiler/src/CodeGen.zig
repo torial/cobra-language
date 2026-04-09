@@ -134,6 +134,7 @@ pub fn generate(
         .native_uses    = native_uses,
         .emit_exports   = emit_exports,
         .has_exports_ptr = &has_exports,
+        .source_file    = module.file,
     };
     try g.genModule(module);
     return GenerateResult{ .uses_gui = uses_gui, .has_exports = has_exports };
@@ -672,6 +673,14 @@ fn scanMutationsInExpr(
                     .{ "getObj",         {} }, .{ "getList",        {} },
                     .{ "isNull",         {} }, .{ "isObject",       {} },
                     .{ "isArray",        {} }, .{ "stringify",      {} },
+                    // DateTime — all methods return new values; receiver is never mutated
+                    .{ "addDays",        {} }, .{ "addMonths",      {} },
+                    .{ "addYears",       {} }, .{ "addHours",       {} },
+                    .{ "addMinutes",     {} }, .{ "addSeconds",     {} },
+                    .{ "before",         {} }, .{ "after",          {} },
+                    .{ "equals",         {} }, .{ "daysBetween",    {} },
+                    .{ "secondsBetween", {} }, .{ "toEpoch",        {} },
+                    .{ "toIso8601",      {} }, .{ "inCalendar",     {} },
                 });
                 // Extension methods are pass-by-value: never require var on the receiver.
                 const is_ext_method = blk: {
@@ -865,6 +874,10 @@ const Generator = struct {
     tco_params: []const []const u8 = &.{},
     /// True when the TCO method is `shared` (class-level static).
     tco_shared: bool = false,
+    /// Source file path (e.g. "test/hello.zbr").  Set from module.file.
+    /// Used to emit `// zbr:file:line` markers before each statement so
+    /// that Zig compiler errors can be remapped to Zebra source locations.
+    source_file: []const u8 = "",
 
     // ── Context-adjustment helpers ────────────────────────────────────────────
 
@@ -1078,6 +1091,149 @@ const Generator = struct {
             \\}
             \\
         );
+        // ── DateTime stdlib ──────────────────────────────────────────────────
+        try g.w.writeAll(
+            \\const _DateTime = struct { epoch_ms: i64 };
+            \\const _CalendarView = struct {
+            \\    year: i64, month: i64, day: i64, weekday: i64,
+            \\    monthName: []const u8, era: []const u8,
+            \\};
+            \\const _DtG = struct { year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64 };
+            \\fn _dt_is_leap(year: i64) bool {
+            \\    return @mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0);
+            \\}
+            \\fn _dt_days_in_month(year: i64, month: i64) i64 {
+            \\    const _d = [12]i64{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+            \\    if (month == 2 and _dt_is_leap(year)) return 29;
+            \\    return _d[@intCast(month - 1)];
+            \\}
+            \\fn _dt_to_gregorian(epoch_ms: i64) _DtG {
+            \\    const epoch_s   = @divFloor(epoch_ms, 1000);
+            \\    const epoch_days = @divFloor(epoch_s, 86400);
+            \\    const time_rem  = @mod(epoch_s, 86400);
+            \\    // Fliegel-Van Flandern: JDN → civil Gregorian date
+            \\    const jd = epoch_days + 2440588;
+            \\    var l  = jd + 68569;
+            \\    const n  = @divFloor(4 * l, 146097);
+            \\    l = l - @divFloor(146097 * n + 3, 4);
+            \\    const ii = @divFloor(4000 * (l + 1), 1461001);
+            \\    l = l - @divFloor(1461 * ii, 4) + 31;
+            \\    const jj = @divFloor(80 * l, 2447);
+            \\    const day   = l - @divFloor(2447 * jj, 80);
+            \\    l = @divFloor(jj, 11);
+            \\    const month = jj + 2 - 12 * l;
+            \\    const year  = 100 * (n - 49) + ii + l;
+            \\    return .{
+            \\        .year = year, .month = month, .day = day,
+            \\        .hour   = @divFloor(time_rem, 3600),
+            \\        .minute = @divFloor(@mod(time_rem, 3600), 60),
+            \\        .second = @mod(time_rem, 60),
+            \\    };
+            \\}
+            \\fn _dt_from_gregorian(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) _DateTime {
+            \\    // Richards algorithm: civil date → JDN
+            \\    const a   = @divFloor(14 - month, 12);
+            \\    const y   = year + 4800 - a;
+            \\    const m   = month + 12 * a - 3;
+            \\    const jdn = day + @divFloor(153 * m + 2, 5) + 365 * y
+            \\              + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400) - 32045;
+            \\    const epoch_days = jdn - 2440588;
+            \\    const epoch_s    = epoch_days * 86400 + hour * 3600 + minute * 60 + second;
+            \\    return .{ .epoch_ms = epoch_s * 1000 };
+            \\}
+            \\fn _dt_now() _DateTime { return .{ .epoch_ms = std.time.milliTimestamp() }; }
+            \\fn _dt_weekday(dt: _DateTime) i64 {
+            \\    // epoch_days=0 is Thursday (ISO 4); Monday=1 … Sunday=7
+            \\    const epoch_days = @divFloor(dt.epoch_ms, 86400000);
+            \\    return @mod(epoch_days + 3, 7) + 1;
+            \\}
+            \\fn _dt_add_days(dt: _DateTime, n: i64) _DateTime    { return .{ .epoch_ms = dt.epoch_ms + n * 86400000 }; }
+            \\fn _dt_add_hours(dt: _DateTime, n: i64) _DateTime   { return .{ .epoch_ms = dt.epoch_ms + n * 3600000 }; }
+            \\fn _dt_add_minutes(dt: _DateTime, n: i64) _DateTime { return .{ .epoch_ms = dt.epoch_ms + n * 60000 }; }
+            \\fn _dt_add_seconds(dt: _DateTime, n: i64) _DateTime { return .{ .epoch_ms = dt.epoch_ms + n * 1000 }; }
+            \\fn _dt_add_months(dt: _DateTime, months: i64) _DateTime {
+            \\    const g      = _dt_to_gregorian(dt.epoch_ms);
+            \\    const total  = (g.month - 1) + months;
+            \\    const ny     = g.year + @divFloor(total, 12);
+            \\    const nm     = @mod(total, 12) + 1;
+            \\    const max_d  = _dt_days_in_month(ny, nm);
+            \\    const nd     = if (g.day > max_d) max_d else g.day;
+            \\    return _dt_from_gregorian(ny, nm, nd, g.hour, g.minute, g.second);
+            \\}
+            \\fn _dt_add_years(dt: _DateTime, years: i64) _DateTime {
+            \\    const g     = _dt_to_gregorian(dt.epoch_ms);
+            \\    const ny    = g.year + years;
+            \\    const max_d = _dt_days_in_month(ny, g.month);
+            \\    const nd    = if (g.day > max_d) max_d else g.day;
+            \\    return _dt_from_gregorian(ny, g.month, nd, g.hour, g.minute, g.second);
+            \\}
+            \\fn _dt_to_iso8601(dt: _DateTime) []const u8 {
+            \\    const g = _dt_to_gregorian(dt.epoch_ms);
+            \\    return std.fmt.allocPrint(_allocator,
+            \\        "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z",
+            \\        .{ @as(u32, @intCast(g.year)), @as(u8, @intCast(g.month)), @as(u8, @intCast(g.day)),
+            \\           @as(u8, @intCast(g.hour)),  @as(u8, @intCast(g.minute)), @as(u8, @intCast(g.second)) }) catch "";
+            \\}
+            \\fn _dt_format(dt: _DateTime, pattern: []const u8) []const u8 {
+            \\    const g = _dt_to_gregorian(dt.epoch_ms);
+            \\    const _sm = [_][]const u8{"","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+            \\    const _lm = [_][]const u8{"","January","February","March","April","May","June","July","August","September","October","November","December"};
+            \\    const _sw = [_][]const u8{"","Mon","Tue","Wed","Thu","Fri","Sat","Sun"};
+            \\    const _lw = [_][]const u8{"","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"};
+            \\    var out: std.ArrayListUnmanaged(u8) = .{};
+            \\    var tmp: [32]u8 = undefined;
+            \\    var i: usize = 0;
+            \\    while (i < pattern.len) {
+            \\        const c = pattern[i];
+            \\        var cnt: usize = 1;
+            \\        while (i + cnt < pattern.len and pattern[i + cnt] == c) cnt += 1;
+            \\        const _uy = @as(u32, @intCast(g.year));
+            \\        const _um = @as(u8,  @intCast(g.month));
+            \\        const _ud = @as(u8,  @intCast(g.day));
+            \\        const _uh = @as(u8,  @intCast(g.hour));
+            \\        const _umin = @as(u8, @intCast(g.minute));
+            \\        const _us = @as(u8,  @intCast(g.second));
+            \\        switch (c) {
+            \\            'y' => if (cnt >= 4) out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>4}", .{_uy}) catch "") catch {}
+            \\                   else out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_uy % 100}) catch "") catch {},
+            \\            'M' => if (cnt >= 4) out.appendSlice(_allocator, _lm[@intCast(g.month)]) catch {}
+            \\                   else if (cnt >= 3) out.appendSlice(_allocator, _sm[@intCast(g.month)]) catch {}
+            \\                   else if (cnt >= 2) out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_um}) catch "") catch {}
+            \\                   else out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d}", .{_um}) catch "") catch {},
+            \\            'd' => if (cnt >= 2) out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_ud}) catch "") catch {}
+            \\                   else out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d}", .{_ud}) catch "") catch {},
+            \\            'H' => out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_uh}) catch "") catch {},
+            \\            'm' => out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_umin}) catch "") catch {},
+            \\            's' => out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_us}) catch "") catch {},
+            \\            'E' => { const _wd: usize = @intCast(_dt_weekday(dt)); out.appendSlice(_allocator, if (cnt >= 4) _lw[_wd] else _sw[_wd]) catch {}; },
+            \\            else => out.appendNTimes(_allocator, c, cnt) catch {},
+            \\        }
+            \\        i += cnt;
+            \\    }
+            \\    return out.toOwnedSlice(_allocator) catch "";
+            \\}
+            \\fn _dt_days_between(a: _DateTime, b: _DateTime) i64    { return @divFloor(b.epoch_ms - a.epoch_ms, 86400000); }
+            \\fn _dt_seconds_between(a: _DateTime, b: _DateTime) i64 { return @divFloor(b.epoch_ms - a.epoch_ms, 1000); }
+            \\fn _dt_in_calendar(dt: _DateTime, cal: []const u8) _CalendarView {
+            \\    _ = cal; // only Gregorian implemented; future: dispatch on cal
+            \\    const g  = _dt_to_gregorian(dt.epoch_ms);
+            \\    const _lm2 = [_][]const u8{"","January","February","March","April","May","June","July","August","September","October","November","December"};
+            \\    return .{
+            \\        .year = g.year, .month = g.month, .day = g.day,
+            \\        .weekday   = _dt_weekday(dt),
+            \\        .monthName = _lm2[@intCast(g.month)],
+            \\        .era       = "",
+            \\    };
+            \\}
+            \\const Calendar = struct {
+            \\    pub const Gregorian = "gregorian";
+            \\    pub const Hebrew    = "hebrew";
+            \\    pub const Islamic   = "islamic";
+            \\    pub const Persian   = "persian";
+            \\    pub const Julian    = "julian";
+            \\};
+            \\
+        );
         // ── JSON stdlib ──────────────────────────────────────────────────────
         try g.w.writeAll(
             \\const JsonValue = std.json.Value;
@@ -1171,10 +1327,11 @@ const Generator = struct {
         try g.w.writeAll("const HttpRequest = struct { method: []const u8, path: []const u8, content: []const u8 };\n");
         try g.w.writeAll(
             \\fn _http_serve(port: u16, handler: anytype) void {
-            \\    const Handler = @TypeOf(handler);
+            \\    const _HFn = *const fn(HttpRequest) HttpResponse;
+            \\    const _fn: _HFn = handler;
             \\    const _Ctx = struct {
             \\        conn: std.net.Server.Connection,
-            \\        handler: Handler,
+            \\        handler_fn: _HFn,
             \\        fn run(ctx: *@This()) void {
             \\            defer std.heap.page_allocator.destroy(ctx);
             \\            defer ctx.conn.stream.close();
@@ -1224,7 +1381,7 @@ const Generator = struct {
             \\                _ = &_peeked;
             \\            }
             \\            const _req = HttpRequest{ .method = _method, .path = _path, .content = _body };
-            \\            const _resp = if (comptime @typeInfo(@TypeOf(ctx.handler)) == .@"fn") ctx.handler(_req) else ctx.handler.call(_req);
+            \\            const _resp = ctx.handler_fn(_req);
             \\            const _st: []const u8 = switch (_resp.status) {
             \\                200 => "OK", 201 => "Created", 204 => "No Content",
             \\                301 => "Moved Permanently", 302 => "Found",
@@ -1245,7 +1402,7 @@ const Generator = struct {
             \\    while (true) {
             \\        const _conn = _srv.accept() catch continue;
             \\        const _ctx = _alloc.create(_Ctx) catch { _conn.stream.close(); continue; };
-            \\        _ctx.* = .{ .conn = _conn, .handler = handler };
+            \\        _ctx.* = .{ .conn = _conn, .handler_fn = _fn };
             \\        _ = std.Thread.spawn(.{}, _Ctx.run, .{_ctx}) catch {
             \\            _alloc.destroy(_ctx);
             \\            _conn.stream.close();
@@ -2823,7 +2980,79 @@ const Generator = struct {
         for (stmts) |stmt| try g.genStmt(stmt);
     }
 
+    /// Extract the source span from any Stmt variant.
+    /// Returns null for void-payload variants (pass, break_, continue_, contract).
+    fn stmtSpan(stmt: Ast.Stmt) ?Ast.Span {
+        return switch (stmt) {
+            .var_          => |n| n.span,
+            .assign        => |s| s.span,
+            .return_       => |s| s.span,
+            .if_           => |s| s.span,
+            .while_        => |s| s.span,
+            .for_in        => |s| s.span,
+            .for_num       => |s| s.span,
+            .branch        => |s| s.span,
+            .print         => |s| s.span,
+            .assert        => |s| s.span,
+            .yield         => |s| s.span,
+            .expr          => |e| exprSpan(e),
+            .defer_        => |s| s.span,
+            .with          => |s| s.span,
+            .var_except    => |s| s.span,
+            .assign_except => |s| s.span,
+            .raise         => |s| s.span,
+            .try_catch     => |s| s.span,
+            .guard         => |s| s.span,
+            .destruct      => |s| s.span,
+            .pass, .break_, .continue_, .contract => null,
+        };
+    }
+
+    /// Extract the source span from any Expr variant.
+    fn exprSpan(e: *const Ast.Expr) ?Ast.Span {
+        return switch (e.*) {
+            .int_lit       => |x| x.span,
+            .float_lit     => |x| x.span,
+            .bool_lit      => |x| x.span,
+            .char_lit      => |x| x.span,
+            .string_lit    => |x| x.span,
+            .string_interp => |x| x.span,
+            .nil           => |s| s,
+            .this          => |s| s,
+            .ident         => |x| x.span,
+            .zig_lit       => |x| x.span,
+            .member        => |x| x.span,
+            .call          => |x| x.span,
+            .index         => |x| x.span,
+            .slice         => |x| x.span,
+            .binary        => |x| x.span,
+            .unary         => |x| x.span,
+            .cast          => |x| x.span,
+            .to_nilable    => |x| x.span,
+            .to_non_nil    => |x| x.span,
+            .is_nil        => |x| x.span,
+            .orelse_       => |x| x.span,
+            .catch_        => |x| x.span,
+            .if_expr       => |x| x.span,
+            .lambda        => |x| x.span,
+            .list_lit      => |x| x.span,
+            .dict_lit      => |x| x.span,
+            .array_lit     => |x| x.span,
+            .all_any       => |x| x.span,
+            .old           => |x| x.span,
+            .try_          => |x| x.span,
+            .tuple_lit     => |x| x.span,
+        };
+    }
+
     fn genStmt(g: Generator, stmt: Ast.Stmt) anyerror!void {
+        // Emit source-map marker so Zig compiler errors can be remapped
+        // to the originating Zebra file and line by main.zig.
+        if (g.source_file.len > 0) {
+            if (stmtSpan(stmt)) |sp| {
+                try g.w.print("// zbr:{s}:{d}\n", .{ g.source_file, sp.line });
+            }
+        }
         switch (stmt) {
             .var_      => |n| try g.genLocalVar(n),
             .assign    => |s| try g.genAssign(s),
@@ -3191,6 +3420,7 @@ const Generator = struct {
                 if (std.mem.eql(u8, n.name, "Regex"))      return g.genRegexMethod(object, method, args);
                 if (std.mem.eql(u8, n.name, "Gui"))        return g.genGuiWidgetMethod(object, method, args);
                 if (std.mem.eql(u8, n.name, "JsonValue"))  return g.genJsonMethod(object, method, args);
+                if (std.mem.eql(u8, n.name, "DateTime"))   return g.genDateTimeMethod(object, method, args);
                 // toString() on int/float/bool — format as string.
                 if (std.mem.eql(u8, method, "toString")) {
                     const fmt = if (std.mem.eql(u8, n.name, "float") or
@@ -3259,6 +3489,24 @@ const Generator = struct {
                     try g.genExpr(object);
                     try g.w.writeAll(".len");
                     return true;
+                }
+                if (std.mem.eql(u8, n.name, "DateTime")) {
+                    const dt_fields = std.StaticStringMap([]const u8).initComptime(&.{
+                        .{ "year", "year" }, .{ "month", "month" }, .{ "day", "day" },
+                        .{ "hour", "hour" }, .{ "minute", "minute" }, .{ "second", "second" },
+                    });
+                    if (dt_fields.get(prop)) |field| {
+                        try g.w.writeAll("_dt_to_gregorian(");
+                        try g.genExpr(object);
+                        try g.w.print(".epoch_ms).{s}", .{field});
+                        return true;
+                    }
+                    if (std.mem.eql(u8, prop, "weekday")) {
+                        try g.w.writeAll("_dt_weekday(");
+                        try g.genExpr(object);
+                        try g.w.writeAll(")");
+                        return true;
+                    }
                 }
             },
             else => {
@@ -3515,6 +3763,131 @@ const Generator = struct {
 
     /// Emit a static `Shell.*` call.
     // ── Json static methods ──────────────────────────────────────────────────
+
+    // ── DateTime static + instance methods ───────────────────────────────────
+
+    fn genDateTimeCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "now")) {
+            try g.w.writeAll("_dt_now()");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "fromEpoch")) {
+            try g.w.writeAll("_DateTime{ .epoch_ms = ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeAll(" }");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "of")) {
+            try g.w.writeAll("_dt_from_gregorian(");
+            for (args, 0..) |a, i| {
+                if (i > 0) try g.w.writeAll(", ");
+                try g.genExpr(a.value);
+            }
+            // Fill missing hour/minute/second with 0
+            const provided = args.len;
+            if (provided < 4) try g.w.writeAll(", 0");
+            if (provided < 5) try g.w.writeAll(", 0");
+            if (provided < 6) try g.w.writeAll(", 0");
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    fn genDateTimeMethod(
+        g:      Generator,
+        object: *const Ast.Expr,
+        method: []const u8,
+        args:   []const Ast.Arg,
+    ) anyerror!bool {
+        // Arithmetic — return new _DateTime
+        const arith_map = std.StaticStringMap([]const u8).initComptime(&.{
+            .{ "addDays",    "_dt_add_days" },
+            .{ "addHours",   "_dt_add_hours" },
+            .{ "addMinutes", "_dt_add_minutes" },
+            .{ "addSeconds", "_dt_add_seconds" },
+            .{ "addMonths",  "_dt_add_months" },
+            .{ "addYears",   "_dt_add_years" },
+        });
+        if (arith_map.get(method)) |fn_name| {
+            try g.w.writeAll(fn_name);
+            try g.w.writeAll("(");
+            try g.genExpr(object);
+            try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeAll(")");
+            return true;
+        }
+        // Comparison
+        if (std.mem.eql(u8, method, "before")) {
+            try g.genExpr(object);
+            try g.w.writeAll(".epoch_ms < ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("_dt_now()");
+            try g.w.writeAll(".epoch_ms");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "after")) {
+            try g.genExpr(object);
+            try g.w.writeAll(".epoch_ms > ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("_dt_now()");
+            try g.w.writeAll(".epoch_ms");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "equals")) {
+            try g.genExpr(object);
+            try g.w.writeAll(".epoch_ms == ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("_dt_now()");
+            try g.w.writeAll(".epoch_ms");
+            return true;
+        }
+        // Interval
+        if (std.mem.eql(u8, method, "daysBetween")) {
+            try g.w.writeAll("_dt_days_between(");
+            try g.genExpr(object);
+            try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("_dt_now()");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "secondsBetween")) {
+            try g.w.writeAll("_dt_seconds_between(");
+            try g.genExpr(object);
+            try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("_dt_now()");
+            try g.w.writeAll(")");
+            return true;
+        }
+        // Serialization
+        if (std.mem.eql(u8, method, "toEpoch")) {
+            try g.genExpr(object);
+            try g.w.writeAll(".epoch_ms");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "toIso8601")) {
+            try g.w.writeAll("_dt_to_iso8601(");
+            try g.genExpr(object);
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "format")) {
+            try g.w.writeAll("_dt_format(");
+            try g.genExpr(object);
+            try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        // Calendar view
+        if (std.mem.eql(u8, method, "inCalendar")) {
+            try g.w.writeAll("_dt_in_calendar(");
+            try g.genExpr(object);
+            try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("Calendar.Gregorian");
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
 
     fn genJsonCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
         if (std.mem.eql(u8, method, "parse")) {
@@ -5549,6 +5922,28 @@ const Generator = struct {
                 if (g.getExprDeclaredType(e.object)) |tr| {
                     if (try g.genStdlibProp(e.object, tr, e.member)) break :sw;
                 }
+                // TC-type fallback for DateTime field access (unannotated vars).
+                if (g.tc) |tc| {
+                    const obj_tc = tc.expr_types.get(e.object) orelse .unknown;
+                    if (obj_tc == .date_time) {
+                        const dt_fields = std.StaticStringMap([]const u8).initComptime(&.{
+                            .{ "year", "year" }, .{ "month", "month" }, .{ "day", "day" },
+                            .{ "hour", "hour" }, .{ "minute", "minute" }, .{ "second", "second" },
+                        });
+                        if (dt_fields.get(e.member)) |field| {
+                            try g.w.writeAll("_dt_to_gregorian(");
+                            try g.genExpr(e.object);
+                            try g.w.print(".epoch_ms).{s}", .{field});
+                            break :sw;
+                        }
+                        if (std.mem.eql(u8, e.member, "weekday")) {
+                            try g.w.writeAll("_dt_weekday(");
+                            try g.genExpr(e.object);
+                            try g.w.writeAll(")");
+                            break :sw;
+                        }
+                    }
+                }
                 // Computed property (getter): obj.area → obj.area()
                 if (g.tc) |tc| {
                     const obj_type = tc.expr_types.get(e.object) orelse .unknown;
@@ -5900,6 +6295,13 @@ const Generator = struct {
                 if (try g.genHttpCall(mem.member, e.args)) return;
             }
         }
+        // DateTime static calls: DateTime.now(), DateTime.fromEpoch(ms), DateTime.of(y,m,d,...).
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "DateTime")) {
+                if (try g.genDateTimeCall(mem.member, e.args)) return;
+            }
+        }
         // Json static calls: Json.parse(s), Json.stringify(v), Json.object(), Json.array().
         if (e.callee.* == .member) {
             const mem = e.callee.member;
@@ -6052,8 +6454,9 @@ const Generator = struct {
                     .regex       => if (try g.genRegexMethod(mem.object, mem.member, e.args)) return,
                     .gui_context => if (try g.genGuiWidgetMethod(mem.object, mem.member, e.args)) return,
                     .str_slice  => if (try g.genStrSliceMethod(mem.object, mem.member)) return,
-                    .json_value => if (try g.genJsonMethod(mem.object, mem.member, e.args)) return,
-                    .unknown    => if (try g.genListMethod(mem.object, mem.member, e.args)) return,
+                    .json_value  => if (try g.genJsonMethod(mem.object, mem.member, e.args)) return,
+                    .date_time   => if (try g.genDateTimeMethod(mem.object, mem.member, e.args)) return,
+                    .unknown     => if (try g.genListMethod(mem.object, mem.member, e.args)) return,
                     else        => {},
                 }
             }
@@ -6691,6 +7094,8 @@ fn printFmt(tc: ?*const TypeChecker.TypeCheckResult, catch_var: []const u8, expr
         .sys_run_result,
         .json_value,
         .json_array,
+        .date_time,
+        .calendar_view,
         .optional,
         .tuple                         => "{any}",
     };

@@ -49,33 +49,57 @@ fn _zebra_ge(a: anytype, b: anytype) bool {
         pub fn errValue(self: @This()) ?E {
             return switch (self) { .ok => null, .err => |e| e };
         }
+        /// map(f) — apply f to the ok value; propagate err unchanged.
+        /// f may be a fn pointer or a capture-closure struct with a `call` method.
+        pub fn map(self: @This(), f: anytype) _Result(
+            @TypeOf(if (comptime @typeInfo(@TypeOf(f)) == .@"fn") f(@as(T, undefined)) else f.call(@as(T, undefined))), E
+        ) {
+            const _is_fn = comptime @typeInfo(@TypeOf(f)) == .@"fn";
+            return switch (self) {
+                .ok  => |v| .{ .ok = if (_is_fn) f(v) else f.call(v) },
+                .err => |e| .{ .err = e },
+            };
+        }
+        /// flatMap(f) — apply f to the ok value; f must return Result(U, E).
+        pub fn flatMap(self: @This(), f: anytype) @TypeOf(
+            if (comptime @typeInfo(@TypeOf(f)) == .@"fn") f(@as(T, undefined)) else f.call(@as(T, undefined))
+        ) {
+            const _is_fn = comptime @typeInfo(@TypeOf(f)) == .@"fn";
+            return switch (self) {
+                .ok  => |v| if (_is_fn) f(v) else f.call(v),
+                .err => |e| .{ .err = e },
+            };
+        }
     };
 }
-fn _pad_left(s: []const u8, width: usize, fill: u8, alloc: std.mem.Allocator) []const u8 {
+fn _pad_fill(fill: anytype) u8 {
+    if (comptime @typeInfo(@TypeOf(fill)) == .pointer) return fill[0];
+    return @as(u8, @intCast(fill));
+}
+fn _pad_left(s: []const u8, width: usize, fill: anytype, alloc: std.mem.Allocator) []const u8 {
     if (s.len >= width) return s;
     const buf = alloc.alloc(u8, width) catch @panic("OOM");
-    @memset(buf[0 .. width - s.len], fill);
+    @memset(buf[0 .. width - s.len], _pad_fill(fill));
     @memcpy(buf[width - s.len ..], s);
     return buf;
 }
-fn _pad_right(s: []const u8, width: usize, fill: u8, alloc: std.mem.Allocator) []const u8 {
+fn _pad_right(s: []const u8, width: usize, fill: anytype, alloc: std.mem.Allocator) []const u8 {
     if (s.len >= width) return s;
     const buf = alloc.alloc(u8, width) catch @panic("OOM");
     @memcpy(buf[0 .. s.len], s);
-    @memset(buf[s.len ..], fill);
+    @memset(buf[s.len ..], _pad_fill(fill));
     return buf;
 }
-fn _pad_center(s: []const u8, width: usize, fill: u8, alloc: std.mem.Allocator) []const u8 {
+fn _pad_center(s: []const u8, width: usize, fill: anytype, alloc: std.mem.Allocator) []const u8 {
     if (s.len >= width) return s;
     const pad = width - s.len;
     const lpad = pad / 2;
     const buf = alloc.alloc(u8, width) catch @panic("OOM");
-    @memset(buf[0 .. lpad], fill);
+    @memset(buf[0 .. lpad], _pad_fill(fill));
     @memcpy(buf[lpad .. lpad + s.len], s);
-    @memset(buf[lpad + s.len ..], fill);
+    @memset(buf[lpad + s.len ..], _pad_fill(fill));
     return buf;
 }
-
 fn _zebra_sort_natural(comptime T: type, items: []T) void {
     const _I = struct {
         fn less(_: void, a: T, b: T) bool {
@@ -93,92 +117,326 @@ fn _zebra_sort_by(comptime T: type, comptime cmp: anytype, items: []T) void {
     };
     std.mem.sort(T, items, {}, _I.less);
 }
+const SysRunResult = struct { exit_code: i64, stdout: []const u8, stderr: []const u8 };
+fn _sys_run(argv: std.ArrayList([]const u8)) SysRunResult {
+    const _r = std.process.Child.run(.{
+        .allocator = _allocator,
+        .argv = argv.items,
+        .max_output_bytes = 16 * 1024 * 1024,
+    }) catch return SysRunResult{ .exit_code = -1, .stdout = "", .stderr = "spawn failed" };
+    const _ec: i64 = switch (_r.term) {
+        .Exited => |code| @intCast(code),
+        else    => -1,
+    };
+    return .{ .exit_code = _ec, .stdout = _r.stdout, .stderr = _r.stderr };
+}
+const _DateTime = struct { epoch_ms: i64 };
+const _CalendarView = struct {
+    year: i64, month: i64, day: i64, weekday: i64,
+    monthName: []const u8, era: []const u8,
+};
+const _DtG = struct { year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64 };
+fn _dt_is_leap(year: i64) bool {
+    return @mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0);
+}
+fn _dt_days_in_month(year: i64, month: i64) i64 {
+    const _d = [12]i64{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (month == 2 and _dt_is_leap(year)) return 29;
+    return _d[@intCast(month - 1)];
+}
+fn _dt_to_gregorian(epoch_ms: i64) _DtG {
+    const epoch_s   = @divFloor(epoch_ms, 1000);
+    const epoch_days = @divFloor(epoch_s, 86400);
+    const time_rem  = @mod(epoch_s, 86400);
+    // Fliegel-Van Flandern: JDN → civil Gregorian date
+    const jd = epoch_days + 2440588;
+    var l  = jd + 68569;
+    const n  = @divFloor(4 * l, 146097);
+    l = l - @divFloor(146097 * n + 3, 4);
+    const ii = @divFloor(4000 * (l + 1), 1461001);
+    l = l - @divFloor(1461 * ii, 4) + 31;
+    const jj = @divFloor(80 * l, 2447);
+    const day   = l - @divFloor(2447 * jj, 80);
+    l = @divFloor(jj, 11);
+    const month = jj + 2 - 12 * l;
+    const year  = 100 * (n - 49) + ii + l;
+    return .{
+        .year = year, .month = month, .day = day,
+        .hour   = @divFloor(time_rem, 3600),
+        .minute = @divFloor(@mod(time_rem, 3600), 60),
+        .second = @mod(time_rem, 60),
+    };
+}
+fn _dt_from_gregorian(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) _DateTime {
+    // Richards algorithm: civil date → JDN
+    const a   = @divFloor(14 - month, 12);
+    const y   = year + 4800 - a;
+    const m   = month + 12 * a - 3;
+    const jdn = day + @divFloor(153 * m + 2, 5) + 365 * y
+              + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400) - 32045;
+    const epoch_days = jdn - 2440588;
+    const epoch_s    = epoch_days * 86400 + hour * 3600 + minute * 60 + second;
+    return .{ .epoch_ms = epoch_s * 1000 };
+}
+fn _dt_now() _DateTime { return .{ .epoch_ms = std.time.milliTimestamp() }; }
+fn _dt_weekday(dt: _DateTime) i64 {
+    // epoch_days=0 is Thursday (ISO 4); Monday=1 … Sunday=7
+    const epoch_days = @divFloor(dt.epoch_ms, 86400000);
+    return @mod(epoch_days + 3, 7) + 1;
+}
+fn _dt_add_days(dt: _DateTime, n: i64) _DateTime    { return .{ .epoch_ms = dt.epoch_ms + n * 86400000 }; }
+fn _dt_add_hours(dt: _DateTime, n: i64) _DateTime   { return .{ .epoch_ms = dt.epoch_ms + n * 3600000 }; }
+fn _dt_add_minutes(dt: _DateTime, n: i64) _DateTime { return .{ .epoch_ms = dt.epoch_ms + n * 60000 }; }
+fn _dt_add_seconds(dt: _DateTime, n: i64) _DateTime { return .{ .epoch_ms = dt.epoch_ms + n * 1000 }; }
+fn _dt_add_months(dt: _DateTime, months: i64) _DateTime {
+    const g      = _dt_to_gregorian(dt.epoch_ms);
+    const total  = (g.month - 1) + months;
+    const ny     = g.year + @divFloor(total, 12);
+    const nm     = @mod(total, 12) + 1;
+    const max_d  = _dt_days_in_month(ny, nm);
+    const nd     = if (g.day > max_d) max_d else g.day;
+    return _dt_from_gregorian(ny, nm, nd, g.hour, g.minute, g.second);
+}
+fn _dt_add_years(dt: _DateTime, years: i64) _DateTime {
+    const g     = _dt_to_gregorian(dt.epoch_ms);
+    const ny    = g.year + years;
+    const max_d = _dt_days_in_month(ny, g.month);
+    const nd    = if (g.day > max_d) max_d else g.day;
+    return _dt_from_gregorian(ny, g.month, nd, g.hour, g.minute, g.second);
+}
+fn _dt_to_iso8601(dt: _DateTime) []const u8 {
+    const g = _dt_to_gregorian(dt.epoch_ms);
+    return std.fmt.allocPrint(_allocator,
+        "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z",
+        .{ @as(u32, @intCast(g.year)), @as(u8, @intCast(g.month)), @as(u8, @intCast(g.day)),
+           @as(u8, @intCast(g.hour)),  @as(u8, @intCast(g.minute)), @as(u8, @intCast(g.second)) }) catch "";
+}
+fn _dt_format(dt: _DateTime, pattern: []const u8) []const u8 {
+    const g = _dt_to_gregorian(dt.epoch_ms);
+    const _sm = [_][]const u8{"","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+    const _lm = [_][]const u8{"","January","February","March","April","May","June","July","August","September","October","November","December"};
+    const _sw = [_][]const u8{"","Mon","Tue","Wed","Thu","Fri","Sat","Sun"};
+    const _lw = [_][]const u8{"","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"};
+    var out: std.ArrayListUnmanaged(u8) = .{};
+    var tmp: [32]u8 = undefined;
+    var i: usize = 0;
+    while (i < pattern.len) {
+        const c = pattern[i];
+        var cnt: usize = 1;
+        while (i + cnt < pattern.len and pattern[i + cnt] == c) cnt += 1;
+        const _uy = @as(u32, @intCast(g.year));
+        const _um = @as(u8,  @intCast(g.month));
+        const _ud = @as(u8,  @intCast(g.day));
+        const _uh = @as(u8,  @intCast(g.hour));
+        const _umin = @as(u8, @intCast(g.minute));
+        const _us = @as(u8,  @intCast(g.second));
+        switch (c) {
+            'y' => if (cnt >= 4) out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>4}", .{_uy}) catch "") catch {}
+                   else out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_uy % 100}) catch "") catch {},
+            'M' => if (cnt >= 4) out.appendSlice(_allocator, _lm[@intCast(g.month)]) catch {}
+                   else if (cnt >= 3) out.appendSlice(_allocator, _sm[@intCast(g.month)]) catch {}
+                   else if (cnt >= 2) out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_um}) catch "") catch {}
+                   else out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d}", .{_um}) catch "") catch {},
+            'd' => if (cnt >= 2) out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_ud}) catch "") catch {}
+                   else out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d}", .{_ud}) catch "") catch {},
+            'H' => out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_uh}) catch "") catch {},
+            'm' => out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_umin}) catch "") catch {},
+            's' => out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_us}) catch "") catch {},
+            'E' => { const _wd: usize = @intCast(_dt_weekday(dt)); out.appendSlice(_allocator, if (cnt >= 4) _lw[_wd] else _sw[_wd]) catch {}; },
+            else => out.appendNTimes(_allocator, c, cnt) catch {},
+        }
+        i += cnt;
+    }
+    return out.toOwnedSlice(_allocator) catch "";
+}
+fn _dt_days_between(a: _DateTime, b: _DateTime) i64    { return @divFloor(b.epoch_ms - a.epoch_ms, 86400000); }
+fn _dt_seconds_between(a: _DateTime, b: _DateTime) i64 { return @divFloor(b.epoch_ms - a.epoch_ms, 1000); }
+fn _dt_in_calendar(dt: _DateTime, cal: []const u8) _CalendarView {
+    _ = cal; // only Gregorian implemented; future: dispatch on cal
+    const g  = _dt_to_gregorian(dt.epoch_ms);
+    const _lm2 = [_][]const u8{"","January","February","March","April","May","June","July","August","September","October","November","December"};
+    return .{
+        .year = g.year, .month = g.month, .day = g.day,
+        .weekday   = _dt_weekday(dt),
+        .monthName = _lm2[@intCast(g.month)],
+        .era       = "",
+    };
+}
+const Calendar = struct {
+    pub const Gregorian = "gregorian";
+    pub const Hebrew    = "hebrew";
+    pub const Islamic   = "islamic";
+    pub const Persian   = "persian";
+    pub const Julian    = "julian";
+};
+const JsonValue = std.json.Value;
+fn _json_parse(src: []const u8) ?JsonValue {
+    // parseFromSliceLeaky uses allocator directly (no arena), intentionally leaked.
+    return std.json.parseFromSliceLeaky(JsonValue, std.heap.page_allocator, src, .{}) catch return null;
+}
+fn _json_stringify(v: JsonValue) []const u8 {
+    return std.json.Stringify.valueAlloc(std.heap.page_allocator, v, .{}) catch "{}";
+}
+fn _json_object() JsonValue { return .{ .object = std.json.ObjectMap.init(std.heap.page_allocator) }; }
+fn _json_array() JsonValue  { return .{ .array = std.json.Array.init(std.heap.page_allocator) }; }
+fn _json_get_str(v: JsonValue, key: []const u8) []const u8 {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .string => |s| return s, else => {} }, else => {} }
+    return "";
+}
+fn _json_get_int(v: JsonValue, key: []const u8) i64 {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .integer => |n| return n, else => {} }, else => {} }
+    return 0;
+}
+fn _json_get_float(v: JsonValue, key: []const u8) f64 {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) {
+        .float => |f| return f, .integer => |n| return @floatFromInt(n), else => {} }, else => {} }
+    return 0.0;
+}
+fn _json_get_bool(v: JsonValue, key: []const u8) bool {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .bool => |b| return b, else => {} }, else => {} }
+    return false;
+}
+fn _json_get_obj(v: JsonValue, key: []const u8) JsonValue {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .object => return it, else => {} }, else => {} }
+    return .{ .object = std.json.ObjectMap.init(std.heap.page_allocator) };
+}
+fn _json_get_list(v: JsonValue, key: []const u8) []JsonValue {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .array => |a| return a.items, else => {} }, else => {} }
+    return &[_]JsonValue{};
+}
+fn _json_is_null(v: JsonValue) bool   { return v == .null; }
+fn _json_is_object(v: JsonValue) bool  { return switch (v) { .object => true, else => false }; }
+fn _json_is_array(v: JsonValue) bool   { return switch (v) { .array  => true, else => false }; }
+fn _json_put_str(v: *JsonValue, key: []const u8, val: []const u8) void {
+    if (v.* != .object) return;
+    v.object.put(std.heap.page_allocator.dupe(u8, key) catch return, .{ .string = val }) catch {};
+}
+fn _json_put_int(v: *JsonValue, key: []const u8, val: i64) void {
+    if (v.* != .object) return;
+    v.object.put(std.heap.page_allocator.dupe(u8, key) catch return, .{ .integer = val }) catch {};
+}
+fn _json_put_float(v: *JsonValue, key: []const u8, val: f64) void {
+    if (v.* != .object) return;
+    v.object.put(std.heap.page_allocator.dupe(u8, key) catch return, .{ .float = val }) catch {};
+}
+fn _json_put_bool(v: *JsonValue, key: []const u8, val: bool) void {
+    if (v.* != .object) return;
+    v.object.put(std.heap.page_allocator.dupe(u8, key) catch return, .{ .bool = val }) catch {};
+}
+fn _json_arr_str(v: *JsonValue, val: []const u8) void {
+    if (v.* != .array) return;
+    v.array.append(.{ .string = val }) catch {};
+}
+fn _json_arr_int(v: *JsonValue, val: i64) void {
+    if (v.* != .array) return;
+    v.array.append(.{ .integer = val }) catch {};
+}
+fn _json_arr_float(v: *JsonValue, val: f64) void {
+    if (v.* != .array) return;
+    v.array.append(.{ .float = val }) catch {};
+}
+fn _json_arr_bool(v: *JsonValue, val: bool) void {
+    if (v.* != .array) return;
+    v.array.append(.{ .bool = val }) catch {};
+}
 const HttpResponse = struct { status: u16, text: []const u8 };
-fn _http_request(method: std.http.Method, url: []const u8, payload: ?[]const u8) HttpResponse {
+fn _http_request(method: std.http.Method, url: []const u8, payload: ?[]const u8) ?HttpResponse {
     var _hc = std.http.Client{ .allocator = _allocator };
     defer _hc.deinit();
     var _hb = std.io.Writer.Allocating.init(std.heap.page_allocator);
-    const _hr = _hc.fetch(.{ .location = .{ .url = url }, .method = method, .payload = payload, .response_writer = &_hb.writer }) catch |e| @panic(@errorName(e));
+    const _hr = _hc.fetch(.{ .location = .{ .url = url }, .method = method, .payload = payload, .response_writer = &_hb.writer }) catch return null;
     return .{ .status = @intFromEnum(_hr.status), .text = _hb.written() };
 }
-fn _http_get(url: []const u8) HttpResponse { return _http_request(.GET, url, null); }
-fn _http_post(url: []const u8, payload: []const u8) HttpResponse { return _http_request(.POST, url, payload); }
+fn _http_get(url: []const u8) ?HttpResponse { return _http_request(.GET, url, null); }
+fn _http_post(url: []const u8, payload: []const u8) ?HttpResponse { return _http_request(.POST, url, payload); }
 const HttpRequest = struct { method: []const u8, path: []const u8, content: []const u8 };
 fn _http_serve(port: u16, handler: anytype) void {
+    const _HFn = *const fn(HttpRequest) HttpResponse;
+    const _fn: _HFn = handler;
+    const _Ctx = struct {
+        conn: std.net.Server.Connection,
+        handler_fn: _HFn,
+        fn run(ctx: *@This()) void {
+            defer std.heap.page_allocator.destroy(ctx);
+            defer ctx.conn.stream.close();
+            const _alloc = std.heap.page_allocator;
+            // Read request headers (scan for \r\n\r\n).
+            var _hd: [16384]u8 = undefined;
+            var _hl: usize = 0;
+            while (_hl < _hd.len - 4096) {
+                const _n = std.posix.recv(ctx.conn.stream.handle, _hd[_hl..@min(_hl+4096, _hd.len)], 0) catch break;
+                if (_n == 0) break;
+                _hl += _n;
+                if (std.mem.indexOf(u8, _hd[0.._hl], "\r\n\r\n") != null) break;
+            }
+            const _hdrs_end = (std.mem.indexOf(u8, _hd[0.._hl], "\r\n\r\n") orelse (_hl -| 4)) + 4;
+            const _head = _hd[0.._hdrs_end];
+            var _peeked: usize = if (_hl > _hdrs_end) _hl - _hdrs_end else 0;
+            // Parse request line: METHOD PATH VERSION
+            const _rl_end = std.mem.indexOf(u8, _head, "\r\n") orelse _hl;
+            var _rp = std.mem.splitScalar(u8, _head[0.._rl_end], ' ');
+            const _method = _rp.next() orelse "GET";
+            const _raw_path = _rp.next() orelse "/";
+            const _path = _raw_path[0 .. (std.mem.indexOfScalar(u8, _raw_path, '?') orelse _raw_path.len)];
+            // Parse Content-Length.
+            var _cl: usize = 0;
+            var _hdr_it = std.mem.splitSequence(u8, _head, "\r\n");
+            _ = _hdr_it.next();
+            while (_hdr_it.next()) |_hl_| {
+                if (_hl_.len == 0) break;
+                const _cp = std.mem.indexOfScalar(u8, _hl_, ':') orelse continue;
+                const _hn = std.mem.trim(u8, _hl_[0.._cp], " ");
+                const _hv = std.mem.trim(u8, _hl_[_cp+1..], " ");
+                if (std.ascii.eqlIgnoreCase(_hn, "content-length"))
+                    _cl = std.fmt.parseInt(usize, _hv, 10) catch 0;
+            }
+            var _body: []const u8 = "";
+            if (_cl > 0) {
+                const _bb = _alloc.alloc(u8, _cl) catch @panic("OOM");
+                const _pre = @min(_peeked, _cl);
+                if (_pre > 0) @memcpy(_bb[0.._pre], _hd[_hdrs_end.._hdrs_end+_pre]);
+                var _bi: usize = _pre;
+                while (_bi < _cl) {
+                    const _rn = std.posix.recv(ctx.conn.stream.handle, _bb[_bi..], 0) catch break;
+                    if (_rn == 0) break;
+                    _bi += _rn;
+                }
+                _body = _bb[0.._bi];
+                _ = &_peeked;
+            }
+            const _req = HttpRequest{ .method = _method, .path = _path, .content = _body };
+            const _resp = ctx.handler_fn(_req);
+            const _st: []const u8 = switch (_resp.status) {
+                200 => "OK", 201 => "Created", 204 => "No Content",
+                301 => "Moved Permanently", 302 => "Found",
+                400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
+                404 => "Not Found", 405 => "Method Not Allowed",
+                500 => "Internal Server Error",
+                else => "Unknown",
+            };
+            const _out = std.fmt.allocPrint(_alloc,
+                "HTTP/1.1 {d} {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
+                .{ _resp.status, _st, _resp.text.len, _resp.text }) catch @panic("OOM");
+            ctx.conn.stream.writeAll(_out) catch {};
+        }
+    };
     const _alloc = std.heap.page_allocator;
     var _srv = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port).listen(.{ .reuse_address = true }) catch |e| @panic(@errorName(e));
     defer _srv.deinit();
     while (true) {
-        var _conn = _srv.accept() catch continue;
-        defer _conn.stream.close();
-        // Read request head using recv (works on Windows sockets).
-        // We read into a large buffer and scan for \r\n\r\n.
-        var _hd: [16384]u8 = undefined;
-        var _hl: usize = 0;
-        while (_hl < _hd.len - 4096) {
-            const _n = std.posix.recv(_conn.stream.handle, _hd[_hl..@min(_hl+4096, _hd.len)], 0) catch break;
-            if (_n == 0) break;
-            _hl += _n;
-            if (std.mem.indexOf(u8, _hd[0.._hl], "\r\n\r\n") != null) break;
-        }
-        const _hdrs_end = (std.mem.indexOf(u8, _hd[0.._hl], "\r\n\r\n") orelse (_hl -| 4)) + 4;
-        const _head = _hd[0.._hdrs_end];
-        // Bytes already read after the headers (peeked body).
-        var _peeked: usize = if (_hl > _hdrs_end) _hl - _hdrs_end else 0;
-        // Parse request line: METHOD PATH VERSION
-        const _rl_end = std.mem.indexOf(u8, _head, "\r\n") orelse _hl;
-        var _rp = std.mem.splitScalar(u8, _head[0.._rl_end], ' ');
-        const _method = _rp.next() orelse "GET";
-        const _raw_path = _rp.next() orelse "/";
-        const _path = _raw_path[0 .. (std.mem.indexOfScalar(u8, _raw_path, '?') orelse _raw_path.len)];
-        // Parse Content-Length for request body.
-        var _cl: usize = 0;
-        var _hdr_it = std.mem.splitSequence(u8, _head, "\r\n");
-        _ = _hdr_it.next();
-        while (_hdr_it.next()) |_hl_| {
-            if (_hl_.len == 0) break;
-            const _cp = std.mem.indexOfScalar(u8, _hl_, ':') orelse continue;
-            const _hn = std.mem.trim(u8, _hl_[0.._cp], " ");
-            const _hv = std.mem.trim(u8, _hl_[_cp+1..], " ");
-            if (std.ascii.eqlIgnoreCase(_hn, "content-length"))
-                _cl = std.fmt.parseInt(usize, _hv, 10) catch 0;
-        }
-        var _body: []const u8 = "";
-        if (_cl > 0) {
-            const _bb = _alloc.alloc(u8, _cl) catch @panic("OOM");
-            // Copy any body bytes already read with the headers.
-            const _pre = @min(_peeked, _cl);
-            if (_pre > 0) @memcpy(_bb[0.._pre], _hd[_hdrs_end.._hdrs_end+_pre]);
-            var _bi: usize = _pre;
-            while (_bi < _cl) {
-                const _rn = std.posix.recv(_conn.stream.handle, _bb[_bi..], 0) catch break;
-                if (_rn == 0) break;
-                _bi += _rn;
-            }
-            _body = _bb[0.._bi];
-            _ = &_peeked; // suppress unused warning
-        }
-        // Invoke handler and write response.
-        const _req = HttpRequest{ .method = _method, .path = _path, .content = _body };
-        const _resp = if (comptime @typeInfo(@TypeOf(handler)) == .@"fn") handler(_req) else handler.call(_req);
-        const _st: []const u8 = switch (_resp.status) {
-            200 => "OK", 201 => "Created", 204 => "No Content",
-            301 => "Moved Permanently", 302 => "Found",
-            400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
-            404 => "Not Found", 405 => "Method Not Allowed",
-            500 => "Internal Server Error",
-            else => "Unknown",
+        const _conn = _srv.accept() catch continue;
+        const _ctx = _alloc.create(_Ctx) catch { _conn.stream.close(); continue; };
+        _ctx.* = .{ .conn = _conn, .handler_fn = _fn };
+        _ = std.Thread.spawn(.{}, _Ctx.run, .{_ctx}) catch {
+            _alloc.destroy(_ctx);
+            _conn.stream.close();
         };
-        const _out = std.fmt.allocPrint(_alloc,
-            "HTTP/1.1 {d} {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
-            .{ _resp.status, _st, _resp.text.len, _resp.text }) catch @panic("OOM");
-        _conn.stream.writeAll(_out) catch {};
     }
 }
 
 const TcpConn = struct { stream: std.net.Stream };
-fn _tcp_connect(host: []const u8, port: u16) TcpConn {
-    const s = std.net.tcpConnectToHost(_allocator, host, port) catch |e| @panic(@errorName(e));
+fn _tcp_connect(host: []const u8, port: u16) ?TcpConn {
+    const s = std.net.tcpConnectToHost(_allocator, host, port) catch return null;
     return .{ .stream = s };
 }
 fn _tcp_write(conn: TcpConn, data: []const u8) void {
@@ -191,6 +449,27 @@ fn _tcp_read(conn: TcpConn) []const u8 {
     _ = _rd.interface().streamRemaining(&_hb.writer) catch |e| @panic(@errorName(e));
     return _hb.written();
 }
+fn _tcp_read_line(conn: TcpConn) []const u8 {
+    var _buf: std.ArrayList(u8) = .{};
+    while (true) {
+        var _b: [1]u8 = undefined;
+        const _n = std.posix.recv(conn.stream.handle, &_b, 0) catch break;
+        if (_n == 0) break;
+        if (_b[0] == '\n') break;
+        if (_b[0] != '\r') _buf.append(std.heap.page_allocator, _b[0]) catch break;
+    }
+    return _buf.items;
+}
+fn _tcp_read_bytes(conn: TcpConn, n: usize) []const u8 {
+    const _buf = std.heap.page_allocator.alloc(u8, n) catch @panic("OOM");
+    var _total: usize = 0;
+    while (_total < n) {
+        const _got = std.posix.recv(conn.stream.handle, _buf[_total..], 0) catch break;
+        if (_got == 0) break;
+        _total += _got;
+    }
+    return _buf[0.._total];
+}
 fn _tcp_close(conn: TcpConn) void { conn.stream.close(); }
 
 const UdpSocket = struct { handle: std.posix.socket_t };
@@ -199,7 +478,13 @@ fn _udp_socket() UdpSocket {
     return .{ .handle = s };
 }
 fn _udp_send(sock: UdpSocket, host: []const u8, port: u16, data: []const u8) void {
-    const dest = std.net.Address.parseIp4(host, port) catch |e| @panic(@errorName(e));
+    const dest = blk: {
+        if (std.net.Address.parseIp(host, port)) |a| break :blk a else |_| {}
+        const _list = std.net.getAddressList(std.heap.page_allocator, host, port) catch |e| @panic(@errorName(e));
+        defer _list.deinit();
+        if (_list.addrs.len == 0) @panic("UDP send: hostname resolution failed");
+        break :blk _list.addrs[0];
+    };
     _ = std.posix.sendto(sock.handle, data, 0, &dest.any, dest.getOsSockLen()) catch |e| @panic(@errorName(e));
 }
 fn _udp_recv(sock: UdpSocket, max_bytes: usize) []const u8 {
@@ -225,10 +510,14 @@ fn _net_resolve(host: []const u8) []const []const u8 {
     return _result.toOwnedSlice(std.heap.page_allocator) catch &.{};
 }
 // ─── Thompson NFA regex engine ───────────────────────────────────────────────
-const _RNodeKind = enum(u8) { match, lit, dot, cls, split, save };
+const _RNodeKind = enum(u8) { match, lit, dot, cls, split, save, bol, eol_a, wb };
 const _RNode = struct {
     kind: _RNodeKind, c: u8 = 0, bits: [32]u8 = [_]u8{0} ** 32,
     neg: bool = false, slot: u8 = 0, out1: u32 = 0xFFFF_FFFF, out2: u32 = 0xFFFF_FFFF,
+};
+const _RFlags = struct {
+    ignore_case: bool = false, multiline: bool = false, dot_all: bool = false, unlimited: bool = false,
+    lazy_match: bool = false, // set when any *? +? ?? is parsed
 };
 const _RFrag = struct {
     start: u32, outs: [64]u32 = [_]u32{0xFFFF_FFFF} ** 64, n: u8 = 0,
@@ -243,7 +532,7 @@ const _RFrag = struct {
 };
 const _RC = struct {
     pat: []const u8, pos: usize = 0,
-    nodes: std.ArrayListUnmanaged(_RNode) = .{}, alloc: std.mem.Allocator, n_caps: u8 = 0,
+    nodes: std.ArrayListUnmanaged(_RNode) = .{}, alloc: std.mem.Allocator, n_caps: u8 = 0, flags: _RFlags = .{},
     fn addNode(c: *_RC, n: _RNode) error{OutOfMemory}!u32 {
         const idx: u32 = @intCast(c.nodes.items.len);
         try c.nodes.append(c.alloc, n); return idx;
@@ -274,8 +563,18 @@ const _RC = struct {
     fn parseAtom(c: *_RC) error{OutOfMemory}!?_RFrag {
         const ch = c.peek() orelse return null;
         switch (ch) {
+            '^' => { _ = c.eat(); const idx = try c.addNode(.{ .kind = .bol }); return _RFrag.one(idx, idx); },
+            '$' => { _ = c.eat(); const idx = try c.addNode(.{ .kind = .eol_a }); return _RFrag.one(idx, idx); },
             '(' => {
-                _ = c.eat(); const slot: u8 = c.n_caps * 2; c.n_caps += 1;
+                _ = c.eat();
+                // Non-capturing group (?:...)
+                if (c.peek() == '?' and c.pos + 1 < c.pat.len and c.pat[c.pos + 1] == ':') {
+                    c.pos += 2;
+                    if (try c.parseAlt()) |inner| { _ = c.expect(')'); return inner; }
+                    _ = c.expect(')'); return null;
+                }
+                // Capturing group
+                const slot: u8 = c.n_caps * 2; c.n_caps += 1;
                 const open = try c.addNode(.{ .kind = .save, .slot = slot });
                 if (try c.parseAlt()) |inner| {
                     c.patchFrag(inner, try c.addNode(.{ .kind = .save, .slot = slot + 1 }));
@@ -296,8 +595,13 @@ const _RC = struct {
             '.' => { _ = c.eat(); const _di = try c.addNode(.{ .kind = .dot }); return _RFrag.one(_di, _di); },
             '\\' => {
                 _ = c.eat(); const esc = c.eat() orelse return null;
+                // \b / \B are zero-width word-boundary assertions, not char classes
+                if (esc == 'b' or esc == 'B') {
+                    const idx = try c.addNode(.{ .kind = .wb, .neg = (esc == 'B') });
+                    return _RFrag.one(idx, idx);
+                }
                 var bits = [_]u8{0} ** 32;
-                const neg = std.ascii.isUpper(esc) and esc != 'B';
+                const neg = std.ascii.isUpper(esc);
                 if (neg) { _rSetEsc(&bits, std.ascii.toLower(esc)); const pb = bits; bits = [_]u8{0} ** 32; for (&bits, pb) |*b, p| b.* = ~p; }
                 else _rSetEsc(&bits, esc);
                 const _ci = try c.addNode(.{ .kind = .cls, .bits = bits, .neg = false });
@@ -307,25 +611,78 @@ const _RC = struct {
         }
     }
     fn parsePieceFixed(c: *_RC) error{OutOfMemory}!?_RFrag {
+        const atom_pos = c.pos;
         const atom = try c.parseAtom() orelse return null;
         const q = c.peek() orelse return atom;
         switch (q) {
             '*' => {
-                _ = c.eat();
-                const sp = try c.addNode(.{ .kind = .split, .out1 = atom.start, .out2 = 0xFFFF_FFFF });
+                _ = c.eat(); const lazy = c.expect('?');
+                if (lazy) c.flags.lazy_match = true;
+                const sp = try c.addNode(.{ .kind = .split,
+                    .out1 = if (lazy) 0xFFFF_FFFF else atom.start,
+                    .out2 = if (lazy) atom.start  else 0xFFFF_FFFF });
                 c.patch(atom, sp);
-                var f = _RFrag{ .start = sp }; f.outs[0] = sp | 0x8000_0000; f.n = 1; return f;
+                var f = _RFrag{ .start = sp };
+                f.outs[0] = if (lazy) sp else sp | 0x8000_0000; f.n = 1; return f;
             },
             '+' => {
-                _ = c.eat();
-                const sp = try c.addNode(.{ .kind = .split, .out1 = atom.start, .out2 = 0xFFFF_FFFF });
+                _ = c.eat(); const lazy = c.expect('?');
+                if (lazy) c.flags.lazy_match = true;
+                const sp = try c.addNode(.{ .kind = .split,
+                    .out1 = if (lazy) 0xFFFF_FFFF else atom.start,
+                    .out2 = if (lazy) atom.start  else 0xFFFF_FFFF });
                 c.patch(atom, sp);
-                var f = _RFrag{ .start = atom.start }; f.outs[0] = sp | 0x8000_0000; f.n = 1; return f;
+                var f = _RFrag{ .start = atom.start };
+                f.outs[0] = if (lazy) sp else sp | 0x8000_0000; f.n = 1; return f;
             },
             '?' => {
+                _ = c.eat(); const lazy = c.expect('?');
+                if (lazy) c.flags.lazy_match = true;
+                const sp = try c.addNode(.{ .kind = .split,
+                    .out1 = if (lazy) 0xFFFF_FFFF else atom.start,
+                    .out2 = if (lazy) atom.start  else 0xFFFF_FFFF });
+                return if (lazy) _RFrag.two(sp, sp, atom.outs[0])
+                       else      _RFrag.two(sp, atom.outs[0], sp | 0x8000_0000);
+            },
+            '{' => {
                 _ = c.eat();
-                const sp = try c.addNode(.{ .kind = .split, .out1 = atom.start, .out2 = 0xFFFF_FFFF });
-                return _RFrag.two(sp, atom.outs[0], sp | 0x8000_0000);
+                var n: u32 = 0;
+                while (c.peek()) |d| { if (d < '0' or d > '9') break; n = n *% 10 +% (d - '0'); _ = c.eat(); }
+                var m: u32 = n; var unbounded = false;
+                if (c.expect(',')) {
+                    if (c.peek() == '}') { unbounded = true; }
+                    else { m = 0; while (c.peek()) |d| { if (d < '0' or d > '9') break; m = m *% 10 +% (d - '0'); _ = c.eat(); } }
+                }
+                _ = c.expect('}');
+                if (!c.flags.unlimited) { if (n > 100) n = 100; if (m > 100) m = 100; }
+                if (n == 0 and m == 0 and !unbounded) return atom; // degenerate {0}
+                const after_q = c.pos;
+                // build result: start with the already-parsed atom (counts as copy 1)
+                var result: _RFrag = atom;
+                // mandatory copies 2..n
+                var i: u32 = 1;
+                while (i < n) : (i += 1) {
+                    c.pos = atom_pos; const next = try c.parseAtom() orelse break; c.pos = after_q;
+                    c.patchFrag(result, next.start);
+                    result = .{ .start = result.start, .outs = next.outs, .n = next.n };
+                }
+                // optional copies n+1..m
+                var j: u32 = 0;
+                while (j < m -| n) : (j += 1) {
+                    c.pos = atom_pos; const next = try c.parseAtom() orelse break; c.pos = after_q;
+                    const sp = try c.addNode(.{ .kind = .split, .out1 = next.start, .out2 = 0xFFFF_FFFF });
+                    c.patchFrag(result, sp);
+                    var f2 = _RFrag{ .start = result.start }; f2.outs[0] = next.outs[0]; f2.outs[1] = sp | 0x8000_0000; f2.n = 2; result = f2;
+                }
+                // unbounded: add * at end
+                if (unbounded) {
+                    c.pos = atom_pos; const last_a = try c.parseAtom() orelse { c.pos = after_q; return result; }; c.pos = after_q;
+                    const sp = try c.addNode(.{ .kind = .split, .out1 = last_a.start, .out2 = 0xFFFF_FFFF });
+                    c.patch(last_a, sp);
+                    c.patchFrag(result, sp);
+                    var f3 = _RFrag{ .start = result.start }; f3.outs[0] = sp | 0x8000_0000; f3.n = 1; return f3;
+                }
+                return result;
             },
             else => return atom,
         }
@@ -350,34 +707,53 @@ const _RC = struct {
     }
 };
 const Regex = struct {
-    nodes: []_RNode, start: u32, alloc: std.mem.Allocator,
-    fn closure(re: *const Regex, cur: *std.ArrayListUnmanaged(u32), vis: []bool, alloc: std.mem.Allocator, idx: u32) error{OutOfMemory}!void {
-        if (idx == 0xFFFF_FFFF or vis[idx]) return;
+    nodes: []_RNode, start: u32, alloc: std.mem.Allocator, flags: _RFlags = .{},
+    fn closure(re: *const Regex, cur: *std.ArrayListUnmanaged(u32), vis: []bool, alloc: std.mem.Allocator, idx: u32, pos: usize, input: []const u8) error{OutOfMemory}!void {
+        if (idx == 0xFFFF_FFFF or idx >= re.nodes.len or vis[idx]) return;
         vis[idx] = true;
-        switch (re.nodes[idx].kind) {
-            .split => { try re.closure(cur, vis, alloc, re.nodes[idx].out1); try re.closure(cur, vis, alloc, re.nodes[idx].out2); },
-            .save  => try re.closure(cur, vis, alloc, re.nodes[idx].out1),
-            else   => try cur.append(alloc, idx),
+        const nd = &re.nodes[idx];
+        switch (nd.kind) {
+            .split => { try re.closure(cur, vis, alloc, nd.out1, pos, input); try re.closure(cur, vis, alloc, nd.out2, pos, input); },
+            .save  => try re.closure(cur, vis, alloc, nd.out1, pos, input),
+            .bol   => {
+                const ok = pos == 0 or (re.flags.multiline and pos > 0 and input[pos - 1] == '\n');
+                if (ok) try re.closure(cur, vis, alloc, nd.out1, pos, input);
+            },
+            .eol_a => {
+                const ok = pos == input.len or (re.flags.multiline and pos < input.len and input[pos] == '\n');
+                if (ok) try re.closure(cur, vis, alloc, nd.out1, pos, input);
+            },
+            .wb => {
+                const pw = pos > 0 and _rIsWord(input[pos - 1]);
+                const cw = pos < input.len and _rIsWord(input[pos]);
+                if ((pw != cw) != nd.neg) try re.closure(cur, vis, alloc, nd.out1, pos, input);
+            },
+            else => try cur.append(alloc, idx),
         }
     }
-    fn matchAt(re: *const Regex, input: []const u8, from: usize) error{OutOfMemory}!?usize {
+    fn matchAt(re: *const Regex, input: []const u8, from: usize, shortest: bool) error{OutOfMemory}!?usize {
         const alloc = re.alloc;
         var cur: std.ArrayListUnmanaged(u32) = .{}; var nxt: std.ArrayListUnmanaged(u32) = .{};
         defer cur.deinit(alloc); defer nxt.deinit(alloc);
         const vis = try alloc.alloc(bool, re.nodes.len); defer alloc.free(vis);
-        @memset(vis, false); try re.closure(&cur, vis, alloc, re.start);
+        @memset(vis, false); try re.closure(&cur, vis, alloc, re.start, from, input);
         var last: ?usize = null;
-        for (cur.items) |si| if (re.nodes[si].kind == .match) { last = from; break; };
+        for (cur.items) |si| if (re.nodes[si].kind == .match) { last = from; if (shortest) return last; break; };
         var pos = from;
         while (pos < input.len and cur.items.len > 0) : (pos += 1) {
             const ch = input[pos]; nxt.clearRetainingCapacity(); @memset(vis, false);
             for (cur.items) |si| {
                 const nd = &re.nodes[si];
-                const ok = switch (nd.kind) { .lit => nd.c == ch, .dot => ch != '\n', .cls => _rClsMatch(nd, ch), else => false };
-                if (ok) try re.closure(&nxt, vis, alloc, nd.out1);
+                const ok = switch (nd.kind) {
+                    .lit => if (re.flags.ignore_case) std.ascii.toLower(nd.c) == std.ascii.toLower(ch) else nd.c == ch,
+                    .dot => if (re.flags.dot_all) true else ch != '\n',
+                    .cls => if (re.flags.ignore_case) _rClsMatch(nd, ch) or _rClsMatch(nd, std.ascii.toLower(ch)) or _rClsMatch(nd, std.ascii.toUpper(ch)) else _rClsMatch(nd, ch),
+                    else => false,
+                };
+                if (ok) try re.closure(&nxt, vis, alloc, nd.out1, pos + 1, input);
             }
             std.mem.swap(std.ArrayListUnmanaged(u32), &cur, &nxt);
-            for (cur.items) |si| if (re.nodes[si].kind == .match) { last = pos + 1; break; };
+            for (cur.items) |si| if (re.nodes[si].kind == .match) { last = pos + 1; if (shortest) return last; break; };
         }
         return last;
     }
@@ -385,6 +761,7 @@ const Regex = struct {
 fn _rSetBit(bits: *[32]u8, c: u8) void { bits[c >> 3] |= @as(u8, 1) << @intCast(c & 7); }
 fn _rGetBit(bits: *const [32]u8, c: u8) bool { return (bits[c >> 3] >> @intCast(c & 7)) & 1 != 0; }
 fn _rClsMatch(nd: *const _RNode, c: u8) bool { const h = _rGetBit(&nd.bits, c); return if (nd.neg) !h else h; }
+fn _rIsWord(c: u8) bool { return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_'; }
 fn _rSetEsc(bits: *[32]u8, esc: u8) void {
     switch (std.ascii.toLower(esc)) {
         'd' => { var i: u16 = '0'; while (i <= '9') : (i += 1) _rSetBit(bits, @intCast(i)); },
@@ -394,25 +771,31 @@ fn _rSetEsc(bits: *[32]u8, esc: u8) void {
         else => _rSetBit(bits, esc),
     }
 }
-fn _regex_compile(pattern: []const u8) Regex {
+fn _regex_compile(pattern: []const u8, flags_str: []const u8) Regex {
     const alloc = std.heap.page_allocator;
-    var c = _RC{ .pat = pattern, .alloc = alloc };
+    var flags = _RFlags{};
+    for (flags_str) |f| switch (f) {
+        'i' => flags.ignore_case = true, 'm' => flags.multiline = true,
+        's' => flags.dot_all = true,     'U' => flags.unlimited = true,
+        else => {},
+    };
+    var c = _RC{ .pat = pattern, .alloc = alloc, .flags = flags };
     const frag_opt = c.parseAlt() catch @panic("regex OOM");
     const match_idx = c.addNode(.{ .kind = .match }) catch @panic("regex OOM");
     if (frag_opt) |frag| {
         c.patchFrag(frag, match_idx);
-        return .{ .nodes = c.nodes.toOwnedSlice(alloc) catch @panic("regex OOM"), .start = frag.start, .alloc = alloc };
+        return .{ .nodes = c.nodes.toOwnedSlice(alloc) catch @panic("regex OOM"), .start = frag.start, .alloc = alloc, .flags = c.flags };
     }
-    return .{ .nodes = c.nodes.toOwnedSlice(alloc) catch @panic("regex OOM"), .start = match_idx, .alloc = alloc };
+    return .{ .nodes = c.nodes.toOwnedSlice(alloc) catch @panic("regex OOM"), .start = match_idx, .alloc = alloc, .flags = c.flags };
 }
 fn _regex_match(re: Regex, input: []const u8) bool {
-    const end = re.matchAt(input, 0) catch return false;
+    const end = re.matchAt(input, 0, false) catch return false;
     return end != null and end.? == input.len;
 }
 fn _regex_find(re: Regex, input: []const u8) []const u8 {
     var i: usize = 0;
     while (i <= input.len) : (i += 1) {
-        if (re.matchAt(input, i) catch null) |e| return input[i..e];
+        if (re.matchAt(input, i, re.flags.lazy_match) catch null) |e| return input[i..e];
     }
     return "";
 }
@@ -420,7 +803,7 @@ fn _regex_find_all(re: Regex, input: []const u8) []const []const u8 {
     var out: std.ArrayListUnmanaged([]const u8) = .{};
     var i: usize = 0;
     while (i < input.len) {
-        if (re.matchAt(input, i) catch null) |e| {
+        if (re.matchAt(input, i, re.flags.lazy_match) catch null) |e| {
             out.append(std.heap.page_allocator, input[i..e]) catch @panic("OOM");
             i = if (e > i) e else i + 1;
         } else i += 1;
@@ -431,7 +814,7 @@ fn _regex_replace(re: Regex, input: []const u8, sub: []const u8) []const u8 {
     var out: std.ArrayListUnmanaged(u8) = .{};
     var i: usize = 0;
     while (i < input.len) {
-        if (re.matchAt(input, i) catch null) |e| {
+        if (re.matchAt(input, i, re.flags.lazy_match) catch null) |e| {
             out.appendSlice(std.heap.page_allocator, sub) catch @panic("OOM");
             i = if (e > i) e else i + 1;
         } else {
@@ -449,7 +832,7 @@ const _RegThread = struct { state: u32, saves: [_MAX_SAVE_SLOTS]usize };
 fn _re_eclosure_s(
     re: *const Regex, cur: *std.ArrayListUnmanaged(_RegThread),
     vis: []bool, alloc: std.mem.Allocator,
-    state: u32, saves: [_MAX_SAVE_SLOTS]usize, pos: usize,
+    state: u32, saves: [_MAX_SAVE_SLOTS]usize, pos: usize, input: []const u8,
 ) std.mem.Allocator.Error!void {
     if (state == 0xFFFF_FFFF or state >= re.nodes.len) return;
     if (vis[state]) return;
@@ -457,13 +840,26 @@ fn _re_eclosure_s(
     const nd = &re.nodes[state];
     switch (nd.kind) {
         .split => {
-            try _re_eclosure_s(re, cur, vis, alloc, nd.out1, saves, pos);
-            try _re_eclosure_s(re, cur, vis, alloc, nd.out2, saves, pos);
+            try _re_eclosure_s(re, cur, vis, alloc, nd.out1, saves, pos, input);
+            try _re_eclosure_s(re, cur, vis, alloc, nd.out2, saves, pos, input);
         },
         .save => {
             var ns = saves;
             if (nd.slot < _MAX_SAVE_SLOTS) ns[nd.slot] = pos;
-            try _re_eclosure_s(re, cur, vis, alloc, nd.out1, ns, pos);
+            try _re_eclosure_s(re, cur, vis, alloc, nd.out1, ns, pos, input);
+        },
+        .bol => {
+            const ok = pos == 0 or (re.flags.multiline and pos > 0 and input[pos - 1] == '\n');
+            if (ok) try _re_eclosure_s(re, cur, vis, alloc, nd.out1, saves, pos, input);
+        },
+        .eol_a => {
+            const ok = pos == input.len or (re.flags.multiline and pos < input.len and input[pos] == '\n');
+            if (ok) try _re_eclosure_s(re, cur, vis, alloc, nd.out1, saves, pos, input);
+        },
+        .wb => {
+            const pw = pos > 0 and _rIsWord(input[pos - 1]);
+            const cw = pos < input.len and _rIsWord(input[pos]);
+            if ((pw != cw) != nd.neg) try _re_eclosure_s(re, cur, vis, alloc, nd.out1, saves, pos, input);
         },
         else => try cur.append(alloc, .{ .state = state, .saves = saves }),
     }
@@ -478,19 +874,24 @@ fn _re_match_with_saves(re: *const Regex, input: []const u8, from: usize) ?[_MAX
     const vis = alloc.alloc(bool, re.nodes.len) catch return null;
     defer alloc.free(vis);
     @memset(vis, false);
-    _re_eclosure_s(re, &cur, vis, alloc, re.start, empty, from) catch return null;
+    _re_eclosure_s(re, &cur, vis, alloc, re.start, empty, from, input) catch return null;
     var last: ?[_MAX_SAVE_SLOTS]usize = null;
-    for (cur.items) |t| { if (re.nodes[t.state].kind == .match) { last = t.saves; break; } }
+    for (cur.items) |t| { if (re.nodes[t.state].kind == .match) { last = t.saves; if (re.flags.lazy_match) return last; break; } }
     var pos = from;
     while (pos < input.len and cur.items.len > 0) : (pos += 1) {
         const ch = input[pos]; nxt.clearRetainingCapacity(); @memset(vis, false);
         for (cur.items) |t| {
             const nd = &re.nodes[t.state];
-            const ok = switch (nd.kind) { .lit => nd.c == ch, .dot => ch != '\n', .cls => _rClsMatch(nd, ch), else => false };
-            if (ok) _re_eclosure_s(re, &nxt, vis, alloc, nd.out1, t.saves, pos + 1) catch {};
+            const ok = switch (nd.kind) {
+                .lit => if (re.flags.ignore_case) std.ascii.toLower(nd.c) == std.ascii.toLower(ch) else nd.c == ch,
+                .dot => if (re.flags.dot_all) true else ch != '\n',
+                .cls => if (re.flags.ignore_case) _rClsMatch(nd, ch) or _rClsMatch(nd, std.ascii.toLower(ch)) or _rClsMatch(nd, std.ascii.toUpper(ch)) else _rClsMatch(nd, ch),
+                else => false,
+            };
+            if (ok) _re_eclosure_s(re, &nxt, vis, alloc, nd.out1, t.saves, pos + 1, input) catch {};
         }
         std.mem.swap(std.ArrayListUnmanaged(_RegThread), &cur, &nxt);
-        for (cur.items) |t| { if (re.nodes[t.state].kind == .match) { last = t.saves; break; } }
+        for (cur.items) |t| { if (re.nodes[t.state].kind == .match) { last = t.saves; if (re.flags.lazy_match) return last; break; } }
     }
     return last;
 }
@@ -650,9 +1051,12 @@ const _gui_stub_backend = _GuiBackend{
 const _gui_active_backend: _GuiBackend = _gui_stub_backend;
 pub const Math = struct {
     pub fn divide(a: i64, b: i64) _Result(i64, []const u8) {
+// zbr:test/result_test.zbr:4
         if ((b == 0)) {
+// zbr:test/result_test.zbr:5
             return .{ .err = "division by zero" };
         }
+// zbr:test/result_test.zbr:6
         return .{ .ok = @divTrunc(a, b) };
     }
 
@@ -660,70 +1064,105 @@ pub const Math = struct {
 
 pub const Main = struct {
     pub fn main() void {
+// zbr:test/result_test.zbr:11
         var r1: _Result(i64, []const u8) = Math.divide(10, 2);
+// zbr:test/result_test.zbr:12
         var r2: _Result(i64, []const u8) = Math.divide(10, 0);
+// zbr:test/result_test.zbr:15
         std.debug.print("{}\n", .{r1.isOk()});
+// zbr:test/result_test.zbr:16
         std.debug.print("{}\n", .{r2.isErr()});
+// zbr:test/result_test.zbr:19
         std.debug.print("{}\n", .{r1.unwrapOr(0)});
+// zbr:test/result_test.zbr:20
         std.debug.print("{}\n", .{r2.unwrapOr((-1))});
+// zbr:test/result_test.zbr:23
         const ok = r1.okValue();
+// zbr:test/result_test.zbr:24
         if ((ok != null)) {
+// zbr:test/result_test.zbr:25
             std.debug.print("{}\n", .{ok.?});
         }
+// zbr:test/result_test.zbr:27
         const err = r2.errValue();
+// zbr:test/result_test.zbr:28
         if ((err != null)) {
+// zbr:test/result_test.zbr:29
             std.debug.print("{s}\n", .{err.?});
         }
+// zbr:test/result_test.zbr:32
         switch (r1) {
             .ok => |v| {
+// zbr:test/result_test.zbr:34
                 std.debug.print("{}\n", .{v});
             },
             .err => |e| {
+// zbr:test/result_test.zbr:36
                 std.debug.print("{s}\n", .{e});
             },
         }
+// zbr:test/result_test.zbr:38
         switch (r2) {
             .ok => |v| {
+// zbr:test/result_test.zbr:40
                 std.debug.print("{}\n", .{v});
             },
             .err => |e| {
+// zbr:test/result_test.zbr:42
                 std.debug.print("{s}\n", .{e});
             },
         }
     }
 
     pub fn testMapOnResult() void {
+// zbr:test/result_test.zbr:45
         var r: _Result(i64, []const u8) = Math.divide(20, 4);
+// zbr:test/result_test.zbr:46
         std.debug.print("{}\n", .{r.unwrapOr((-1))});
+// zbr:test/result_test.zbr:47
         std.debug.print("{s}\n", .{"Result mapping tested"});
     }
 
     pub fn testFlatMap() void {
+// zbr:test/result_test.zbr:51
         var r1: _Result(i64, []const u8) = Math.divide(20, 4);
+// zbr:test/result_test.zbr:52
         var r2: _Result(i64, []const u8) = Math.divide(10, 0);
+// zbr:test/result_test.zbr:53
         std.debug.print("{}\n", .{r1.isOk()});
+// zbr:test/result_test.zbr:54
         std.debug.print("{}\n", .{r2.isErr()});
     }
 
     pub fn testResultChaining() void {
+// zbr:test/result_test.zbr:58
         var first: _Result(i64, []const u8) = Math.divide(100, 2);
+// zbr:test/result_test.zbr:59
         if (first.isOk()) {
+// zbr:test/result_test.zbr:60
             var second: _Result(i64, []const u8) = Math.divide(first.unwrapOr(0), 5);
+// zbr:test/result_test.zbr:61
             std.debug.print("{}\n", .{second.unwrapOr((-1))});
         }
     }
 
     pub fn testErrorPropagation() void {
+// zbr:test/result_test.zbr:64
         var r1: _Result(i64, []const u8) = Math.divide(10, 0);
+// zbr:test/result_test.zbr:65
         const r2: _Result(i64, []const u8) = Math.divide(20, 2);
+// zbr:test/result_test.zbr:68
         if (r1.isErr()) {
+// zbr:test/result_test.zbr:69
             {
                 const _pt0 = (std.mem.concat(_allocator, u8, &.{ "Error in r1: ", r1.errValue() }) catch unreachable);
                 defer _allocator.free(_pt0);
                 std.debug.print("{s}\n", .{_pt0});
             }
         }
+// zbr:test/result_test.zbr:70
         if (r2.isOk()) {
+// zbr:test/result_test.zbr:71
             {
                 const _pt0 = (std.mem.concat(_allocator, u8, &.{ "Success in r2: ", (std.fmt.allocPrint(_allocator, "{}", .{r2.okValue()}) catch unreachable) }) catch unreachable);
                 defer _allocator.free(_pt0);
@@ -733,58 +1172,91 @@ pub const Main = struct {
     }
 
     pub fn testMultipleResults() void {
+// zbr:test/result_test.zbr:74
         var results = std.ArrayList(_Result(i64, []const u8)){};
         defer results.deinit(_allocator);
+// zbr:test/result_test.zbr:75
         results.append(_allocator, Math.divide(10, 2)) catch unreachable;
+// zbr:test/result_test.zbr:76
         results.append(_allocator, Math.divide(20, 4)) catch unreachable;
+// zbr:test/result_test.zbr:77
         results.append(_allocator, Math.divide(30, 0)) catch unreachable;
+// zbr:test/result_test.zbr:79
         var success_count: i64 = 0;
+// zbr:test/result_test.zbr:80
         var error_count: i64 = 0;
+// zbr:test/result_test.zbr:81
         for (results.items) |r| {
+// zbr:test/result_test.zbr:82
             if (r.isOk()) {
+// zbr:test/result_test.zbr:83
                 success_count = (success_count + 1);
             } else {
+// zbr:test/result_test.zbr:85
                 error_count = (error_count + 1);
             }
         }
+// zbr:test/result_test.zbr:86
         std.debug.print("{}\n", .{success_count});
+// zbr:test/result_test.zbr:87
         std.debug.print("{}\n", .{error_count});
     }
 
     pub fn testResultWithNil() void {
+// zbr:test/result_test.zbr:91
         var r: _Result(?i64, []const u8) = .{ .ok = null };
+// zbr:test/result_test.zbr:92
         if (r.isOk()) {
+// zbr:test/result_test.zbr:93
             const val = r.okValue();
+// zbr:test/result_test.zbr:94
             if ((val == null)) {
+// zbr:test/result_test.zbr:95
                 std.debug.print("{s}\n", .{"null value in ok"});
             }
         }
     }
 
     pub fn testCustomError() void {
+// zbr:test/result_test.zbr:100
         const error_msg = "Invalid operation";
+// zbr:test/result_test.zbr:101
         var r: _Result(i64, []const u8) = .{ .err = error_msg };
+// zbr:test/result_test.zbr:102
         std.debug.print("{any}\n", .{r.errValue()});
     }
 
     pub fn testDefaultValue() void {
+// zbr:test/result_test.zbr:105
         var r1: _Result(i64, []const u8) = Math.divide(10, 0);
+// zbr:test/result_test.zbr:106
         const val1 = r1.unwrapOr((-1));
+// zbr:test/result_test.zbr:107
         std.debug.print("{}\n", .{val1});
+// zbr:test/result_test.zbr:109
         var r2: _Result(i64, []const u8) = Math.divide(10, 2);
+// zbr:test/result_test.zbr:110
         const val2 = r2.unwrapOr((-1));
+// zbr:test/result_test.zbr:111
         std.debug.print("{}\n", .{val2});
     }
 
     pub fn testErrWithContext() void {
+// zbr:test/result_test.zbr:114
         var r1: _Result(i64, []const u8) = Math.divide(42, 0);
+// zbr:test/result_test.zbr:115
         var r2: _Result(i64, []const u8) = Math.divide(100, 10);
+// zbr:test/result_test.zbr:118
         if (r1.isErr()) {
+// zbr:test/result_test.zbr:119
             const context = (std.mem.concat(_allocator, u8, &.{ "Operation failed: ", r1.errValue() }) catch unreachable);
             defer _allocator.free(context);
+// zbr:test/result_test.zbr:120
             std.debug.print("{s}\n", .{context});
         }
+// zbr:test/result_test.zbr:121
         if (r2.isOk()) {
+// zbr:test/result_test.zbr:122
             std.debug.print("{}\n", .{r2.unwrapOr((-1))});
         }
     }

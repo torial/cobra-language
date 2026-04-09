@@ -735,10 +735,12 @@ fn runZigCmd(
         }
     }
     try argv.append(alloc, "-lc");
-    return runChild(argv.items, alloc);
+    return runChildRemapped(argv.items, zig_path, alloc);
 }
 
 /// Spawn a child process with inherited stdio.  Returns the exit code.
+/// Used for non-primary compile steps (zig fetch, zig build) where we
+/// don't have a generated .zig file to remap errors against.
 fn runChild(argv: []const []const u8, alloc: std.mem.Allocator) !u8 {
     var child = std.process.Child.init(argv, alloc);
     child.stdin_behavior  = .Inherit;
@@ -751,6 +753,173 @@ fn runChild(argv: []const []const u8, alloc: std.mem.Allocator) !u8 {
         .Stopped => |_|    1,
         .Unknown => |_|    1,
     };
+}
+
+/// Spawn a child process, capture stderr, and on failure remap Zig compiler
+/// error locations to their originating Zebra source lines using the
+/// `// zbr:file:line` markers emitted by CodeGen.
+fn runChildRemapped(argv: []const []const u8, zig_path: []const u8, alloc: std.mem.Allocator) !u8 {
+    var child = std.process.Child.init(argv, alloc);
+    child.stdin_behavior  = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Pipe;
+    try child.spawn();
+
+    const stderr_text = try child.stderr.?.readToEndAlloc(alloc, 16 * 1024 * 1024);
+    defer alloc.free(stderr_text);
+
+    const term = try child.wait();
+    const code: u8 = switch (term) {
+        .Exited  => |c| c,
+        .Signal  => |_| 1,
+        .Stopped => |_| 1,
+        .Unknown => |_| 1,
+    };
+
+    if (stderr_text.len > 0) {
+        if (code != 0) {
+            // Remap Zig error locations → Zebra source locations.
+            const remapped = remapZigErrors(stderr_text, zig_path, alloc) catch stderr_text;
+            defer if (remapped.ptr != stderr_text.ptr) alloc.free(remapped);
+            std.debug.print("{s}", .{remapped});
+        } else {
+            // Warnings on success — pass through unchanged.
+            std.debug.print("{s}", .{stderr_text});
+        }
+    }
+    return code;
+}
+
+// ── Source-map error remapping ────────────────────────────────────────────────
+
+/// Remap Zig compiler error messages to Zebra source locations.
+///
+/// The generated .zig file contains `// zbr:filename:line` comments before
+/// each statement.  When the Zig compiler reports `file.zig:N:M: error: …`,
+/// we read the generated file, walk backward from line N to the nearest
+/// `// zbr:` comment, and re-emit the error with the Zebra location.
+///
+/// Lines referencing files other than `zig_path` (stdlib, etc.) pass through
+/// unchanged.  Generated-code context lines (indented source + caret) are
+/// suppressed since they show Zig internals the user never wrote.
+fn remapZigErrors(stderr_text: []const u8, zig_path: []const u8, alloc: std.mem.Allocator) ![]const u8 {
+    // Read the generated .zig file.  If unavailable, return original text.
+    const zig_src = std.fs.cwd().readFileAlloc(alloc, zig_path, 64 * 1024 * 1024) catch {
+        return alloc.dupe(u8, stderr_text);
+    };
+    defer alloc.free(zig_src);
+
+    // Split into lines for backward searching.
+    var zig_lines: std.ArrayListUnmanaged([]const u8) = .{};
+    defer zig_lines.deinit(alloc);
+    var lit = std.mem.splitScalar(u8, zig_src, '\n');
+    while (lit.next()) |l| try zig_lines.append(alloc, l);
+
+    const zig_base = std.fs.path.basename(zig_path);
+
+    var out: std.ArrayListUnmanaged(u8) = .{};
+    errdefer out.deinit(alloc);
+
+    var sit = std.mem.splitScalar(u8, stderr_text, '\n');
+    var skip_context = false;
+
+    while (sit.next()) |line| {
+        // Context lines from the Zig compiler (indented source + caret):
+        // suppress them when we successfully remapped the preceding error line.
+        if (skip_context) {
+            if (line.len == 0 or line[0] != ' ') {
+                skip_context = false;
+                // Fall through — process this line normally.
+            } else {
+                continue; // drop indented context line
+            }
+        }
+
+        if (parseZigDiagLine(line, zig_base)) |d| {
+            // Walk backward in the generated file to find the zbr: marker.
+            if (findZbrComment(zig_lines.items, d.zig_line)) |loc| {
+                try out.writer(alloc).print("{s}:{d}: {s}: {s}\n", .{
+                    loc.file, loc.line, d.severity, d.message,
+                });
+                skip_context = true;
+                continue;
+            }
+            // No marker found — emit original line unchanged.
+        }
+        try out.appendSlice(alloc, line);
+        try out.append(alloc, '\n');
+    }
+
+    return out.toOwnedSlice(alloc);
+}
+
+const ZigDiag = struct {
+    zig_line: usize,
+    severity: []const u8,
+    message:  []const u8,
+};
+
+/// Parse a Zig diagnostic line of the form:
+///   <path_containing_zig_base>:N:M: (error|note|warning): message
+/// Returns null if the line doesn't match or doesn't reference our file.
+fn parseZigDiagLine(line: []const u8, zig_base: []const u8) ?ZigDiag {
+    // Find the basename in the path portion.
+    const base_pos = std.mem.indexOf(u8, line, zig_base) orelse return null;
+    const after = line[base_pos + zig_base.len ..];
+    if (after.len == 0 or after[0] != ':') return null;
+    var rest = after[1..]; // skip first ':'
+
+    // Parse line number.
+    const c1 = std.mem.indexOfScalar(u8, rest, ':') orelse return null;
+    const zig_line = std.fmt.parseInt(usize, rest[0..c1], 10) catch return null;
+    rest = rest[c1 + 1 ..]; // skip 'N:'
+
+    // Skip column number.
+    const c2 = std.mem.indexOfScalar(u8, rest, ':') orelse return null;
+    _ = std.fmt.parseInt(usize, rest[0..c2], 10) catch return null;
+    rest = rest[c2 + 1 ..]; // skip 'M:'
+
+    if (rest.len == 0 or rest[0] != ' ') return null;
+    rest = rest[1..];
+
+    const sevs = [_][]const u8{ "error", "note", "warning" };
+    for (sevs) |sev| {
+        if (std.mem.startsWith(u8, rest, sev) and
+            rest.len > sev.len + 1 and
+            rest[sev.len] == ':' and rest[sev.len + 1] == ' ')
+        {
+            return ZigDiag{
+                .zig_line = zig_line,
+                .severity = sev,
+                .message  = rest[sev.len + 2 ..],
+            };
+        }
+    }
+    return null;
+}
+
+const ZbrLoc = struct { file: []const u8, line: u32 };
+
+/// Walk backward from `error_line` (1-based) through the generated Zig source
+/// lines to find the nearest `// zbr:filename:N` marker.
+fn findZbrComment(zig_lines: []const []const u8, error_line: usize) ?ZbrLoc {
+    if (error_line == 0 or zig_lines.len == 0) return null;
+    // Convert 1-based line to 0-based index, clamped to file length.
+    var i: usize = @min(error_line - 1, zig_lines.len - 1);
+    while (true) {
+        const trimmed = std.mem.trimLeft(u8, zig_lines[i], " \t");
+        if (std.mem.startsWith(u8, trimmed, "// zbr:")) {
+            const payload = trimmed["// zbr:".len..];
+            // payload = "filename:N"  (last colon separates file from line)
+            const colon = std.mem.lastIndexOfScalar(u8, payload, ':') orelse return null;
+            const file = payload[0..colon];
+            const line_num = std.fmt.parseInt(u32, payload[colon + 1 ..], 10) catch return null;
+            return ZbrLoc{ .file = file, .line = line_num };
+        }
+        if (i == 0) break;
+        i -= 1;
+    }
+    return null;
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────────────

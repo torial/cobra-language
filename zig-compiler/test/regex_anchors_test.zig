@@ -49,6 +49,27 @@ fn _zebra_ge(a: anytype, b: anytype) bool {
         pub fn errValue(self: @This()) ?E {
             return switch (self) { .ok => null, .err => |e| e };
         }
+        /// map(f) — apply f to the ok value; propagate err unchanged.
+        /// f may be a fn pointer or a capture-closure struct with a `call` method.
+        pub fn map(self: @This(), f: anytype) _Result(
+            @TypeOf(if (comptime @typeInfo(@TypeOf(f)) == .@"fn") f(@as(T, undefined)) else f.call(@as(T, undefined))), E
+        ) {
+            const _is_fn = comptime @typeInfo(@TypeOf(f)) == .@"fn";
+            return switch (self) {
+                .ok  => |v| .{ .ok = if (_is_fn) f(v) else f.call(v) },
+                .err => |e| .{ .err = e },
+            };
+        }
+        /// flatMap(f) — apply f to the ok value; f must return Result(U, E).
+        pub fn flatMap(self: @This(), f: anytype) @TypeOf(
+            if (comptime @typeInfo(@TypeOf(f)) == .@"fn") f(@as(T, undefined)) else f.call(@as(T, undefined))
+        ) {
+            const _is_fn = comptime @typeInfo(@TypeOf(f)) == .@"fn";
+            return switch (self) {
+                .ok  => |v| if (_is_fn) f(v) else f.call(v),
+                .err => |e| .{ .err = e },
+            };
+        }
     };
 }
 fn _pad_left(s: []const u8, width: usize, fill: u8, alloc: std.mem.Allocator) []const u8 {
@@ -93,92 +114,186 @@ fn _zebra_sort_by(comptime T: type, comptime cmp: anytype, items: []T) void {
     };
     std.mem.sort(T, items, {}, _I.less);
 }
+const SysRunResult = struct { exit_code: i64, stdout: []const u8, stderr: []const u8 };
+fn _sys_run(argv: std.ArrayList([]const u8)) SysRunResult {
+    const _r = std.process.Child.run(.{
+        .allocator = _allocator,
+        .argv = argv.items,
+        .max_output_bytes = 16 * 1024 * 1024,
+    }) catch return SysRunResult{ .exit_code = -1, .stdout = "", .stderr = "spawn failed" };
+    const _ec: i64 = switch (_r.term) {
+        .Exited => |code| @intCast(code),
+        else    => -1,
+    };
+    return .{ .exit_code = _ec, .stdout = _r.stdout, .stderr = _r.stderr };
+}
+const JsonValue = std.json.Value;
+fn _json_parse(src: []const u8) ?JsonValue {
+    // parseFromSliceLeaky uses allocator directly (no arena), intentionally leaked.
+    return std.json.parseFromSliceLeaky(JsonValue, std.heap.page_allocator, src, .{}) catch return null;
+}
+fn _json_stringify(v: JsonValue) []const u8 {
+    return std.json.Stringify.valueAlloc(std.heap.page_allocator, v, .{}) catch "{}";
+}
+fn _json_object() JsonValue { return .{ .object = std.json.ObjectMap.init(std.heap.page_allocator) }; }
+fn _json_array() JsonValue  { return .{ .array = std.json.Array.init(std.heap.page_allocator) }; }
+fn _json_get_str(v: JsonValue, key: []const u8) []const u8 {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .string => |s| return s, else => {} }, else => {} }
+    return "";
+}
+fn _json_get_int(v: JsonValue, key: []const u8) i64 {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .integer => |n| return n, else => {} }, else => {} }
+    return 0;
+}
+fn _json_get_float(v: JsonValue, key: []const u8) f64 {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) {
+        .float => |f| return f, .integer => |n| return @floatFromInt(n), else => {} }, else => {} }
+    return 0.0;
+}
+fn _json_get_bool(v: JsonValue, key: []const u8) bool {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .bool => |b| return b, else => {} }, else => {} }
+    return false;
+}
+fn _json_get_obj(v: JsonValue, key: []const u8) JsonValue {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .object => return it, else => {} }, else => {} }
+    return .{ .object = std.json.ObjectMap.init(std.heap.page_allocator) };
+}
+fn _json_get_list(v: JsonValue, key: []const u8) []JsonValue {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .array => |a| return a.items, else => {} }, else => {} }
+    return &[_]JsonValue{};
+}
+fn _json_is_null(v: JsonValue) bool   { return v == .null; }
+fn _json_is_object(v: JsonValue) bool  { return switch (v) { .object => true, else => false }; }
+fn _json_is_array(v: JsonValue) bool   { return switch (v) { .array  => true, else => false }; }
+fn _json_put_str(v: *JsonValue, key: []const u8, val: []const u8) void {
+    if (v.* != .object) return;
+    v.object.put(std.heap.page_allocator.dupe(u8, key) catch return, .{ .string = val }) catch {};
+}
+fn _json_put_int(v: *JsonValue, key: []const u8, val: i64) void {
+    if (v.* != .object) return;
+    v.object.put(std.heap.page_allocator.dupe(u8, key) catch return, .{ .integer = val }) catch {};
+}
+fn _json_put_float(v: *JsonValue, key: []const u8, val: f64) void {
+    if (v.* != .object) return;
+    v.object.put(std.heap.page_allocator.dupe(u8, key) catch return, .{ .float = val }) catch {};
+}
+fn _json_put_bool(v: *JsonValue, key: []const u8, val: bool) void {
+    if (v.* != .object) return;
+    v.object.put(std.heap.page_allocator.dupe(u8, key) catch return, .{ .bool = val }) catch {};
+}
+fn _json_arr_str(v: *JsonValue, val: []const u8) void {
+    if (v.* != .array) return;
+    v.array.append(.{ .string = val }) catch {};
+}
+fn _json_arr_int(v: *JsonValue, val: i64) void {
+    if (v.* != .array) return;
+    v.array.append(.{ .integer = val }) catch {};
+}
+fn _json_arr_float(v: *JsonValue, val: f64) void {
+    if (v.* != .array) return;
+    v.array.append(.{ .float = val }) catch {};
+}
+fn _json_arr_bool(v: *JsonValue, val: bool) void {
+    if (v.* != .array) return;
+    v.array.append(.{ .bool = val }) catch {};
+}
 const HttpResponse = struct { status: u16, text: []const u8 };
-fn _http_request(method: std.http.Method, url: []const u8, payload: ?[]const u8) HttpResponse {
+fn _http_request(method: std.http.Method, url: []const u8, payload: ?[]const u8) ?HttpResponse {
     var _hc = std.http.Client{ .allocator = _allocator };
     defer _hc.deinit();
     var _hb = std.io.Writer.Allocating.init(std.heap.page_allocator);
-    const _hr = _hc.fetch(.{ .location = .{ .url = url }, .method = method, .payload = payload, .response_writer = &_hb.writer }) catch |e| @panic(@errorName(e));
+    const _hr = _hc.fetch(.{ .location = .{ .url = url }, .method = method, .payload = payload, .response_writer = &_hb.writer }) catch return null;
     return .{ .status = @intFromEnum(_hr.status), .text = _hb.written() };
 }
-fn _http_get(url: []const u8) HttpResponse { return _http_request(.GET, url, null); }
-fn _http_post(url: []const u8, payload: []const u8) HttpResponse { return _http_request(.POST, url, payload); }
+fn _http_get(url: []const u8) ?HttpResponse { return _http_request(.GET, url, null); }
+fn _http_post(url: []const u8, payload: []const u8) ?HttpResponse { return _http_request(.POST, url, payload); }
 const HttpRequest = struct { method: []const u8, path: []const u8, content: []const u8 };
 fn _http_serve(port: u16, handler: anytype) void {
+    const Handler = @TypeOf(handler);
+    const _Ctx = struct {
+        conn: std.net.Server.Connection,
+        handler: Handler,
+        fn run(ctx: *@This()) void {
+            defer std.heap.page_allocator.destroy(ctx);
+            defer ctx.conn.stream.close();
+            const _alloc = std.heap.page_allocator;
+            // Read request headers (scan for \r\n\r\n).
+            var _hd: [16384]u8 = undefined;
+            var _hl: usize = 0;
+            while (_hl < _hd.len - 4096) {
+                const _n = std.posix.recv(ctx.conn.stream.handle, _hd[_hl..@min(_hl+4096, _hd.len)], 0) catch break;
+                if (_n == 0) break;
+                _hl += _n;
+                if (std.mem.indexOf(u8, _hd[0.._hl], "\r\n\r\n") != null) break;
+            }
+            const _hdrs_end = (std.mem.indexOf(u8, _hd[0.._hl], "\r\n\r\n") orelse (_hl -| 4)) + 4;
+            const _head = _hd[0.._hdrs_end];
+            var _peeked: usize = if (_hl > _hdrs_end) _hl - _hdrs_end else 0;
+            // Parse request line: METHOD PATH VERSION
+            const _rl_end = std.mem.indexOf(u8, _head, "\r\n") orelse _hl;
+            var _rp = std.mem.splitScalar(u8, _head[0.._rl_end], ' ');
+            const _method = _rp.next() orelse "GET";
+            const _raw_path = _rp.next() orelse "/";
+            const _path = _raw_path[0 .. (std.mem.indexOfScalar(u8, _raw_path, '?') orelse _raw_path.len)];
+            // Parse Content-Length.
+            var _cl: usize = 0;
+            var _hdr_it = std.mem.splitSequence(u8, _head, "\r\n");
+            _ = _hdr_it.next();
+            while (_hdr_it.next()) |_hl_| {
+                if (_hl_.len == 0) break;
+                const _cp = std.mem.indexOfScalar(u8, _hl_, ':') orelse continue;
+                const _hn = std.mem.trim(u8, _hl_[0.._cp], " ");
+                const _hv = std.mem.trim(u8, _hl_[_cp+1..], " ");
+                if (std.ascii.eqlIgnoreCase(_hn, "content-length"))
+                    _cl = std.fmt.parseInt(usize, _hv, 10) catch 0;
+            }
+            var _body: []const u8 = "";
+            if (_cl > 0) {
+                const _bb = _alloc.alloc(u8, _cl) catch @panic("OOM");
+                const _pre = @min(_peeked, _cl);
+                if (_pre > 0) @memcpy(_bb[0.._pre], _hd[_hdrs_end.._hdrs_end+_pre]);
+                var _bi: usize = _pre;
+                while (_bi < _cl) {
+                    const _rn = std.posix.recv(ctx.conn.stream.handle, _bb[_bi..], 0) catch break;
+                    if (_rn == 0) break;
+                    _bi += _rn;
+                }
+                _body = _bb[0.._bi];
+                _ = &_peeked;
+            }
+            const _req = HttpRequest{ .method = _method, .path = _path, .content = _body };
+            const _resp = if (comptime @typeInfo(@TypeOf(ctx.handler)) == .@"fn") ctx.handler(_req) else ctx.handler.call(_req);
+            const _st: []const u8 = switch (_resp.status) {
+                200 => "OK", 201 => "Created", 204 => "No Content",
+                301 => "Moved Permanently", 302 => "Found",
+                400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
+                404 => "Not Found", 405 => "Method Not Allowed",
+                500 => "Internal Server Error",
+                else => "Unknown",
+            };
+            const _out = std.fmt.allocPrint(_alloc,
+                "HTTP/1.1 {d} {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
+                .{ _resp.status, _st, _resp.text.len, _resp.text }) catch @panic("OOM");
+            ctx.conn.stream.writeAll(_out) catch {};
+        }
+    };
     const _alloc = std.heap.page_allocator;
     var _srv = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port).listen(.{ .reuse_address = true }) catch |e| @panic(@errorName(e));
     defer _srv.deinit();
     while (true) {
-        var _conn = _srv.accept() catch continue;
-        defer _conn.stream.close();
-        // Read request head using recv (works on Windows sockets).
-        // We read into a large buffer and scan for \r\n\r\n.
-        var _hd: [16384]u8 = undefined;
-        var _hl: usize = 0;
-        while (_hl < _hd.len - 4096) {
-            const _n = std.posix.recv(_conn.stream.handle, _hd[_hl..@min(_hl+4096, _hd.len)], 0) catch break;
-            if (_n == 0) break;
-            _hl += _n;
-            if (std.mem.indexOf(u8, _hd[0.._hl], "\r\n\r\n") != null) break;
-        }
-        const _hdrs_end = (std.mem.indexOf(u8, _hd[0.._hl], "\r\n\r\n") orelse (_hl -| 4)) + 4;
-        const _head = _hd[0.._hdrs_end];
-        // Bytes already read after the headers (peeked body).
-        var _peeked: usize = if (_hl > _hdrs_end) _hl - _hdrs_end else 0;
-        // Parse request line: METHOD PATH VERSION
-        const _rl_end = std.mem.indexOf(u8, _head, "\r\n") orelse _hl;
-        var _rp = std.mem.splitScalar(u8, _head[0.._rl_end], ' ');
-        const _method = _rp.next() orelse "GET";
-        const _raw_path = _rp.next() orelse "/";
-        const _path = _raw_path[0 .. (std.mem.indexOfScalar(u8, _raw_path, '?') orelse _raw_path.len)];
-        // Parse Content-Length for request body.
-        var _cl: usize = 0;
-        var _hdr_it = std.mem.splitSequence(u8, _head, "\r\n");
-        _ = _hdr_it.next();
-        while (_hdr_it.next()) |_hl_| {
-            if (_hl_.len == 0) break;
-            const _cp = std.mem.indexOfScalar(u8, _hl_, ':') orelse continue;
-            const _hn = std.mem.trim(u8, _hl_[0.._cp], " ");
-            const _hv = std.mem.trim(u8, _hl_[_cp+1..], " ");
-            if (std.ascii.eqlIgnoreCase(_hn, "content-length"))
-                _cl = std.fmt.parseInt(usize, _hv, 10) catch 0;
-        }
-        var _body: []const u8 = "";
-        if (_cl > 0) {
-            const _bb = _alloc.alloc(u8, _cl) catch @panic("OOM");
-            // Copy any body bytes already read with the headers.
-            const _pre = @min(_peeked, _cl);
-            if (_pre > 0) @memcpy(_bb[0.._pre], _hd[_hdrs_end.._hdrs_end+_pre]);
-            var _bi: usize = _pre;
-            while (_bi < _cl) {
-                const _rn = std.posix.recv(_conn.stream.handle, _bb[_bi..], 0) catch break;
-                if (_rn == 0) break;
-                _bi += _rn;
-            }
-            _body = _bb[0.._bi];
-            _ = &_peeked; // suppress unused warning
-        }
-        // Invoke handler and write response.
-        const _req = HttpRequest{ .method = _method, .path = _path, .content = _body };
-        const _resp = if (comptime @typeInfo(@TypeOf(handler)) == .@"fn") handler(_req) else handler.call(_req);
-        const _st: []const u8 = switch (_resp.status) {
-            200 => "OK", 201 => "Created", 204 => "No Content",
-            301 => "Moved Permanently", 302 => "Found",
-            400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
-            404 => "Not Found", 405 => "Method Not Allowed",
-            500 => "Internal Server Error",
-            else => "Unknown",
+        const _conn = _srv.accept() catch continue;
+        const _ctx = _alloc.create(_Ctx) catch { _conn.stream.close(); continue; };
+        _ctx.* = .{ .conn = _conn, .handler = handler };
+        _ = std.Thread.spawn(.{}, _Ctx.run, .{_ctx}) catch {
+            _alloc.destroy(_ctx);
+            _conn.stream.close();
         };
-        const _out = std.fmt.allocPrint(_alloc,
-            "HTTP/1.1 {d} {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
-            .{ _resp.status, _st, _resp.text.len, _resp.text }) catch @panic("OOM");
-        _conn.stream.writeAll(_out) catch {};
     }
 }
 
 const TcpConn = struct { stream: std.net.Stream };
-fn _tcp_connect(host: []const u8, port: u16) TcpConn {
-    const s = std.net.tcpConnectToHost(_allocator, host, port) catch |e| @panic(@errorName(e));
+fn _tcp_connect(host: []const u8, port: u16) ?TcpConn {
+    const s = std.net.tcpConnectToHost(_allocator, host, port) catch return null;
     return .{ .stream = s };
 }
 fn _tcp_write(conn: TcpConn, data: []const u8) void {
@@ -191,6 +306,27 @@ fn _tcp_read(conn: TcpConn) []const u8 {
     _ = _rd.interface().streamRemaining(&_hb.writer) catch |e| @panic(@errorName(e));
     return _hb.written();
 }
+fn _tcp_read_line(conn: TcpConn) []const u8 {
+    var _buf: std.ArrayList(u8) = .{};
+    while (true) {
+        var _b: [1]u8 = undefined;
+        const _n = std.posix.recv(conn.stream.handle, &_b, 0) catch break;
+        if (_n == 0) break;
+        if (_b[0] == '\n') break;
+        if (_b[0] != '\r') _buf.append(std.heap.page_allocator, _b[0]) catch break;
+    }
+    return _buf.items;
+}
+fn _tcp_read_bytes(conn: TcpConn, n: usize) []const u8 {
+    const _buf = std.heap.page_allocator.alloc(u8, n) catch @panic("OOM");
+    var _total: usize = 0;
+    while (_total < n) {
+        const _got = std.posix.recv(conn.stream.handle, _buf[_total..], 0) catch break;
+        if (_got == 0) break;
+        _total += _got;
+    }
+    return _buf[0.._total];
+}
 fn _tcp_close(conn: TcpConn) void { conn.stream.close(); }
 
 const UdpSocket = struct { handle: std.posix.socket_t };
@@ -199,7 +335,13 @@ fn _udp_socket() UdpSocket {
     return .{ .handle = s };
 }
 fn _udp_send(sock: UdpSocket, host: []const u8, port: u16, data: []const u8) void {
-    const dest = std.net.Address.parseIp4(host, port) catch |e| @panic(@errorName(e));
+    const dest = blk: {
+        if (std.net.Address.parseIp(host, port)) |a| break :blk a else |_| {}
+        const _list = std.net.getAddressList(std.heap.page_allocator, host, port) catch |e| @panic(@errorName(e));
+        defer _list.deinit();
+        if (_list.addrs.len == 0) @panic("UDP send: hostname resolution failed");
+        break :blk _list.addrs[0];
+    };
     _ = std.posix.sendto(sock.handle, data, 0, &dest.any, dest.getOsSockLen()) catch |e| @panic(@errorName(e));
 }
 fn _udp_recv(sock: UdpSocket, max_bytes: usize) []const u8 {

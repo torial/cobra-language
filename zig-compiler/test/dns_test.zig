@@ -49,6 +49,27 @@ fn _zebra_ge(a: anytype, b: anytype) bool {
         pub fn errValue(self: @This()) ?E {
             return switch (self) { .ok => null, .err => |e| e };
         }
+        /// map(f) — apply f to the ok value; propagate err unchanged.
+        /// f may be a fn pointer or a capture-closure struct with a `call` method.
+        pub fn map(self: @This(), f: anytype) _Result(
+            @TypeOf(if (comptime @typeInfo(@TypeOf(f)) == .@"fn") f(@as(T, undefined)) else f.call(@as(T, undefined))), E
+        ) {
+            const _is_fn = comptime @typeInfo(@TypeOf(f)) == .@"fn";
+            return switch (self) {
+                .ok  => |v| .{ .ok = if (_is_fn) f(v) else f.call(v) },
+                .err => |e| .{ .err = e },
+            };
+        }
+        /// flatMap(f) — apply f to the ok value; f must return Result(U, E).
+        pub fn flatMap(self: @This(), f: anytype) @TypeOf(
+            if (comptime @typeInfo(@TypeOf(f)) == .@"fn") f(@as(T, undefined)) else f.call(@as(T, undefined))
+        ) {
+            const _is_fn = comptime @typeInfo(@TypeOf(f)) == .@"fn";
+            return switch (self) {
+                .ok  => |v| if (_is_fn) f(v) else f.call(v),
+                .err => |e| .{ .err = e },
+            };
+        }
     };
 }
 fn _pad_left(s: []const u8, width: usize, fill: u8, alloc: std.mem.Allocator) []const u8 {
@@ -92,6 +113,89 @@ fn _zebra_sort_by(comptime T: type, comptime cmp: anytype, items: []T) void {
         }
     };
     std.mem.sort(T, items, {}, _I.less);
+}
+const SysRunResult = struct { exit_code: i64, stdout: []const u8, stderr: []const u8 };
+fn _sys_run(argv: std.ArrayList([]const u8)) SysRunResult {
+    const _r = std.process.Child.run(.{
+        .allocator = _allocator,
+        .argv = argv.items,
+        .max_output_bytes = 16 * 1024 * 1024,
+    }) catch return SysRunResult{ .exit_code = -1, .stdout = "", .stderr = "spawn failed" };
+    const _ec: i64 = switch (_r.term) {
+        .Exited => |code| @intCast(code),
+        else    => -1,
+    };
+    return .{ .exit_code = _ec, .stdout = _r.stdout, .stderr = _r.stderr };
+}
+const JsonValue = std.json.Value;
+fn _json_parse(src: []const u8) ?JsonValue {
+    // parseFromSliceLeaky uses allocator directly (no arena), intentionally leaked.
+    return std.json.parseFromSliceLeaky(JsonValue, std.heap.page_allocator, src, .{}) catch return null;
+}
+fn _json_stringify(v: JsonValue) []const u8 {
+    return std.json.Stringify.valueAlloc(std.heap.page_allocator, v, .{}) catch "{}";
+}
+fn _json_object() JsonValue { return .{ .object = std.json.ObjectMap.init(std.heap.page_allocator) }; }
+fn _json_array() JsonValue  { return .{ .array = std.json.Array.init(std.heap.page_allocator) }; }
+fn _json_get_str(v: JsonValue, key: []const u8) []const u8 {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .string => |s| return s, else => {} }, else => {} }
+    return "";
+}
+fn _json_get_int(v: JsonValue, key: []const u8) i64 {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .integer => |n| return n, else => {} }, else => {} }
+    return 0;
+}
+fn _json_get_float(v: JsonValue, key: []const u8) f64 {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) {
+        .float => |f| return f, .integer => |n| return @floatFromInt(n), else => {} }, else => {} }
+    return 0.0;
+}
+fn _json_get_bool(v: JsonValue, key: []const u8) bool {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .bool => |b| return b, else => {} }, else => {} }
+    return false;
+}
+fn _json_get_obj(v: JsonValue, key: []const u8) JsonValue {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .object => return it, else => {} }, else => {} }
+    return .{ .object = std.json.ObjectMap.init(std.heap.page_allocator) };
+}
+fn _json_get_list(v: JsonValue, key: []const u8) []JsonValue {
+    switch (v) { .object => |o| if (o.get(key)) |it| switch (it) { .array => |a| return a.items, else => {} }, else => {} }
+    return &[_]JsonValue{};
+}
+fn _json_is_null(v: JsonValue) bool   { return v == .null; }
+fn _json_is_object(v: JsonValue) bool  { return switch (v) { .object => true, else => false }; }
+fn _json_is_array(v: JsonValue) bool   { return switch (v) { .array  => true, else => false }; }
+fn _json_put_str(v: *JsonValue, key: []const u8, val: []const u8) void {
+    if (v.* != .object) return;
+    v.object.put(std.heap.page_allocator.dupe(u8, key) catch return, .{ .string = val }) catch {};
+}
+fn _json_put_int(v: *JsonValue, key: []const u8, val: i64) void {
+    if (v.* != .object) return;
+    v.object.put(std.heap.page_allocator.dupe(u8, key) catch return, .{ .integer = val }) catch {};
+}
+fn _json_put_float(v: *JsonValue, key: []const u8, val: f64) void {
+    if (v.* != .object) return;
+    v.object.put(std.heap.page_allocator.dupe(u8, key) catch return, .{ .float = val }) catch {};
+}
+fn _json_put_bool(v: *JsonValue, key: []const u8, val: bool) void {
+    if (v.* != .object) return;
+    v.object.put(std.heap.page_allocator.dupe(u8, key) catch return, .{ .bool = val }) catch {};
+}
+fn _json_arr_str(v: *JsonValue, val: []const u8) void {
+    if (v.* != .array) return;
+    v.array.append(.{ .string = val }) catch {};
+}
+fn _json_arr_int(v: *JsonValue, val: i64) void {
+    if (v.* != .array) return;
+    v.array.append(.{ .integer = val }) catch {};
+}
+fn _json_arr_float(v: *JsonValue, val: f64) void {
+    if (v.* != .array) return;
+    v.array.append(.{ .float = val }) catch {};
+}
+fn _json_arr_bool(v: *JsonValue, val: bool) void {
+    if (v.* != .array) return;
+    v.array.append(.{ .bool = val }) catch {};
 }
 const HttpResponse = struct { status: u16, text: []const u8 };
 fn _http_request(method: std.http.Method, url: []const u8, payload: ?[]const u8) ?HttpResponse {
@@ -231,7 +335,13 @@ fn _udp_socket() UdpSocket {
     return .{ .handle = s };
 }
 fn _udp_send(sock: UdpSocket, host: []const u8, port: u16, data: []const u8) void {
-    const dest = std.net.Address.parseIp4(host, port) catch |e| @panic(@errorName(e));
+    const dest = blk: {
+        if (std.net.Address.parseIp(host, port)) |a| break :blk a else |_| {}
+        const _list = std.net.getAddressList(std.heap.page_allocator, host, port) catch |e| @panic(@errorName(e));
+        defer _list.deinit();
+        if (_list.addrs.len == 0) @panic("UDP send: hostname resolution failed");
+        break :blk _list.addrs[0];
+    };
     _ = std.posix.sendto(sock.handle, data, 0, &dest.any, dest.getOsSockLen()) catch |e| @panic(@errorName(e));
 }
 fn _udp_recv(sock: UdpSocket, max_bytes: usize) []const u8 {

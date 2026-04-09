@@ -23,13 +23,10 @@ Running triage list. Updated each milestone. Format: severity (blocker/high/medi
 
 ---
 
-### BUG-003: HTTP `serve` fails on Windows with "comptime call of extern function"
-- **Severity:** High (server_test blocked)
-- **Status:** Open
-- **Target:** 0.3 (needed for Http.json/postJson)
-- **Symptom:** `Http.serve(port, handler)` fails to compile on Windows. The `_http_serve` preamble function uses `page_allocator` in a context that gets evaluated at comptime when the handler closure type is being monomorphized.
-- **Error:** `error: comptime call of extern function` from `PageAllocator.zig:33`
-- **Fix area:** `CodeGen.zig` HTTP preamble — ensure `_http_serve` doesn't allocate at comptime; may need to restructure the handler dispatch or use `std.heap.c_allocator` or defer the allocation.
+### BUG-003: ~~HTTP `serve` fails on Windows with "comptime call of extern function"~~ — FIXED
+- **Status:** Fixed 2026-04-09
+- Was: `_Ctx` struct stored `handler: Handler` where `Handler = @TypeOf(handler)` is a bare function type (comptime-only in Zig). Made the entire struct comptime-only, so `page_allocator.create(_Ctx)` triggered the `NtAllocateVirtualMemory` comptime path.
+- Fix: Declare `const _HFn = *const fn(HttpRequest) HttpResponse` and coerce `const _fn: _HFn = handler` before `_Ctx`. Store `handler_fn: _HFn` in `_Ctx` (fn-pointer = runtime type). Call `ctx.handler_fn(_req)` directly. All three HTTP routes verified working on Windows.
 
 ---
 
@@ -59,4 +56,23 @@ These fail WITH A COMPILER ERROR — that IS the test passing:
 
 ---
 
-*Last updated: 2026-04-08*
+---
+
+### BUG-005: `{d:0>N}` format adds `+` prefix to positive `i64` in Zig 0.15 — FIXED
+- **Status:** Fixed 2026-04-09
+- **Context:** DateTime preamble `_dt_to_iso8601` and `_dt_format` used `i64` fields with `{d:0>N}` format spec. Zig 0.15.2 adds a `+` sign to positive signed integers when using fill-aligned format (e.g. `{d:0>4}` for `i64 = 1970` → `+1970`).
+- **Fix:** Cast all date fields to unsigned types (`@as(u32, ...)`, `@as(u8, ...)`) before passing to `bufPrint`/`allocPrint`. Unsigned integers never receive a sign prefix.
+- **Broader note:** This is a Zig 0.15 breaking change from 0.14. Any future preamble code that formats `i64` values with fill-aligned specs should cast to unsigned first.
+
+---
+
+### BUG-006: `zig"..."` expression statement emits double semicolon
+- **Severity:** Low
+- **Status:** Open
+- **Target:** 0.5 (low priority)
+- **Symptom:** `zig"some_stmt;"` inside a method body emits `some_stmt;;` — the zig literal already ends with `;`, and `genStmt` for `.expr` always appends another `;`.
+- **Fix:** In the `.expr` case of `genStmt`, detect when the expression is a `zig_lit` ending with `;` and skip the trailing `;\n` append.
+
+---
+
+*Last updated: 2026-04-09*
