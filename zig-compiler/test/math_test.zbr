@@ -1,0 +1,43 @@
+class Main
+    shared
+        def main
+            # ── Constants ───────────────────────────────────────────────────
+            print Math.PI > 3.14 and Math.PI < 3.15   # true
+            print Math.E  > 2.71 and Math.E  < 2.72   # true
+            print Math.TAU > 6.28 and Math.TAU < 6.29 # true
+
+            # ── Trig ────────────────────────────────────────────────────────
+            var sin90 as float = Math.sin(Math.PI / 2.0)
+            print sin90 > 0.999                        # true (≈ 1.0)
+            var cos0 as float = Math.cos(0.0)
+            print cos0 > 0.999                         # true (≈ 1.0)
+            var atan2_val as float = Math.atan2(1.0, 1.0)
+            print atan2_val > 0.785 and atan2_val < 0.786   # true (≈ π/4)
+
+            # ── Power / roots ───────────────────────────────────────────────
+            print Math.sqrt(9.0) > 2.999               # true (= 3.0)
+            print Math.pow(2.0, 10.0) > 1023.9         # true (= 1024.0)
+
+            # ── Log / exp ───────────────────────────────────────────────────
+            print Math.log(Math.E) > 0.999             # true (ln(e) = 1.0)
+            print Math.log2(8.0) > 2.999               # true (= 3.0)
+            print Math.log10(1000.0) > 2.999           # true (= 3.0)
+            print Math.exp(0.0) > 0.999                # true (= 1.0)
+
+            # ── Rounding ────────────────────────────────────────────────────
+            print Math.floor(3.9) > 2.999              # true (= 3.0)
+            print Math.ceil(3.1)  > 3.999              # true (= 4.0)
+            print Math.round(3.5) > 3.999              # true (= 4.0)
+            print Math.trunc(3.9) > 2.999              # true (= 3.0)
+
+            # ── abs / min / max / clamp ─────────────────────────────────────
+            print Math.abs(-5.0) > 4.999               # true (= 5.0)
+            print Math.abs(-7) == 7                    # true (int)
+            print Math.min(3.0, 7.0) > 2.999          # true (= 3.0)
+            print Math.max(3.0, 7.0) > 6.999          # true (= 7.0)
+            print Math.clamp(15.0, 0.0, 10.0) > 9.999 # true (= 10.0)
+
+            # ── isNaN / isInf ───────────────────────────────────────────────
+            print Math.isNaN(Math.NAN)                 # true
+            print Math.isInf(Math.INF)                 # true
+            print Math.isNaN(1.0) == false             # true

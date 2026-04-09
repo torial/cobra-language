@@ -3225,6 +3225,98 @@ const Generator = struct {
     ///
     ///   sys.args()          → ArrayList([]const u8) of command-line args (alloc'd)
     ///   sys.exit(code)      → std.process.exit(code)  — noreturn
+    // ── Math static methods ───────────────────────────────────────────────────
+    //
+    // All trig/exp/log/rounding functions coerce to f64 via @as(f64, arg).
+    // abs/min/max/clamp use Zig builtins and work on any numeric type.
+    // Constants (Math.PI etc.) are handled in genExpr .member, not here.
+    fn genMathCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        // Helper: emit a single-arg f64 std.math call
+        const one = struct {
+            fn emit(gg: Generator, fname: []const u8, as_: []const Ast.Arg) anyerror!void {
+                try gg.w.writeAll("std.math.");
+                try gg.w.writeAll(fname);
+                try gg.w.writeAll("(@as(f64, ");
+                if (as_.len >= 1) try gg.genExpr(as_[0].value) else try gg.w.writeAll("0");
+                try gg.w.writeAll("))");
+            }
+        }.emit;
+
+        if (std.mem.eql(u8, method, "sin"))   { try one(g, "sin",   args); return true; }
+        if (std.mem.eql(u8, method, "cos"))   { try one(g, "cos",   args); return true; }
+        if (std.mem.eql(u8, method, "tan"))   { try one(g, "tan",   args); return true; }
+        if (std.mem.eql(u8, method, "asin"))  { try one(g, "asin",  args); return true; }
+        if (std.mem.eql(u8, method, "acos"))  { try one(g, "acos",  args); return true; }
+        if (std.mem.eql(u8, method, "atan"))  { try one(g, "atan",  args); return true; }
+        if (std.mem.eql(u8, method, "sqrt"))  { try one(g, "sqrt",  args); return true; }
+        if (std.mem.eql(u8, method, "exp"))   { try one(g, "exp",   args); return true; }
+        if (std.mem.eql(u8, method, "floor")) { try one(g, "floor", args); return true; }
+        if (std.mem.eql(u8, method, "ceil"))  { try one(g, "ceil",  args); return true; }
+        if (std.mem.eql(u8, method, "round")) { try one(g, "round", args); return true; }
+        if (std.mem.eql(u8, method, "trunc")) { try one(g, "trunc", args); return true; }
+        if (std.mem.eql(u8, method, "log2"))  { try one(g, "log2",  args); return true; }
+        if (std.mem.eql(u8, method, "log10")) { try one(g, "log10", args); return true; }
+        if (std.mem.eql(u8, method, "isNaN")) { try one(g, "isNan", args); return true; }
+        if (std.mem.eql(u8, method, "isInf")) { try one(g, "isInf", args); return true; }
+        if (std.mem.eql(u8, method, "log")) {
+            // natural log: std.math.log(f64, e, x)
+            try g.w.writeAll("std.math.log(f64, std.math.e, @as(f64, ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeAll("))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "atan2")) {
+            try g.w.writeAll("std.math.atan2(@as(f64, ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeAll("), @as(f64, ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("0");
+            try g.w.writeAll("))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "pow")) {
+            try g.w.writeAll("std.math.pow(f64, @as(f64, ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeAll("), @as(f64, ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("0");
+            try g.w.writeAll("))");
+            return true;
+        }
+        // abs / min / max / clamp use builtins (work on int and float)
+        if (std.mem.eql(u8, method, "abs")) {
+            try g.w.writeAll("@abs(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeByte(')');
+            return true;
+        }
+        if (std.mem.eql(u8, method, "min")) {
+            try g.w.writeAll("@min(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeAll(", ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("0");
+            try g.w.writeByte(')');
+            return true;
+        }
+        if (std.mem.eql(u8, method, "max")) {
+            try g.w.writeAll("@max(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeAll(", ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("0");
+            try g.w.writeByte(')');
+            return true;
+        }
+        if (std.mem.eql(u8, method, "clamp")) {
+            try g.w.writeAll("std.math.clamp(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeAll(", ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("0");
+            try g.w.writeAll(", ");
+            if (args.len >= 3) try g.genExpr(args[2].value) else try g.w.writeAll("0");
+            try g.w.writeByte(')');
+            return true;
+        }
+        return false;
+    }
+
     ///   sys.err(msg)        → write msg to stderr (no newline)
     ///   sys.errln(msg)      → write msg + newline to stderr
     ///   sys.getenv(name)    → ?[]const u8 via std.posix.getenv
@@ -5218,6 +5310,14 @@ const Generator = struct {
                         }
                     }
                 }
+                // Math constants: Math.PI, Math.E, Math.TAU, Math.INF, Math.NAN
+                if (e.object.* == .ident and std.mem.eql(u8, e.object.ident.name, "Math")) {
+                    if (std.mem.eql(u8, e.member, "PI"))  { try g.w.writeAll("std.math.pi");      break :sw; }
+                    if (std.mem.eql(u8, e.member, "E"))   { try g.w.writeAll("std.math.e");       break :sw; }
+                    if (std.mem.eql(u8, e.member, "TAU")) { try g.w.writeAll("std.math.tau");     break :sw; }
+                    if (std.mem.eql(u8, e.member, "INF")) { try g.w.writeAll("std.math.inf(f64)"); break :sw; }
+                    if (std.mem.eql(u8, e.member, "NAN")) { try g.w.writeAll("std.math.nan(f64)"); break :sw; }
+                }
                 // Tuple index access: p.0 → p.@"0"
                 if (e.member.len > 0 and std.ascii.isDigit(e.member[0])) {
                     try g.genExpr(e.object);
@@ -5575,6 +5675,13 @@ const Generator = struct {
                 if (try g.genNetCall(mem.member, e.args)) return;
             }
         }
+        // Math static call: Math.sin(x), Math.pow(x,y), etc.
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Math")) {
+                if (try g.genMathCall(mem.member, e.args)) return;
+            }
+        }
         // Regex static call: Regex.compile(pattern).
         if (e.callee.* == .member) {
             const mem = e.callee.member;
@@ -5741,7 +5848,27 @@ const Generator = struct {
 
     fn genBinary(g: Generator, e: *Ast.ExprBinary) anyerror!void {
         switch (e.op) {
-            .div, .int_div => {
+            .div => {
+                // Float division uses `/`; integer division uses @divTrunc.
+                const is_float = if (g.tc) |tc| blk: {
+                    const t = tc.expr_types.get(e.left) orelse .unknown;
+                    break :blk t.isFloatFamily();
+                } else false;
+                if (is_float) {
+                    try g.w.writeAll("(");
+                    try g.genExpr(e.left);
+                    try g.w.writeAll(" / ");
+                    try g.genExpr(e.right);
+                    try g.w.writeAll(")");
+                } else {
+                    try g.w.writeAll("@divTrunc(");
+                    try g.genExpr(e.left);
+                    try g.w.writeAll(", ");
+                    try g.genExpr(e.right);
+                    try g.w.writeAll(")");
+                }
+            },
+            .int_div => {
                 try g.w.writeAll("@divTrunc(");
                 try g.genExpr(e.left);
                 try g.w.writeAll(", ");

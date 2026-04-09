@@ -1157,6 +1157,8 @@ const TypeChecker = struct {
         // `len` property on strings and StringBuilder → usize (represented as .uint)
         if (std.mem.eql(u8, e.member, "len") and
             (obj_type == .string or obj_type == .string_builder)) return .uint;
+        // Math constant access: Math.PI, Math.E, Math.TAU, Math.INF, Math.NAN
+        if (e.object.* == .ident and std.mem.eql(u8, e.object.ident.name, "Math")) return .float;
         // HttpRequest field access.
         if (obj_type == .http_request) {
             if (std.mem.eql(u8, e.member, "method"))  return .string;
@@ -1268,6 +1270,15 @@ const TypeChecker = struct {
                     if (std.mem.eql(u8, mem.member, "listDir"))   return .unknown; // List(str)
                     if (std.mem.eql(u8, mem.member, "exists"))    return .bool;
                     return .void_;
+                }
+                // Math.* static methods.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Math")) {
+                    _ = try tc.inferExpr(mem.object);
+                    for (e.args) |a| _ = try tc.inferExpr(a.value);
+                    // isNaN / isInf return bool; everything else returns float
+                    if (std.mem.eql(u8, mem.member, "isNaN") or
+                        std.mem.eql(u8, mem.member, "isInf")) return .bool;
+                    return .float;
                 }
                 // Shell.* static methods.
                 if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Shell")) {
