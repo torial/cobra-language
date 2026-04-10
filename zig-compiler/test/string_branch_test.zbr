@@ -1,0 +1,30 @@
+class Main
+    shared
+        def classify(cmd as str) as str
+            branch cmd
+                on "start", "begin"
+                    return "start command"
+                on "stop", "end", "quit"
+                    return "stop command"
+                on "help"
+                    return "help command"
+                else
+                    return "unknown command"
+
+        def main
+            print classify("start")
+            print classify("begin")
+            print classify("stop")
+            print classify("quit")
+            print classify("help")
+            print classify("foo")
+
+            # Direct string branch
+            var lang = "Zebra"
+            branch lang
+                on "Zebra"
+                    print "Zebra is the best"
+                on "Python"
+                    print "Python is fine"
+                else
+                    print "unknown language"

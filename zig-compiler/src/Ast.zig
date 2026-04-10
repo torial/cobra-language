@@ -544,6 +544,7 @@ pub const Expr = union(enum) {
     zig_lit: ExprZigLit, // zig'...' / zig"..." backend literal
     try_: *ExprTry,    // try expr — propagate error upward
     tuple_lit: *ExprTuple,  // (a, b, c) — tuple literal
+    type_check: *ExprTypeCheck, // expr is TypeName — runtime type-ID check
 };
 
 // ── Literal expressions ───────────────────────────────────────────────────────
@@ -701,6 +702,15 @@ pub const ExprCast = struct {
     span: Span,
     expr: *Expr,
     target: TypeRef,
+};
+
+/// `expr is TypeName` — runtime type-ID check; evaluates to bool.
+/// The TypeChecker and CodeGen cooperate to verify TypeName is a known class
+/// and emit `expr._type_id == _tid_TypeName`.
+pub const ExprTypeCheck = struct {
+    span: Span,
+    expr: *Expr,
+    type_name: []const u8,
 };
 
 /// `expr to?` — return nilable, nil if cast fails.

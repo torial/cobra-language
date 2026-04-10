@@ -314,13 +314,18 @@ const Builder = struct {
     }
 
     fn collectEnumMembers(b: Builder, node: TN, out: *std.ArrayList(Ast.EnumMember)) !void {
-        // EnumMember | EnumMemberList EnumMember
+        // EnumMember                          — 1 child
+        // EnumMemberList EnumMember           — 2 children, kids[1] is inner
+        // EnumMemberList eol (blank line)     — 2 children, kids[1] is leaf
         const kids = ch(node);
         if (kids.len == 1) {
-            try out.append(b.arena,try b.buildEnumMember(kids[0]));
+            try out.append(b.arena, try b.buildEnumMember(kids[0]));
         } else {
             try b.collectEnumMembers(kids[0], out);
-            try out.append(b.arena,try b.buildEnumMember(kids[1]));
+            // Skip blank-line eol leaves; only build actual member nodes.
+            if (isMeaningfulNode(kids[1])) {
+                try out.append(b.arena, try b.buildEnumMember(kids[1]));
+            }
         }
     }
 
@@ -1710,7 +1715,14 @@ const Builder = struct {
             return switch (op_tok) {
                 .kw_or     => mk.bin(b, s, .or_,     left, right),
                 .kw_and    => mk.bin(b, s, .and_,    left, right),
-                .kw_is     => mk.bin(b, s, .eq,      left, right),
+                // `expr is TypeName` — if RHS is a plain ident, emit a type-check node.
+                // `expr is value`    — if RHS is anything else (literal, call, …), emit equality.
+                .kw_is     => if (right.* == .ident)
+                    .{ .type_check = try b.box(Ast.ExprTypeCheck, .{
+                        .span = s, .expr = left, .type_name = right.ident.name,
+                    }) }
+                else
+                    mk.bin(b, s, .eq, left, right),
                 .kw_in     => mk.bin(b, s, .in_,     left, right),
                 .eq        => mk.bin(b, s, .eq,      left, right),
                 .ne,
@@ -2269,6 +2281,14 @@ fn singleChild(node: TN) TN {
 /// True when `node` is a leaf whose token kind is `kind`.
 fn isLeafKind(node: TN, kind: TokenKind) bool {
     return node == .leaf and node.leaf.token == kind;
+}
+
+/// True when `node` carries grammatically significant content (an inner rule
+/// node), as opposed to a terminal leaf (punctuation, keyword, eol) or an
+/// epsilon production.  Use this instead of `node != .leaf` when you want to
+/// skip blank-line or punctuation nodes in list-collecting traversals.
+fn isMeaningfulNode(node: TN) bool {
+    return node == .inner;
 }
 
 /// Source text of a leaf token.  Panics on non-leaf.

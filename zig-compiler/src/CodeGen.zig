@@ -59,6 +59,30 @@ const Builtins    = @import("Builtins.zig");
 
 const Allocator = std.mem.Allocator;
 
+// ── Compile-time hash (FNV-1a 32-bit) ────────────────────────────────────────
+// Used internally by CodeGen to compute class-name hash components for
+// `_ttag_ClassName` constants.  The algorithm must stay bitwise-identical to
+// the `_zbr_hash` function emitted into the preamble so that generic type-arg
+// hashes agree (Phase 3: `is Stack(int)` checks).
+//
+// Type-tag layout (u64):
+//   bits [31: 0] = FNV-1a 32-bit hash of the class name
+//   bits [63:32] = combined FNV-1a 32-bit hash of type args (0 for non-generics)
+//
+// This means:
+//   - `expr is Dog`        → expr._type_tag == _ttag_Dog     (upper bits 0)
+//   - `expr is Stack`      → (expr._type_tag & 0xFFFFFFFF) == _ttag_Stack
+//   - `expr is Stack(int)` → expr._type_tag == <combined u64 literal>
+
+fn zbr_hash_str(s: []const u8) u32 {
+    var h: u32 = 2166136261;
+    for (s) |c| {
+        h ^= @as(u32, c);
+        h = h *% 16777619;
+    }
+    return h;
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Which GUI backend to embed in the generated Zig preamble.
@@ -551,6 +575,7 @@ fn refsInExpr(expr: *const Ast.Expr, r: *const Resolver.ResolveResult, o: *Refs)
         },
         .try_        => |e| try refsInExpr(e.expr, r, o),
         .tuple_lit   => |e| { for (e.elems) |el| try refsInExpr(el, r, o); },
+        .type_check  => |e| try refsInExpr(e.expr, r, o),
         .this        => o.uses_self = true,  // extension methods: `this` means self is used
         .int_lit, .float_lit, .bool_lit, .char_lit,
         .string_lit, .nil, .zig_lit => {},
@@ -599,6 +624,7 @@ fn collectAllIdents(expr: *const Ast.Expr, set: *std.StringHashMap(void)) anyerr
                                   if (s.start) |b| try collectAllIdents(b, set);
                                   if (s.stop)  |b| try collectAllIdents(b, set); },
         .tuple_lit     => |t|  { for (t.elems)    |e| try collectAllIdents(e, set); },
+        .type_check    => |t|  try collectAllIdents(t.expr, set),
         .list_lit      => |l|  { for (l.elems)    |e| try collectAllIdents(e, set); },
         .array_lit     => |a|  { for (a.elems)    |e| try collectAllIdents(e, set); },
         .dict_lit      => |d|  { for (d.entries) |e| { try collectAllIdents(e.key, set); try collectAllIdents(e.value, set); } },
@@ -888,8 +914,9 @@ fn scanMutationsInExpr(
         .if_expr   => |e| { try scanMutationsInExpr(e.cond, set, tc_opt); try scanMutationsInExpr(e.then_expr, set, tc_opt); try scanMutationsInExpr(e.else_expr, set, tc_opt); },
         .orelse_   => |e| { try scanMutationsInExpr(e.expr, set, tc_opt); try scanMutationsInExpr(e.fallback, set, tc_opt); },
         .catch_    => |e| { try scanMutationsInExpr(e.expr, set, tc_opt); try scanMutationsInExpr(e.fallback, set, tc_opt); },
-        .tuple_lit => |e| { for (e.elems) |el| try scanMutationsInExpr(el, set, tc_opt); },
-        else       => {},
+        .tuple_lit  => |e| { for (e.elems) |el| try scanMutationsInExpr(el, set, tc_opt); },
+        .type_check => |e| try scanMutationsInExpr(e.expr, set, tc_opt),
+        else        => {},
     }
 }
 
@@ -1167,6 +1194,15 @@ const Generator = struct {
             \\    const buf = alloc.alloc(u8, s.len * count) catch @panic("OOM");
             \\    for (0..count) |i| @memcpy(buf[i * s.len ..][0..s.len], s);
             \\    return buf;
+            \\}
+            \\/// FNV-1a 32-bit hash — used as the type-arg component of _type_tag.
+            \\/// Low 32 bits of _ttag_ClassName hold the class hash; high 32 bits
+            \\/// hold the combined type-arg hash for generic instantiations (Phase 3).
+            \\/// Also usable as Symbol.hash for fast string identity comparison.
+            \\fn _zbr_hash(comptime s: []const u8) u32 {
+            \\    comptime var h: u32 = 2166136261;
+            \\    comptime for (s) |c| { h ^= c; h *%= 16777619; };
+            \\    return h;
             \\}
         );
         // ── Result(T, E) — functional error type ──────────────────────────────
@@ -2764,7 +2800,14 @@ const Generator = struct {
 
         const ig = cg.indented();
 
-        // ① Inline mixin members before class members (fields first in Zig
+        // ① Runtime type-tag field — enables `expr is TypeName` and
+        //    `expr is TypeName(T)` checks.  Layout: bits[31:0] = class hash,
+        //    bits[63:32] = type-arg combined hash (0 for non-generic classes).
+        //    The constant `_ttag_ClassName` is emitted after the struct.
+        try ig.writeIndent();
+        try ig.w.print("_type_tag: u64 = _ttag_{s},\n", .{n.name});
+
+        // ② Inline mixin members before class members (fields first in Zig
         //    struct layout).
         for (n.adds) |tr| {
             const mname = typeRefSimpleName(tr) orelse continue;
@@ -2778,7 +2821,42 @@ const Generator = struct {
         // ② Regular class members.
         for (n.members) |decl| try ig.genMember(decl);
 
-        // ③ Interface conformance checks.
+        // ③ Synthetic default init — emitted when no explicit `cue init` is present.
+        //    Without this, a class constructed via `ClassName{}` relies on the field
+        //    default for `_type_tag`, which is fragile.  With this, every class
+        //    always has a clearly-defined `init()` path that explicitly stamps the
+        //    type-tag field regardless of how the struct was allocated.
+        {
+            var has_init = false;
+            for (n.members) |m| {
+                if (m == .init) { has_init = true; break; }
+            }
+            if (!has_init) {
+                outer: for (n.adds) |tr| {
+                    const mname = typeRefSimpleName(tr) orelse continue;
+                    if (g.mixins.get(mname)) |mx| {
+                        for (mx.members) |m| {
+                            if (m == .init) { has_init = true; break :outer; }
+                        }
+                    }
+                }
+            }
+            if (!has_init) {
+                try ig.writeIndent();
+                try ig.w.print("pub fn init() {s} {{\n", .{n.name});
+                const dig = ig.indented();
+                try dig.writeIndent();
+                try dig.w.print("var self: {s} = undefined;\n", .{n.name});
+                try dig.writeIndent();
+                try dig.w.print("self._type_tag = _ttag_{s};\n", .{n.name});
+                try dig.writeIndent();
+                try dig.w.writeAll("return self;\n");
+                try ig.writeIndent();
+                try ig.w.writeAll("}\n\n");
+            }
+        }
+
+        // ④ Interface conformance checks.
         //    `class Foo implements IBar` → `comptime { IBar(@This()); }`
         if (n.implements.len > 0) {
             try ig.w.writeAll("\n");
@@ -2816,6 +2894,11 @@ const Generator = struct {
             }
             defer { for (field_types.items) |s| g.alloc.free(s); field_types.deinit(g.alloc); }
 
+            // Type-tag constant — class hash in the low 32 bits, type-arg hash
+            // in the high 32 bits (always 0 for non-generic classes).
+            // The u64 layout means `is Dog` checks `._type_tag == _ttag_Dog`
+            // with no masking needed for non-generic types.
+            try g.w.print("const _ttag_{s}: u64 = {d};\n", .{ n.name, @as(u64, zbr_hash_str(n.name)) });
             try g.w.print("const _reflect_{s}_name: []const u8 = \"{s}\";\n", .{ n.name, n.name });
 
             try g.w.print("const _reflect_{s}_fields: []const []const u8 = &.{{", .{n.name});
@@ -3331,6 +3414,10 @@ const Generator = struct {
         const bg = mg.indented().withMutated(&mut_set).withClosureVars(&cv_map);
         try bg.writeIndent();
         try bg.w.print("var self: {s} = undefined;\n", .{g.owner});
+        // Initialise the type-ID field so `expr is TypeName` works correctly
+        // even when the struct was allocated with `= undefined`.
+        try bg.writeIndent();
+        try bg.w.print("self._type_tag = _ttag_{s};\n", .{g.owner});
         for (n.params) |p| {
             if (!refs.param_names.contains(p.name)) {
                 try bg.writeIndent();
@@ -3412,6 +3499,7 @@ const Generator = struct {
             .old           => |x| x.span,
             .try_          => |x| x.span,
             .tuple_lit     => |x| x.span,
+            .type_check    => |x| x.span,
         };
     }
 
@@ -6252,6 +6340,62 @@ const Generator = struct {
         // Detect union dispatch: any on-clause has a binding name.
         const is_union = for (s.on) |on| { if (on.binding != null) break true; } else false;
 
+        // Detect string dispatch: any on-value is a string literal.
+        // Zig cannot switch on []const u8 — lower to if / else-if chains instead.
+        const is_string = blk: {
+            for (s.on) |on| {
+                for (on.values) |v| {
+                    if (v.* == .string_lit) break :blk true;
+                }
+            }
+            break :blk false;
+        };
+
+        if (is_string) {
+            // ── String dispatch: lower to if-else-if chain ────────────────────
+            // Hoist subject into a temp so it isn't evaluated N times.
+            try g.writeIndent();
+            const tmp = try std.fmt.allocPrint(g.alloc, "_bs_{x}", .{@intFromPtr(s)});
+            defer g.alloc.free(tmp);
+            try g.w.writeAll("{\n");
+            const bg = g.indented();
+            try bg.writeIndent();
+            try bg.w.print("const {s} = ", .{tmp});
+            try bg.genExpr(s.expr);
+            try bg.w.writeAll(";\n");
+            for (s.on, 0..) |on, ci| {
+                try bg.writeIndent();
+                if (ci > 0) try bg.w.writeAll("} else ");
+                try bg.w.writeAll("if (");
+                for (on.values, 0..) |v, vi| {
+                    if (vi > 0) try bg.w.writeAll(" or ");
+                    try bg.w.print("std.mem.eql(u8, {s}, ", .{tmp});
+                    // Strip the string literal quotes for eql comparison.
+                    if (v.* == .string_lit) {
+                        try bg.genExpr(v);
+                    } else {
+                        try bg.genExpr(v); // int or other literals
+                    }
+                    try bg.w.writeAll(")");
+                }
+                try bg.w.writeAll(") {\n");
+                try bg.indented().genStmts(on.body);
+            }
+            if (s.else_) |eb| {
+                try bg.writeIndent();
+                try bg.w.writeAll("} else {\n");
+                try bg.indented().genStmts(eb);
+            }
+            if (s.on.len > 0) {
+                try bg.writeIndent();
+                try bg.w.writeAll("}\n");
+            }
+            try g.writeIndent();
+            try g.w.writeAll("}\n");
+            return;
+        }
+
+        // ── Standard Zig switch dispatch (integer, enum, union) ──────────────
         try g.writeIndent();
         try g.w.writeAll("switch (");
         try g.genExpr(s.expr);
@@ -6933,6 +7077,18 @@ const Generator = struct {
                 }
                 try g.w.writeAll(" }");
             },
+
+            // `expr is TypeName` — runtime type-tag check.
+            // Non-generic: emits (expr._type_tag == _ttag_TypeName)
+            //   Upper bits of _ttag are 0, so full u64 compare works.
+            // Generic bare check (Phase 3): will emit (expr._type_tag & 0xFFFFFFFF) == _ttag_TypeName
+            // Parameterised (Phase 3): will emit (expr._type_tag == <combined u64 literal>)
+            // Parenthesised so unary `not` and other operators bind correctly.
+            .type_check => |e| {
+                try g.w.writeAll("(");
+                try g.genExpr(e.expr);
+                try g.w.print("._type_tag == _ttag_{s})", .{e.type_name});
+            },
         }
     }
 
@@ -7167,8 +7323,9 @@ const Generator = struct {
                         }
                         try g.w.writeAll(")");
                     } else {
-                        // No `cue init`: emit a zero-initialised struct literal.
-                        try g.w.print("{s}{{}}", .{class_name});
+                        // No explicit `cue init`: call the synthetic default init().
+                        // Every class now has a generated init() that stamps _type_id.
+                        try g.w.print("{s}.init()", .{class_name});
                     }
                     return;
                 }

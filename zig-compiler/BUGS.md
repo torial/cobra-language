@@ -116,7 +116,21 @@ These fail WITH A COMPILER ERROR — that IS the test passing:
 
 ---
 
-*Last updated: 2026-04-09*
+### BUG-012: `_type_id` uninitialized for classes without explicit `cue init` — FIXED
+- **Status:** Fixed 2026-04-10
+- **Was:** Classes with no explicit `cue init` were constructed via `ClassName{}` (struct literal), which sets fields to their defaults. The `_type_id: u32 = _tid_ClassName` field default worked in simple cases but was structurally fragile — any path that bypassed struct-literal construction (e.g., inline Zig `= undefined`) left `_type_id` garbage.
+- **Fix:** `genClass` now checks whether any member (own or mixin) is `.init`. If not, a synthetic default `pub fn init() ClassName` is emitted that explicitly stamps `self._type_id = _tid_ClassName`. The constructor call site was updated to emit `ClassName.init()` instead of `ClassName{}` for classes with no explicit init, so all construction paths go through init().
+
+---
+
+### BUG-013: `collectEnumMembers` — blank-line leaf detection used structural comparison — FIXED
+- **Status:** Fixed 2026-04-10
+- **Was:** `if (kids[1] != .leaf)` in `collectEnumMembers` was a structural assumption about the tree shape — it relied on the fact that blank-line productions always produce `.leaf` nodes, which is an implementation detail of the Earley grammar output format.
+- **Fix:** Replaced with the named helper `isMeaningfulNode(tn: TN) bool` (returns `true` only for `.inner` nodes), co-located with the other tree-node helpers near the bottom of `AstBuilder.zig`. Intent is now explicit: skip everything that isn't a grammar rule reduction.
+
+---
+
+*Last updated: 2026-04-10*
 
 ---
 

@@ -461,6 +461,7 @@ const enum_rules: []const Rule = &.{
     } },
     .{ .lhs = .EnumMemberList, .rhs = &.{ n(.EnumMember) } },
     .{ .lhs = .EnumMemberList, .rhs = &.{ n(.EnumMemberList), n(.EnumMember) } },
+    .{ .lhs = .EnumMemberList, .rhs = &.{ n(.EnumMemberList), t(.eol) } }, // blank lines
     // Plain member: red
     .{ .lhs = .EnumMember,     .rhs = &.{ t(.id), t(.eol) } },
     // Valued member: red = 1

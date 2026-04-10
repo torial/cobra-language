@@ -510,8 +510,10 @@ const Printer = struct {
             .array_lit  => |n| try p.printArrayLit(n.*),
             .all_any    => |n| try p.printAllAny(n.*),
             .old        => |n| { try p.w("(old ", .{}); try p.printExpr(n.expr.*); try p.w(")", .{}); },
-            .zig_lit    => |n| try p.w("(zig {s})", .{n.text}),
-            .try_       => |n| { try p.w("(try ", .{}); try p.printExpr(n.expr.*); try p.w(")", .{}); },
+            .zig_lit     => |n| try p.w("(zig {s})", .{n.text}),
+            .try_        => |n| { try p.w("(try ", .{}); try p.printExpr(n.expr.*); try p.w(")", .{}); },
+            .tuple_lit   => |n| { try p.w("(tuple", .{}); for (n.elems) |el| { try p.w(" ", .{}); try p.printExpr(el.*); } try p.w(")", .{}); },
+            .type_check  => |n| { try p.w("(is ", .{}); try p.printExpr(n.expr.*); try p.w(" {s})", .{n.type_name}); },
         }
     }
 

@@ -1,0 +1,33 @@
+enum Direction
+    north
+    south
+    east
+    west
+
+class Main
+    shared
+        def main
+            var d as Direction = Direction.north
+            branch d
+                on Direction.north
+                    print "north"
+                on Direction.south
+                    print "south"
+                on Direction.east
+                    print "east"
+                on Direction.west
+                    print "west"
+
+            var d2 as Direction = Direction.east
+            branch d2
+                on Direction.east, Direction.west
+                    print "horizontal"
+                else
+                    print "vertical"
+
+            var d3 as Direction = Direction.south
+            branch d3
+                on Direction.north
+                    print "going north"
+                else
+                    print "not north"

@@ -1186,6 +1186,14 @@ const TypeChecker = struct {
                 for (e.elems, elems) |el, *out| out.* = try tc.inferExpr(el);
                 break :blk Type{ .tuple = elems };
             },
+
+            // `expr is TypeName` — always produces bool regardless of TypeName.
+            // TypeName is validated at code-gen time (if it's unknown, codegen
+            // emits a comment rather than crashing).
+            .type_check => |e| blk: {
+                _ = try tc.inferExpr(e.expr);
+                break :blk .bool;
+            },
         };
     }
 
@@ -2073,6 +2081,7 @@ fn spanOf(expr: *const Ast.Expr) Ast.Span {
         .old           => |e| e.span,
         .try_          => |e| e.span,
         .tuple_lit     => |e| e.span,
+        .type_check    => |e| e.span,
     };
 }
 

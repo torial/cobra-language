@@ -1,0 +1,31 @@
+class Dog
+    var name as str
+    var breed as str
+    cue init(n as str, b as str)
+        name = n
+        breed = b
+
+class Cat
+    var name as str
+    cue init(n as str)
+        name = n
+
+class Main
+    shared
+        def main
+            var d = Dog("Rex", "Labrador")
+            var c = Cat("Whiskers")
+
+            # is checks — same-type always true
+            if d is Dog
+                print "d is Dog: true"
+
+            if c is Cat
+                print "c is Cat: true"
+
+            # cross-type is false (different _type_id)
+            if not (d is Cat)
+                print "d is not Cat: correct"
+
+            if not (c is Dog)
+                print "c is not Dog: correct"
