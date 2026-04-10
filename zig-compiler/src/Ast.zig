@@ -97,13 +97,20 @@ pub const Modifiers = packed struct {
 
 // ── Type declarations ─────────────────────────────────────────────────────────
 
+/// A type parameter in a generic class declaration.
+/// `class Stack(T)` → TypeParam{ name="T", constraint=null }
+/// `class PQ(T where T implements Comparable)` → TypeParam{ name="T", constraint="Comparable" }
+pub const TypeParam = struct {
+    name:       []const u8,
+    constraint: ?[]const u8, // interface name the type arg must implement; null = unconstrained
+};
+
 pub const DeclClass = struct {
     span: Span,
     mods: Modifiers,
     name: []const u8,
-    /// Type parameter names for generic classes: `class Stack(T)` → `["T"]`.
-    /// Empty slice for non-generic classes.
-    type_params: []const []const u8,
+    /// Type parameters for generic classes.  Empty slice for non-generic classes.
+    type_params: []const TypeParam,
     /// `implements IFoo, IBar`
     implements: []const TypeRef,
     /// `adds Mixin`
@@ -194,6 +201,9 @@ pub const DeclMethod = struct {
     is_test: bool,
     /// `throws` annotation — method may propagate errors.
     throws: bool,
+    /// Declared at the top level (outside any class/struct).  Callers must not
+    /// prepend `self.` or `ClassName.` when invoking these functions.
+    is_top_level: bool = false,
 };
 
 pub const DeclProperty = struct {
@@ -257,6 +267,9 @@ pub const TypeRef = union(enum) {
     stream: *TypeRef,
     /// `!T` — error union (this operation can fail).
     error_union: *TypeRef,
+    /// `^T` — heap-indirection pointer (breaks recursive struct cycles).
+    /// Type-checked as T; emits `*T` in Zig.
+    ref_to: *TypeRef,
     /// `List<of T>`, `Dictionary<of K, V>`, etc.
     generic: GenericTypeRef,
     /// `void` (explicit return type)
@@ -311,6 +324,7 @@ pub const Stmt = union(enum) {
     try_catch: *StmtTryCatch,     // try eol Block CatchClauseList
     guard: *StmtGuard,            // guard cond else { block | stmt }
     destruct: *StmtDestruct,      // var (x, y) = expr
+    arena_scope: *StmtArenaScope, // arena eol Block — scoped sub-arena
 };
 
 pub const StmtIf = struct {
@@ -404,6 +418,13 @@ pub const StmtDefer = struct {
 pub const StmtWith = struct {
     span: Span,
     target: *Expr,
+    body: []const Stmt,
+};
+
+/// `arena eol Block` — creates a sub-arena backed by the current allocator.
+/// All allocations within the block use the sub-arena; all are freed on block exit.
+pub const StmtArenaScope = struct {
+    span: Span,
     body: []const Stmt,
 };
 

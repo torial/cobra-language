@@ -1,0 +1,41 @@
+# Tests that `arena` blocks compile and run correctly.
+# List.append allocation issues are a separate pre-existing bug.
+
+class Counter
+    var n as int
+    cue init()
+        n = 0
+    def inc
+        n = n + 1
+    def value as int
+        return n
+
+class Main
+    shared
+        def main
+            var x as int = 0
+
+            # arena block: verify it compiles, runs, and exits cleanly
+            arena
+                var c = Counter()
+                c.inc()
+                c.inc()
+                c.inc()
+                x = c.value()
+
+            # x survives (primitive on the stack)
+            assert x == 3
+
+            # nested arena blocks
+            var y as int = 0
+            arena
+                var a = Counter()
+                a.inc()
+                arena
+                    var b = Counter()
+                    b.inc()
+                    b.inc()
+                    y = a.value() + b.value()
+
+            assert y == 3
+            print "arena scope OK"

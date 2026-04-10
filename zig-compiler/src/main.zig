@@ -248,7 +248,7 @@ fn run(src: []const u8, path: []const u8, mode: Mode, gui_backend: CodeGen.GuiBa
     defer bind.deinit();
 
     // ── 5. Resolve (Pass 2) ───────────────────────────────────────────────────
-    var resolve = try Resolver.resolvePass2(module, &bind.table, alloc, alloc);
+    var resolve = try Resolver.resolvePass2(module, &bind.table, alloc, alloc, &imported_modules);
     defer resolve.deinit();
 
     // ── 6. TypeCheck (Pass 3) ─────────────────────────────────────────────────
@@ -268,7 +268,7 @@ fn run(src: []const u8, path: []const u8, mode: Mode, gui_backend: CodeGen.GuiBa
     if (mode == .emit_zig) {
         var buf = std.ArrayList(u8){};
         defer buf.deinit(alloc);
-        _ = try CodeGen.generate(module, &resolve, &tc, alloc, buf.writer(alloc).any(), gui_backend, &native_uses, false);
+        _ = try CodeGen.generate(module, &resolve, &tc, alloc, buf.writer(alloc).any(), gui_backend, &native_uses, false, &imported_modules);
         try std.fs.File.stdout().writeAll(buf.items);
         return 0;
     }
@@ -278,7 +278,7 @@ fn run(src: []const u8, path: []const u8, mode: Mode, gui_backend: CodeGen.GuiBa
     const zig_path = try zigPath(path, alloc);
     defer alloc.free(zig_path);
 
-    return backend(module, &resolve, &tc, zig_path, mode, gui_backend, &native_uses, c_sources.items, emit_exports, release, alloc);
+    return backend(module, &resolve, &tc, zig_path, mode, gui_backend, &native_uses, c_sources.items, emit_exports, release, alloc, &imported_modules);
 }
 
 // ── Partial class merging ─────────────────────────────────────────────────────
@@ -551,6 +551,7 @@ fn compileZbrToZig(
     if (gop.found_existing) return TypeChecker.ModuleInterface{
         .methods = std.StringHashMap(TypeChecker.Type).init(alloc),
         .fields  = std.StringHashMap(TypeChecker.Type).init(alloc),
+        .types   = std.StringHashMap(void).init(alloc),
     };
 
     // ── 1. Read source ────────────────────────────────────────────────────────
@@ -625,7 +626,7 @@ fn compileZbrToZig(
     var bind = try Binder.bindPass1(module, sym_arena.allocator(), alloc);
     defer bind.deinit();
 
-    var resolve = try Resolver.resolvePass2(module, &bind.table, alloc, alloc);
+    var resolve = try Resolver.resolvePass2(module, &bind.table, alloc, alloc, null);
     defer resolve.deinit();
 
     var tc = try TypeChecker.typeCheckPass3(module, &resolve, alloc, alloc, null);
@@ -647,7 +648,7 @@ fn compileZbrToZig(
 
     var buf = std.ArrayList(u8){};
     defer buf.deinit(alloc);
-    _ = try CodeGen.generate(module, &resolve, &tc, alloc, buf.writer(alloc).any(), .stub, &dep_native_uses, false);
+    _ = try CodeGen.generate(module, &resolve, &tc, alloc, buf.writer(alloc).any(), .stub, &dep_native_uses, false, null);
 
     const f = try std.fs.cwd().createFile(zig, .{});
     defer f.close();
@@ -659,23 +660,24 @@ fn compileZbrToZig(
 // ── Backend: emit Zig file + invoke zig compiler ──────────────────────────────
 
 fn backend(
-    module:       Ast.Module,
-    resolve:      *const Resolver.ResolveResult,
-    tc:           *const TypeChecker.TypeCheckResult,
-    zig_path:     []const u8,
-    mode:         Mode,
-    gui_backend:  CodeGen.GuiBackend,
-    native_uses:  *const std.StringHashMap(CodeGen.NativeUse),
-    c_sources:    []const []u8,
-    emit_exports: bool,
-    release:      bool,
-    alloc:        std.mem.Allocator,
+    module:           Ast.Module,
+    resolve:          *const Resolver.ResolveResult,
+    tc:               *const TypeChecker.TypeCheckResult,
+    zig_path:         []const u8,
+    mode:             Mode,
+    gui_backend:      CodeGen.GuiBackend,
+    native_uses:      *const std.StringHashMap(CodeGen.NativeUse),
+    c_sources:        []const []u8,
+    emit_exports:     bool,
+    release:          bool,
+    alloc:            std.mem.Allocator,
+    imported_modules: ?*const std.StringHashMap(TypeChecker.ModuleInterface),
 ) !u8 {
     // Emit Zig source to file.
     const result = blk: {
         var buf = std.ArrayList(u8){};
         defer buf.deinit(alloc);
-        const r = try CodeGen.generate(module, resolve, tc, alloc, buf.writer(alloc).any(), gui_backend, native_uses, emit_exports);
+        const r = try CodeGen.generate(module, resolve, tc, alloc, buf.writer(alloc).any(), gui_backend, native_uses, emit_exports, imported_modules);
         const f = try std.fs.cwd().createFile(zig_path, .{});
         defer f.close();
         try f.writeAll(buf.items);

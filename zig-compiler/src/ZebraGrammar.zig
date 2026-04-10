@@ -64,7 +64,8 @@ pub const NT = enum {
     ImplementsClauseOpt,
     AddsClauseOpt,
     TypeRefListNE,       // comma-separated type references (≥1)
-    TypeParamListNE,     // comma-separated type parameter names (≥1) in class(T, U) decls
+    TypeParam,           // single type parameter: `T` or `T where T implements Interface`
+    TypeParamListNE,     // comma-separated TypeParams (≥1) in class(T, U) decls
     GenericConstruct,    // ClassName(TypeArgs)(ValueArgs) — generic class instantiation
 
     InterfaceDecl,
@@ -182,6 +183,9 @@ pub const NT = enum {
     // ── with contextual-self block ─────────────────────────────────────────
     StmtWith,         // with Expr eol Block
 
+    // ── scoped arena allocation block ─────────────────────────────────────
+    StmtArenaScope,   // arena eol Block
+
     // ── except struct-update expression ───────────────────────────────────
     ExceptFieldList,  // one or more field assignments
     ExceptField,      // id = Expr eol
@@ -287,6 +291,7 @@ const program_rules: []const Rule = &.{
     .{ .lhs = .TopDecl,     .rhs = &.{ n(.AspectDecl) } },
     .{ .lhs = .TopDecl,     .rhs = &.{ n(.WeaveDecl) } },
     .{ .lhs = .TopDecl,     .rhs = &.{ n(.DeclUnion) } },
+    .{ .lhs = .TopDecl,     .rhs = &.{ n(.MethodDecl) } }, // top-level free function
 };
 
 // ── Use directive ─────────────────────────────────────────────────────────────
@@ -366,6 +371,8 @@ const has_rules: []const Rule = &.{
 const type_rules: []const Rule = &.{
     // Error union: !T  (bang prefix)
     .{ .lhs = .TypeRef, .rhs = &.{ t(.bang), n(.TypeRef) } },
+    // Heap-indirection pointer: ^T  (breaks recursive struct size cycles)
+    .{ .lhs = .TypeRef, .rhs = &.{ t(.caret), n(.TypeRef) } },
     // Named types (identifiers and keywords that name types)
     .{ .lhs = .TypeRef, .rhs = &.{ t(.id) } },
     .{ .lhs = .TypeRef, .rhs = &.{ t(.kw_int) } },
@@ -400,9 +407,12 @@ const type_rules: []const Rule = &.{
     .{ .lhs = .TypeRefListNE, .rhs = &.{ n(.TypeRef) } },
     .{ .lhs = .TypeRefListNE, .rhs = &.{ n(.TypeRefListNE), t(.comma), n(.TypeRef) } },
 
-    // Type parameter names in a generic class declaration: class Stack(T) or class Pair(A, B)
-    .{ .lhs = .TypeParamListNE, .rhs = &.{ t(.id) } },
-    .{ .lhs = .TypeParamListNE, .rhs = &.{ n(.TypeParamListNE), t(.comma), t(.id) } },
+    // Single type parameter: plain `T` or constrained `T where T implements Interface`
+    .{ .lhs = .TypeParam, .rhs = &.{ t(.id) } },
+    .{ .lhs = .TypeParam, .rhs = &.{ t(.id), t(.kw_where), t(.id), t(.kw_implements), t(.id) } },
+    // Comma-separated list of type parameters in class(T, U) or class(T where T implements I)
+    .{ .lhs = .TypeParamListNE, .rhs = &.{ n(.TypeParam) } },
+    .{ .lhs = .TypeParamListNE, .rhs = &.{ n(.TypeParamListNE), t(.comma), n(.TypeParam) } },
 };
 
 // ── Class declaration ─────────────────────────────────────────────────────────
@@ -869,6 +879,7 @@ const stmt_rules: []const Rule = &.{
     .{ .lhs = .Stmt, .rhs = &.{ n(.StmtLock) } },
     .{ .lhs = .Stmt, .rhs = &.{ n(.StmtDefer) } },
     .{ .lhs = .Stmt, .rhs = &.{ n(.StmtWith) } },
+    .{ .lhs = .Stmt, .rhs = &.{ n(.StmtArenaScope) } },
     .{ .lhs = .Stmt, .rhs = &.{ n(.StmtRaise) } },
     .{ .lhs = .Stmt, .rhs = &.{ n(.StmtTryCatch) } },
     .{ .lhs = .Stmt, .rhs = &.{ n(.StmtGuard) } },
@@ -928,10 +939,13 @@ const stmt_rules: []const Rule = &.{
     } },
     .{ .lhs = .BranchOnList,   .rhs = &.{ n(.BranchOnClause) } },
     .{ .lhs = .BranchOnList,   .rhs = &.{ n(.BranchOnList), n(.BranchOnClause) } },
+    .{ .lhs = .BranchOnList,   .rhs = &.{ n(.BranchOnList), t(.eol) } }, // blank lines between/after on-clauses
     // Normal block form: on expr_list eol Block
     .{ .lhs = .BranchOnClause, .rhs = &.{ t(.kw_on), n(.ExprListNE), t(.eol), n(.Block) } },
     // Inline form: on expr_list, stmt  (single-statement body on same line via comma)
     .{ .lhs = .BranchOnClause, .rhs = &.{ t(.kw_on), n(.ExprListNE), t(.comma), n(.Stmt) } },
+    // Short return form: on expr return expr eol  (no comma or block needed)
+    .{ .lhs = .BranchOnClause, .rhs = &.{ t(.kw_on), n(.Expr), t(.kw_return), n(.Expr), t(.eol) } },
     // Union binding form: on Expr as id eol Block  (for discriminated union dispatch)
     .{ .lhs = .BranchOnClause, .rhs = &.{ t(.kw_on), n(.Expr), t(.kw_as), t(.id), t(.eol), n(.Block) } },
     .{ .lhs = .BranchElseOpt,  .rhs = &.{} }, // ε
@@ -990,7 +1004,8 @@ const stmt_rules: []const Rule = &.{
     .{ .lhs = .StmtDefer,    .rhs = &.{ t(.kw_errdefer), n(.Stmt) } },
 
     // with obj eol Block — contextual self
-    .{ .lhs = .StmtWith, .rhs = &.{ t(.kw_with), n(.Expr), t(.eol), n(.Block) } },
+    .{ .lhs = .StmtWith,       .rhs = &.{ t(.kw_with),  n(.Expr), t(.eol), n(.Block) } },
+    .{ .lhs = .StmtArenaScope, .rhs = &.{ t(.kw_arena), t(.eol), n(.Block) } },
 
     // guard Expr else eol Block     — block form: guard x > 0 else\n    return
     // guard Expr else, Stmt         — inline form: guard x > 0 else, return

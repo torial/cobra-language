@@ -1,0 +1,79 @@
+# Probe 3: use comma form for branch on-clauses
+
+union TokenKind
+    ident
+    number
+    plus
+    eof
+
+class Span
+    var line as int
+    var col  as int
+    cue init(l as int, c as int)
+        line = l
+        col  = c
+
+class Token
+    var kind as TokenKind
+    var text as str
+    var span as Span
+    cue init(k as TokenKind, t as str, l as int, c as int)
+        kind = k
+        text = t
+        span = Span(l, c)
+
+class Diag
+    var message as str
+    var line    as int
+    var col     as int
+    cue init(msg as str, l as int, c as int)
+        message = msg
+        line    = l
+        col     = c
+    def show as str
+        return message
+
+class Helper
+    shared
+        def kindName(k as TokenKind) as str
+            branch k
+                on TokenKind.ident,  return "ident"
+                on TokenKind.number, return "number"
+                on TokenKind.plus,   return "plus"
+                on TokenKind.eof,    return "eof"
+
+class Lexer
+    var tokens as List(Token)
+    var pos    as int
+
+    cue init()
+        tokens = List()
+        pos = 0
+
+    def push(k as TokenKind, t as str, l as int, c as int)
+        tokens.append(Token(k, t, l, c))
+
+    def peek as TokenKind
+        if pos < tokens.len
+            return tokens[pos].kind
+        return TokenKind.eof()
+
+    def advance as Token
+        var t = tokens[pos]
+        pos = pos + 1
+        return t
+
+class Main
+    shared
+        def main
+            var t = Token(TokenKind.ident(), "foo", 1, 0)
+            assert t.text == "foo"
+            assert t.span.line == 1
+
+            assert Helper.kindName(TokenKind.plus()) == "plus"
+            assert Helper.kindName(TokenKind.eof())  == "eof"
+
+            var d = Diag("unexpected token", 3, 7)
+            assert d.show() == "unexpected token"
+
+            print "self-hosting probe OK"

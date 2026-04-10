@@ -1,0 +1,86 @@
+# Test ^T heap-indirection type for recursive/self-referential structures.
+# A singly-linked list node where `next` points to another Node.
+
+class Node
+    var value as int
+    var next  as ^Node?
+
+    cue init(v as int)
+        value = v
+        next = nil
+
+# Pair uses non-optional ^T to test cross-class field boxing
+# (the least-confident scenario: `obj.field = x` where field: ^T
+# and obj is a different class than the one being generated).
+class Pair
+    var a as int
+    var b as int
+    cue init(pa as int, pb as int)
+        a = pa
+        b = pb
+
+class PairHolder
+    var p as ^Pair
+    cue init(pair as Pair)
+        p = pair
+
+class Tree
+    var value as int
+    var left  as ^Tree?
+    var right as ^Tree?
+
+    cue init(v as int)
+        value = v
+        left  = nil
+        right = nil
+
+class Main
+    shared
+        def main
+            # Build from deepest first so each boxing captures the correct state.
+            # ^T boxing copies by value at assignment time — deeper links must be
+            # set before the node is boxed into its parent.
+            var c = Node(3)     # leaf
+
+            var b = Node(2)
+            b.next = c          # link b → c *before* boxing b
+
+            var a = Node(1)
+            a.next = b          # link a → b (boxes current b, which has next → c)
+
+            assert a.value == 1
+
+            # Traverse the chain
+            var n = a.next
+            assert n != nil
+            assert n?.value == 2
+
+            var n2 = n?.next
+            assert n2 != nil
+            assert n2?.value == 3
+
+            # Nested ^T? assignment: set children on an object that's already
+            # reached via a member access (tests nested boxing path).
+            var leaf_l = Tree(10)
+            var leaf_r = Tree(20)
+            var root   = Tree(5)
+            root.left  = leaf_l
+            root.right = leaf_r
+
+            assert root.value == 5
+            var rl = root.left
+            assert rl != nil
+            assert rl?.value == 10
+            var rr = root.right
+            assert rr != nil
+            assert rr?.value == 20
+
+            # Non-optional ^T field: `holder.p = pair` where p: ^Pair is
+            # declared in PairHolder, not in Main.  Tests the cross-class
+            # TC-based boxing path (the "least confident" scenario).
+            var pair  = Pair(7, 13)
+            var holder = PairHolder(pair)
+            assert holder.p.a == 7
+            assert holder.p.b == 13
+
+            print "recursive_type_test OK"

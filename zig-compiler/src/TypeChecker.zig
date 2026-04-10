@@ -113,6 +113,13 @@ pub const Type = union(enum) {
     /// `(T1, T2, …)` — tuple with ordered element types.
     tuple: []const Type,
 
+    // ── Cross-module instances ────────────────────────────────────────────────
+    /// An instance of a user-defined type from an imported module.
+    /// Stored as `(module_alias, type_name)` string slices — no Symbol pointers,
+    /// so this is safe to keep in `TypeCheckResult.expr_types` across compilation
+    /// boundaries.  The slices point into the `imported_modules` key arena.
+    cross_module: struct { module: []const u8, type_name: []const u8 },
+
     // ── Special ───────────────────────────────────────────────────────────────
     /// Cannot determine type: upstream error or unsupported construct.
     /// Suppresses further cascading errors.
@@ -166,6 +173,11 @@ pub const Type = union(enum) {
                     for (ea, eb) |ta, tb| if (!ta.eql(tb)) break :blk false;
                     break :blk true;
                 },
+                else => false,
+            },
+            .cross_module   => |cm_a| switch (b) {
+                .cross_module => |cm_b| std.mem.eql(u8, cm_a.module, cm_b.module) and
+                                        std.mem.eql(u8, cm_a.type_name, cm_b.type_name),
                 else => false,
             },
             .unknown        => b == .unknown,
@@ -235,6 +247,7 @@ pub const Type = union(enum) {
             .csv_row        => "CsvRow",
             .optional       => "?T",
             .tuple          => "tuple",
+            .cross_module   => |cm| cm.type_name,
             .unknown        => "<unknown>",
         };
     }
@@ -273,6 +286,9 @@ pub const ModuleInterface = struct {
     methods: std.StringHashMap(Type),
     /// Field / property types: "ClassName.fieldName" → Type
     fields:  std.StringHashMap(Type),
+    /// Exported type names: class, struct, enum, union names declared at top level.
+    /// Used by the Resolver to recognise cross-module TypeRefs like `Ast.Expr`.
+    types:   std.StringHashMap(void),
 
     pub fn deinit(self: *ModuleInterface) void {
         const alloc = self.methods.allocator;
@@ -282,6 +298,9 @@ pub const ModuleInterface = struct {
         var fk = self.fields.keyIterator();
         while (fk.next()) |k| alloc.free(k.*);
         self.fields.deinit();
+        var tk = self.types.keyIterator();
+        while (tk.next()) |k| alloc.free(k.*);
+        self.types.deinit();
     }
 };
 
@@ -299,9 +318,11 @@ pub fn extractModuleInterface(
     errdefer methods.deinit();
     var fields = std.StringHashMap(Type).init(alloc);
     errdefer fields.deinit();
+    var types = std.StringHashMap(void).init(alloc);
+    errdefer types.deinit();
 
-    try extractFromDecls(module.decls, resolve, alloc, &methods, &fields);
-    return .{ .methods = methods, .fields = fields };
+    try extractFromDecls(module.decls, resolve, alloc, &methods, &fields, &types);
+    return .{ .methods = methods, .fields = fields, .types = types };
 }
 
 fn extractFromDecls(
@@ -310,11 +331,28 @@ fn extractFromDecls(
     alloc:   Allocator,
     methods: *std.StringHashMap(Type),
     fields:  *std.StringHashMap(Type),
+    types:   *std.StringHashMap(void),
 ) !void {
     for (decls) |decl| switch (decl) {
-        .class  => |c| try extractFromMembers(c.name, c.members, resolve, alloc, methods, fields),
-        .struct_ => |s| try extractFromMembers(s.name, s.members, resolve, alloc, methods, fields),
-        .namespace => |ns| try extractFromDecls(ns.decls, resolve, alloc, methods, fields),
+        .class  => |c| {
+            const key = try alloc.dupe(u8, c.name);
+            try types.put(key, {});
+            try extractFromMembers(c.name, c.members, resolve, alloc, methods, fields);
+        },
+        .struct_ => |s| {
+            const key = try alloc.dupe(u8, s.name);
+            try types.put(key, {});
+            try extractFromMembers(s.name, s.members, resolve, alloc, methods, fields);
+        },
+        .enum_ => |e| {
+            const key = try alloc.dupe(u8, e.name);
+            try types.put(key, {});
+        },
+        .union_ => |u| {
+            const key = try alloc.dupe(u8, u.name);
+            try types.put(key, {});
+        },
+        .namespace => |ns| try extractFromDecls(ns.decls, resolve, alloc, methods, fields, types),
         else => {},
     };
 }
@@ -383,6 +421,8 @@ fn simpleTypeFromRef(
                 out.* = simpleTypeFromRef(el, resolve, alloc);
             break :blk Type{ .tuple = elems };
         },
+        // ^T — heap-indirection: type-check as inner type.
+        .ref_to => |inner| simpleTypeFromRef(inner, resolve, alloc),
         // Compound types deferred.
         .stream, .error_union, .generic, .same => .unknown,
     };
@@ -997,7 +1037,8 @@ const TypeChecker = struct {
             .expr     => |e| _ = try tc.inferExpr(e),
             .contract => |s| { for (s.exprs) |e| _ = try tc.inferExpr(e); },
             .defer_   => |s| try tc.checkStmt(s.body),
-            .with     => |s| { _ = try tc.inferExpr(s.target); try tc.checkStmts(s.body); },
+            .with        => |s| { _ = try tc.inferExpr(s.target); try tc.checkStmts(s.body); },
+            .arena_scope => |s| try tc.checkStmts(s.body),
             .var_except    => |s| { _ = try tc.inferExpr(s.base); for (s.fields) |f| _ = try tc.inferExpr(f.value); },
             .assign_except => |s| { _ = try tc.inferExpr(s.target); _ = try tc.inferExpr(s.base); for (s.fields) |f| _ = try tc.inferExpr(f.value); },
             .raise    => |s| {
@@ -1293,12 +1334,30 @@ const TypeChecker = struct {
             if (std.mem.eql(u8, e.member, "stdout"))    return .string;
             if (std.mem.eql(u8, e.member, "stderr"))    return .string;
         }
+        // If the object is an optional type (e.g. after `n?.next` where n is `?Node`),
+        // strip the optional wrapper and look up the member on the inner type.
+        // This lets the TC correctly infer member types through optional chains.
+        const resolved_obj_type = if (obj_type == .optional) obj_type.optional.* else obj_type;
         // Look up the member name in the object type's own scope.
-        if (obj_type == .named) {
-            const sym = obj_type.named;
+        if (resolved_obj_type == .named) {
+            const sym = resolved_obj_type.named;
             if (sym.own_scope) |scope| {
                 if (scope.lookupLocal(e.member)) |member_sym| {
                     return tc.symbolType(member_sym);
+                }
+            }
+        }
+        // Cross-module instance field/method access: point.x / point.show()
+        // where `point` is a `.cross_module` type (e.g. `crossmod_types_lib.Point`).
+        if (resolved_obj_type == .cross_module) {
+            const cm = resolved_obj_type.cross_module;
+            if (tc.imported_modules) |imp| {
+                if (imp.get(cm.module)) |iface| {
+                    const key = try std.fmt.allocPrint(tc.map_alloc,
+                        "{s}.{s}", .{ cm.type_name, e.member });
+                    defer tc.map_alloc.free(key);
+                    if (iface.fields.get(key))  |t| return t;
+                    if (iface.methods.get(key)) |t| return t;
                 }
             }
         }
@@ -1427,7 +1486,20 @@ const TypeChecker = struct {
                 if (tc.resolve.exprs.get(&e.callee.ident)) |sym| {
                     if (sym.kind == .class) {
                         const arg_types = try tc.map_alloc.alloc(Type, e.type_args.len);
-                        for (e.type_args, arg_types) |ta, *at| at.* = tc.typeFromRef(&ta);
+                        for (e.type_args, arg_types) |*ta, *at| at.* = tc.typeFromRef(ta);
+                        // Check `where` constraints: each type arg must satisfy its constraint.
+                        if (sym.decl == .class) {
+                            const cls = sym.decl.class;
+                            for (cls.type_params, arg_types) |tp, arg_t| {
+                                if (tp.constraint) |iface| {
+                                    if (!tc.typeImplements(arg_t, iface)) {
+                                        try tc.emitError(e.callee.ident.span,
+                                            "type argument does not implement `{s}` (required by `{s}({s})`)",
+                                            .{ iface, sym.name, tp.name });
+                                    }
+                                }
+                            }
+                        }
                         return Type{ .generic_named = .{ .sym = sym, .args = arg_types } };
                     }
                 }
@@ -1608,6 +1680,7 @@ const TypeChecker = struct {
                     return .void_;
                 }
                 // Cross-module call: Math.square(5) where `use Math` imported a dep.
+                // Also handles cross-module constructors: crossmod_types_lib.Point(3, 4).
                 // Detected by the receiver being a bare ident whose symbol kind is .module.
                 if (mem.object.* == .ident) {
                     const mod_sym_opt: ?*const Symbol = switch (mem.object.*) {
@@ -1618,6 +1691,14 @@ const TypeChecker = struct {
                         _ = try tc.inferExpr(mem.object);
                         if (tc.imported_modules) |imp| {
                             if (imp.get(mod_sym.name)) |iface| {
+                                // Constructor call: ModAlias.TypeName(…) → cross_module instance.
+                                if (iface.types.contains(mem.member)) {
+                                    return Type{ .cross_module = .{
+                                        .module    = mod_sym.name,
+                                        .type_name = mem.member,
+                                    }};
+                                }
+                                // Free function / static method call: look up return type.
                                 const key = try std.fmt.allocPrint(tc.map_alloc,
                                     "{s}.{s}", .{ mod_sym.name, mem.member });
                                 defer tc.map_alloc.free(key);
@@ -1652,6 +1733,20 @@ const TypeChecker = struct {
                                 }
                                 return tc.symbolType(member_sym);
                             }
+                        }
+                    }
+                }
+                // Cross-module instance method call: point.show() / point.distFromOrigin()
+                // where `point` has type `.cross_module`.
+                if (obj_type == .cross_module) {
+                    const cm = obj_type.cross_module;
+                    if (tc.imported_modules) |imp| {
+                        if (imp.get(cm.module)) |iface| {
+                            const key = try std.fmt.allocPrint(tc.map_alloc,
+                                "{s}.{s}", .{ cm.type_name, mem.member });
+                            defer tc.map_alloc.free(key);
+                            if (iface.methods.get(key)) |ret| return ret;
+                            if (iface.fields.get(key))  |ret| return ret;
                         }
                     }
                 }
@@ -2091,7 +2186,26 @@ const TypeChecker = struct {
             .named => |*n| blk: {
                 const resolved = tc.resolve.types.get(n) orelse break :blk .unknown;
                 break :blk switch (resolved) {
-                    .builtin => builtinType(n.name),
+                    .builtin => blk2: {
+                        const t = builtinType(n.name);
+                        if (t != .unknown) break :blk2 t;
+                        // Cross-module TypeRef: "ModAlias.TypeName" — look up in imported_modules.
+                        if (std.mem.indexOfScalar(u8, n.name, '.')) |dot| {
+                            const mod       = n.name[0..dot];
+                            const type_name = n.name[dot+1..];
+                            if (tc.imported_modules) |imp| {
+                                if (imp.get(mod)) |iface| {
+                                    if (iface.types.contains(type_name)) {
+                                        break :blk2 Type{ .cross_module = .{
+                                            .module    = mod,
+                                            .type_name = type_name,
+                                        }};
+                                    }
+                                }
+                            }
+                        }
+                        break :blk2 .unknown;
+                    },
                     .symbol  => |s| if (s.kind == .type_param) .unknown else .{ .named = s },
                 };
             },
@@ -2101,6 +2215,8 @@ const TypeChecker = struct {
                 boxed.* = inner_type;
                 break :blk Type{ .optional = boxed };
             },
+            // ^T — heap-indirection: type-check as the inner type (pointer is a codegen detail).
+            .ref_to => |inner| tc.typeFromRef(inner),
             // Compound types deferred to a later pass.
             .stream, .error_union, .generic => .unknown,
             .void_ => .void_,
@@ -2135,8 +2251,8 @@ const TypeChecker = struct {
                     .symbol  => |s| {
                         if (s.kind == .type_param) {
                             // Match param name to index, return concrete arg type.
-                            for (cls.type_params, 0..) |pname, i| {
-                                if (std.mem.eql(u8, pname, n.name))
+                            for (cls.type_params, 0..) |tp, i| {
+                                if (std.mem.eql(u8, tp.name, n.name))
                                     return if (i < args.len) args[i] else .unknown;
                             }
                             return .unknown;
@@ -2151,11 +2267,61 @@ const TypeChecker = struct {
                 boxed.* = inner_t;
                 return Type{ .optional = boxed };
             },
+            .ref_to  => |inner| return tc.substituteTypeParam(inner, cls, args),
             .generic => return .unknown,  // nested generics (e.g., List(T)) — not yet substituted
             .void_   => return .void_,
             .same    => return if (tc.owner_sym) |s| Type{ .named = s } else .unknown,
             else     => return .unknown,
         }
+    }
+
+    // ── Where-constraint checking ─────────────────────────────────────────────
+
+    /// Returns true if `t` satisfies the constraint `implements InterfaceName`.
+    ///
+    /// Rules:
+    ///   • Built-in orderable/comparable types (int, uint, float, str, bool, char)
+    ///     implicitly satisfy `Comparable`.
+    ///   • A user class satisfies the constraint if its `implements` list contains
+    ///     a TypeRef whose name matches `iface_name`, directly or transitively.
+    ///   • All types satisfy `Any` (escape hatch).
+    fn typeImplements(tc: TypeChecker, t: Type, iface_name: []const u8) bool {
+        if (std.mem.eql(u8, iface_name, "Any")) return true;
+        return switch (t) {
+            // Numeric/ordinal primitives intrinsically satisfy Comparable.
+            // bool and string are excluded: they have no declared compareTo contract.
+            .int, .uint, .float, .char,
+            .int_n, .uint_n, .float_n => std.mem.eql(u8, iface_name, "Comparable"),
+            .named         => |sym| tc.symbolImplements(sym, iface_name, 16),
+            .generic_named => |gn|  tc.symbolImplements(gn.sym, iface_name, 16),
+            else => false,
+        };
+    }
+
+    /// DFS through the implements hierarchy, depth-limited to `budget` to guard
+    /// against cycles.  Returns true if `sym` directly or transitively satisfies
+    /// `iface_name`.
+    fn symbolImplements(tc: TypeChecker, sym: *const Symbol, iface_name: []const u8, budget: u8) bool {
+        if (budget == 0) return false;
+        const impls: []const Ast.TypeRef = switch (sym.decl) {
+            .class     => |c| c.implements,
+            .interface => |i| i.implements,
+            .struct_   => |s| s.implements,
+            else       => return false,
+        };
+        for (impls, 0..) |_, idx| {
+            const tr = &impls[idx]; // stable arena pointer
+            if (tr.* != .named) continue;
+            // Direct match.
+            if (std.mem.eql(u8, tr.named.name, iface_name)) return true;
+            // Transitive: resolve the interface and recurse.
+            if (tc.resolve.types.get(&tr.named)) |resolved| {
+                if (resolved == .symbol) {
+                    if (tc.symbolImplements(resolved.symbol, iface_name, budget - 1)) return true;
+                }
+            }
+        }
+        return false;
     }
 
     // ── Diagnostics ───────────────────────────────────────────────────────────

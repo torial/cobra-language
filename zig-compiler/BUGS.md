@@ -130,6 +130,79 @@ These fail WITH A COMPILER ERROR — that IS the test passing:
 
 ---
 
+### BUG-014: Regex lazy match is global, not per-quantifier
+- **Severity:** Medium
+- **Status:** Open — architectural limitation
+- **Symptom:** In a pattern mixing lazy and greedy quantifiers (e.g., `<.*?>.*>`), the global `lazy_match` flag makes ALL quantifiers lazy, so `<.*?>.*>` on `<a><b>` returns `<a>` instead of `<a><b>`.
+  - Simple lazy patterns `<.*?>` work correctly.
+  - Mixed patterns `<.*?>STUFF.*>` misbehave.
+- **Root cause:** The current Thompson NFA passes a global `shortest: bool` to `matchAt`. When ANY `*?`/`+?`/`??` is parsed, `flags.lazy_match = true` is set for the whole regex. The `out1`/`out2` ordering in split nodes DOES encode per-quantifier preference, but `shortest=true` causes the match loop to exit at the FIRST match found, which overrides the greedy `.*` that should extend further.
+- **Fix (architectural):** Requires either:
+  1. A priority-first NFA simulation (track thread priorities; when multiple threads reach match, highest-priority wins based on `out1`/`out2` ordering path) — complex to implement
+  2. A backtracking regex engine — simpler but worst-case O(2^n)
+- **Workaround:** For patterns needing mixed lazy/greedy, split into multiple regex calls or restructure the pattern.
+
+---
+
+### BUG-015: `scanMutationsInto` missing `.assert` case — FIXED
+- **Status:** Fixed 2026-04-10
+- **Was:** `scanMutationsInto` handled `.var_`, `.expr`, `.print`, etc. but had no `.assert` case. Method calls on user-defined types inside `assert` conditions (e.g., `assert d.show() == "x"`) were never scanned. The mutation scanner's conservative rule ("any method call on a `.named` type marks the receiver as `var`") never fired for assert conditions, so the receiver was emitted `const`. Then Zig rejected passing `*const Diag` to a method taking `*Diag`.
+- **Fix:** Added `.assert => |s| try scanMutationsInExpr(s.cond, set, tc_opt)` to `scanMutationsInto`.
+- **Found by:** Self-hosting probe (`test/selfhost_probe.zbr`) — `assert d.show() == "..."` triggered it.
+
+---
+
+### LANG-001: Top-level `def` not supported — FIXED 2026-04-10
+- **Status:** Fixed
+- **Was:** `def kindName(k as TokenKind) as str` at top level (outside any class) was a syntax error. `TopDecl` didn't include `MethodDecl`.
+- **Fix:**
+  - `ZebraGrammar.zig`: Added `TopDecl → MethodDecl` production.
+  - `AstBuilder.zig`: Added `MethodDecl` case in `buildTopDecl`, setting `is_top_level = true` on the resulting `DeclMethod`.
+  - `Ast.zig`: Added `is_top_level: bool = false` field to `DeclMethod`.
+  - `CodeGen.zig`: In the bare-ident-call path (for calls within class methods), `is_top_level` methods skip the `self.` / `ClassName.` prefix and call directly by name.
+  - Binder, Resolver, TypeChecker, and `genTopDecl` already handled top-level `method` decls.
+
+---
+
+### LANG-002: `on X return Y` inline form and blank-line sensitivity — FIXED 2026-04-10
+- **Status:** Fixed
+- **Was (a):** `on X  return Y` (no comma, inline return) failed to parse. `on X, return Y` (comma + return) also failed because `StmtReturn → kw_return Expr eol` requires a trailing `eol`, making `return` incompatible with the inline `on X, Stmt` production when `Stmt` doesn't include its own eol.
+- **Was (b):** The inline comma form (`on X, return Y`) silently broke with a blank line after the last on-clause because the blank line emitted a bare `eol` token that landed inside `StmtBranch`'s expected `dedent`.
+- **Fix (a):** Added `BranchOnClause → kw_on Expr kw_return Expr eol` production to `ZebraGrammar.zig`. `AstBuilder.buildBranchOnClause` detects this as `kids.len == 5 and kids[2] == kw_return` and wraps the return value in a synthetic `StmtReturn`. Now `on TokenKind.ident return "ident"` is valid syntax.
+- **Fix (b):** Added `BranchOnList → BranchOnList eol` production. `collectBranchOnList` skips blank-line nodes (checking `isLeafKind(kids[1], .eol)`).
+- **Verified:** `test/selfhost_probe.zbr` uses native top-level `def` + `on X return Y` syntax and passes.
+
+### BUG-016: `inferMember` didn't unwrap optional type before member lookup — FIXED
+- **Status:** Fixed 2026-04-10
+- **Was:** `inferMember` only looked up fields/methods when `obj_type == .named`. For chained optional accesses like `n?.next` (where `n: ?Node`), the TC type of `n` passed to `inferMember` was `.optional(.named(Node))` — not `.named`. The member lookup silently returned `.unknown`. Local vars initialised from such accesses (`var n2 = n?.next`) then had `.unknown` declared type, so the `optional_unwraps` check for `n2?` failed and CodeGen emitted `try n2.field` (error-propagation) instead of `n2.?.field` (optional-unwrap).
+- **Fix:** Added `resolved_obj_type = if (obj_type == .optional) obj_type.optional.* else obj_type` before the `.named` member lookup. The `generic_named` branch was not affected (it already has its own path).
+- **Found by:** Recursive type test (`test/recursive_type_test.zbr`) — `n2?.value` where `n2` was inferred from a chained optional access.
+
+---
+
+### LANG-003: `^T` heap-indirection type for recursive structs — ADDED 2026-04-10
+- **Status:** Implemented
+- **What:** `var next as ^Node?` declares a heap-allocated pointer to `Node?`, breaking Zig's recursive struct size cycle. `^T` emits `*T` in Zig; `^T?` emits `?*T`. Type-checked as `T` (the pointer is a codegen detail only).
+- **Auto-boxing:** Assignments like `a.next = b` where `a.next` is `^Node?` auto-box `b`: emits `{ const _rp = _allocator.create(Node) catch ...; _rp.* = b; a.next = _rp; }`. Value-copy semantics: the snapshot at boxing time is what's stored; later mutations to the original don't propagate to the boxed copy.
+- **Test:** `test/recursive_type_test.zbr`
+
+---
+
+### LANG-004: Cross-module TypeRef resolution — ADDED 2026-04-10, EXTENDED 2026-04-10
+- **Status:** Implemented (extended from MVP to full TC inference)
+- **What:** `var x as Mod.TypeName` in a file that `use Mod` now resolves correctly. `Mod.TypeName(args)` constructor calls return TC type `.cross_module` (not `.unknown`) so method calls on the result are fully typed. String methods on cross-module instances now correctly use `std.mem.eql` instead of raw `==`.
+- **How:** `ModuleInterface` tracks exported type names; `Resolver` handles dotted names; `TypeChecker` added `.cross_module { module, type_name }` Type variant returned by `typeFromRef` for cross-module TypeRefs and by `inferCall` for cross-module constructor calls; `inferMember`/`inferCall` look up field/method types in `imported_modules` when `obj_type == .cross_module`. Library modules now export `_initAllocator` and root `main` propagates its allocator to all imported modules.
+- **Limitation:** Nested/chained cross-module method return types (e.g. `a.crossMod().method()`) still resolve to `.unknown`. Full cross-module generic type propagation is future work.
+- **Test:** `test/crossmod_types_test.zbr` — now includes `assert p.show() == "(3, 4)"` and `assert s.label() == "(0, 0) to (3, 4)"`.
+
+### LANG-005: `^T` auto-boxing for cross-class field assignments — FIXED 2026-04-10
+- **Status:** Fixed
+- **What:** `^T` (non-optional heap-indirection) field boxing via `ref_box_type_name` now works when the target field belongs to a different class than the one being generated. Previously `resolveFieldTypeRef` only searched `owner_class` which was only set for generic classes.
+- **Fix:**
+  1. `genClass` now uses `withClass(n)` (new helper) instead of `withOwner(n.name)`, so `owner_class` is set for ALL concrete classes.
+  2. `ref_box_type_name` extended: for `localVar.field = x` targets, after searching `owner_class`, falls back to looking up the field via the TC type of the object. For nested `a.b.field = x`, looks up `field` in the declared type of `a.b`.
+- **Test:** `test/recursive_type_test.zbr` — `PairHolder` test with non-optional `^Pair` field.
+
 *Last updated: 2026-04-10*
 
 ---

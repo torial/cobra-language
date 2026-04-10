@@ -1,0 +1,94 @@
+# Self-hosting probe: tests compiler-writing patterns in Zebra.
+# Each section attempts something a Zebra compiler would need.
+# All patterns in this file should pass.
+
+# ── 1. Simple enum (union) for token kinds ───────────────────────────────────
+
+union TokenKind
+    ident
+    number
+    plus
+    eof
+
+# ── 2. Token struct with span ────────────────────────────────────────────────
+
+class Span
+    var line as int
+    var col  as int
+    cue init(l as int, c as int)
+        line = l
+        col  = c
+
+class Token
+    var kind as TokenKind
+    var text as str
+    var span as Span
+    cue init(k as TokenKind, t as str, l as int, c as int)
+        kind = k
+        text = t
+        span = Span(l, c)
+
+# ── 3. A diagnostic type ─────────────────────────────────────────────────────
+
+class Diag
+    var message as str
+    var line    as int
+    var col     as int
+    cue init(msg as str, l as int, c as int)
+        message = msg
+        line    = l
+        col     = c
+    def show as str
+        return message
+
+# ── 4. Branch dispatch — top-level free function with inline return syntax ───
+
+def kindName(k as TokenKind) as str
+    branch k
+        on TokenKind.ident  return "ident"
+        on TokenKind.number return "number"
+        on TokenKind.plus   return "plus"
+        on TokenKind.eof    return "eof"
+
+# ── 5. A minimal tokenizer (list of tokens) ──────────────────────────────────
+
+class Lexer
+    var tokens as List(Token)
+    var pos    as int
+
+    cue init()
+        tokens = List()
+        pos = 0
+
+    def push(k as TokenKind, t as str, l as int, c as int)
+        tokens.append(Token(k, t, l, c))
+
+    def peek as TokenKind
+        if pos < tokens.len
+            return tokens[pos].kind
+        return TokenKind.eof()
+
+    def advance as Token
+        var t = tokens[pos]
+        pos = pos + 1
+        return t
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+class Main
+    shared
+        def main
+            # Token round-trip
+            var t = Token(TokenKind.ident(), "foo", 1, 0)
+            assert t.text == "foo"
+            assert t.span.line == 1
+
+            # Top-level free function dispatch
+            assert kindName(TokenKind.plus()) == "plus"
+            assert kindName(TokenKind.eof())  == "eof"
+
+            # Diagnostic
+            var d = Diag("unexpected token", 3, 7)
+            assert d.show() == "unexpected token"
+
+            print "self-hosting probe OK"

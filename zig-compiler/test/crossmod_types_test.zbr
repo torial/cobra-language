@@ -1,0 +1,29 @@
+# Cross-module type test: use a type defined in another module as a field type.
+
+use crossmod_types_lib
+
+class Segment
+    var start as crossmod_types_lib.Point
+    var end_  as crossmod_types_lib.Point
+
+    cue init(sx as int, sy as int, ex as int, ey as int)
+        start = crossmod_types_lib.Point(sx, sy)
+        end_  = crossmod_types_lib.Point(ex, ey)
+
+    def label as str
+        return "${start.show()} to ${end_.show()}"
+
+class Main
+    shared
+        def main
+            var p = crossmod_types_lib.Point(3, 4)
+            assert p.x == 3
+            assert p.y == 4
+            assert p.show() == "(3, 4)"
+
+            var s = Segment(0, 0, 3, 4)
+            assert s.start.x == 0
+            assert s.end_.x == 3
+            assert s.label() == "(0, 0) to (3, 4)"
+
+            print "crossmod_types_test OK"

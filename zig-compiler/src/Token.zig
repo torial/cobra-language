@@ -218,6 +218,7 @@ pub const TokenKind = enum {
     kw_body,
     kw_shared,
     kw_invariant,
+    kw_where,
 
     // Modifiers
     kw_abstract,
@@ -296,6 +297,9 @@ pub const TokenKind = enum {
 
     // Discriminated union types
     kw_union,     // union type declaration
+
+    // Scoped arena allocation
+    kw_arena,     // arena block — creates a sub-arena that frees all allocations on exit
 
     // Guard statements
     kw_guard,     // guard cond else stmt/block — early-exit pattern
@@ -400,6 +404,8 @@ pub const keyword_map = std.StaticStringMap(TokenKind).initComptime(.{
     .{ "raise",       .kw_raise  },
     .{ "throws",      .kw_throws },
     .{ "try",         .kw_try    },
+    .{ "where",       .kw_where  },
+    .{ "arena",       .kw_arena  },
 });
 
 // ── Token (source-annotated) ──────────────────────────────────────────────────

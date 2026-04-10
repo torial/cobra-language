@@ -124,14 +124,15 @@ pub const GenerateResult = struct {
 ///                    are native `.zig` or `.c` files (not compiled from Zebra).
 ///                    Pass `null` when all deps are Zebra-compiled.
 pub fn generate(
-    module:       Ast.Module,
-    resolve:      *const Resolver.ResolveResult,
-    tc:           ?*const TypeChecker.TypeCheckResult,
-    alloc:        Allocator,
-    writer:       std.io.AnyWriter,
-    gui_backend:  GuiBackend,
-    native_uses:  ?*const std.StringHashMap(NativeUse),
-    emit_exports: bool,
+    module:           Ast.Module,
+    resolve:          *const Resolver.ResolveResult,
+    tc:               ?*const TypeChecker.TypeCheckResult,
+    alloc:            Allocator,
+    writer:           std.io.AnyWriter,
+    gui_backend:      GuiBackend,
+    native_uses:      ?*const std.StringHashMap(NativeUse),
+    emit_exports:     bool,
+    imported_modules: ?*const std.StringHashMap(TypeChecker.ModuleInterface),
 ) anyerror!GenerateResult {
     var mixins = try collectMixins(module, alloc);
     defer mixins.deinit();
@@ -149,16 +150,17 @@ pub fn generate(
         .in_method   = false,
         .mixins      = &mixins,
         .alloc       = alloc,
-        .mutated        = null,
-        .closure_vars   = null,
-        .capture_fields = &.{},
-        .union_names    = &union_names,
-        .gui_backend    = gui_backend,
-        .uses_gui_ptr   = &uses_gui,
-        .native_uses    = native_uses,
-        .emit_exports   = emit_exports,
-        .has_exports_ptr = &has_exports,
-        .source_file    = module.file,
+        .mutated          = null,
+        .closure_vars     = null,
+        .capture_fields   = &.{},
+        .union_names      = &union_names,
+        .gui_backend      = gui_backend,
+        .uses_gui_ptr     = &uses_gui,
+        .native_uses      = native_uses,
+        .emit_exports     = emit_exports,
+        .has_exports_ptr  = &has_exports,
+        .source_file      = module.file,
+        .imported_modules = imported_modules,
     };
     try g.genModule(module);
     return GenerateResult{ .uses_gui = uses_gui, .has_exports = has_exports };
@@ -221,6 +223,11 @@ fn typeRefStr(tr: Ast.TypeRef, alloc: Allocator) ![]const u8 {
             const s = try typeRefStr(inner.*, alloc);
             defer alloc.free(s);
             break :blk try std.fmt.allocPrint(alloc, "!{s}", .{s});
+        },
+        .ref_to      => |inner| blk: {
+            const s = try typeRefStr(inner.*, alloc);
+            defer alloc.free(s);
+            break :blk try std.fmt.allocPrint(alloc, "^{s}", .{s});
         },
         .generic     => |g| blk: {
             var buf: std.ArrayListUnmanaged(u8) = .{};
@@ -374,7 +381,8 @@ fn refsInStmt(stmt: Ast.Stmt, r: *const Resolver.ResolveResult, o: *Refs) anyerr
         .expr      => |e| try refsInExpr(e, r, o),
         .defer_    => |s| try refsInStmt(s.body, r, o),
         .contract  => |s| { for (s.exprs) |e| try refsInExpr(e, r, o); },
-        .with      => |s| { try refsInExpr(s.target, r, o); try refsInStmts(s.body, r, o); },
+        .with        => |s| { try refsInExpr(s.target, r, o); try refsInStmts(s.body, r, o); },
+        .arena_scope => |s| try refsInStmts(s.body, r, o),
         .var_except    => |s| { try refsInExpr(s.base, r, o); for (s.fields) |f| try refsInExpr(f.value, r, o); },
         .assign_except => |s| { try refsInExpr(s.target, r, o); try refsInExpr(s.base, r, o); for (s.fields) |f| try refsInExpr(f.value, r, o); },
         .raise    => |s| { if (s.message) |m| try refsInExpr(m, r, o); if (s.details) |d| try refsInExpr(d, r, o); },
@@ -431,7 +439,8 @@ fn bodyHasRaise(stmts: []const Ast.Stmt, tc_opt: ?*const TypeChecker.TypeCheckRe
                 for (s.on) |on| if (bodyHasRaise(on.body, tc_opt)) return true;
                 if (s.else_) |eb| if (bodyHasRaise(eb, tc_opt)) return true;
             },
-            .with    => |s| if (bodyHasRaise(s.body, tc_opt)) return true,
+            .with        => |s| if (bodyHasRaise(s.body, tc_opt)) return true,
+            .arena_scope => |s| if (bodyHasRaise(s.body, tc_opt)) return true,
             .defer_  => |s| return bodyHasRaise(&.{s.body}, tc_opt),
             .guard   => |s| { if (exprHasTry(s.cond, tc_opt)) return true; if (bodyHasRaise(s.else_body, tc_opt)) return true; },
             .try_catch => {}, // try/catch absorbs raises — don't propagate
@@ -471,7 +480,8 @@ fn bodyNeedsErrVar(stmts: []const Ast.Stmt, tc_opt: ?*const TypeChecker.TypeChec
                 for (s.on) |on| if (bodyNeedsErrVar(on.body, tc_opt)) return true;
                 if (s.else_) |eb| if (bodyNeedsErrVar(eb, tc_opt)) return true;
             },
-            .with    => |s| if (bodyNeedsErrVar(s.body, tc_opt)) return true,
+            .with        => |s| if (bodyNeedsErrVar(s.body, tc_opt)) return true,
+            .arena_scope => |s| if (bodyNeedsErrVar(s.body, tc_opt)) return true,
             .defer_  => |s| return bodyNeedsErrVar(&.{s.body}, tc_opt),
             .guard   => |s| { if (exprHasTry(s.cond, tc_opt)) return true; if (bodyNeedsErrVar(s.else_body, tc_opt)) return true; },
             .try_catch => {}, // inner try has its own err variable
@@ -651,7 +661,8 @@ fn seedEscapedFromReturns(stmts: []const Ast.Stmt, set: *std.StringHashMap(void)
                 for (s.on) |on| try seedEscapedFromReturns(on.body, set);
                 if (s.else_) |eb| try seedEscapedFromReturns(eb, set);
             },
-            .with      => |s| try seedEscapedFromReturns(s.body, set),
+            .with        => |s| try seedEscapedFromReturns(s.body, set),
+            .arena_scope => |s| try seedEscapedFromReturns(s.body, set),
             .try_catch => |s| {
                 try seedEscapedFromReturns(s.body, set);
                 for (s.clauses) |cl| try seedEscapedFromReturns(cl.body, set);
@@ -709,7 +720,8 @@ fn propagateEscapesOnce(stmts: []const Ast.Stmt, set: *std.StringHashMap(void)) 
                 for (s.on) |on| { if (try propagateEscapesOnce(on.body, set)) grew = true; }
                 if (s.else_) |eb| { if (try propagateEscapesOnce(eb, set)) grew = true; }
             },
-            .with      => |s| { if (try propagateEscapesOnce(s.body, set)) grew = true; },
+            .with        => |s| { if (try propagateEscapesOnce(s.body, set)) grew = true; },
+            .arena_scope => |s| { if (try propagateEscapesOnce(s.body, set)) grew = true; },
             .try_catch => |s| {
                 if (try propagateEscapesOnce(s.body, set)) grew = true;
                 for (s.clauses) |cl| { if (try propagateEscapesOnce(cl.body, set)) grew = true; }
@@ -792,12 +804,14 @@ fn scanMutationsInto(
                 if (s.target.* == .ident) try set.put(s.target.ident.name, {});
                 try scanMutationsInto(s.body, set, tc_opt);
             },
+            .arena_scope => |s| try scanMutationsInto(s.body, set, tc_opt),
             .try_catch => |s| {
                 try scanMutationsInto(s.body, set, tc_opt);
                 for (s.clauses) |cl| try scanMutationsInto(cl.body, set, tc_opt);
             },
             .guard    => |s| try scanMutationsInto(s.else_body, set, tc_opt),
             .destruct => |s| try scanMutationsInExpr(s.init, set, tc_opt),
+            .assert   => |s| try scanMutationsInExpr(s.cond, set, tc_opt),
             else      => {},
         }
     }
@@ -953,9 +967,10 @@ fn nameUsedInStmt(name: []const u8, stmt: Ast.Stmt) bool {
         .while_  => |s| nameUsedInExpr(name, s.cond) or nameUsedInStmts(name, s.body),
         .for_in  => |s| nameUsedInExpr(name, s.iter) or nameUsedInStmts(name, s.body),
         .for_num => |s| nameUsedInExpr(name, s.start) or nameUsedInExpr(name, s.stop) or nameUsedInStmts(name, s.body),
-        .guard    => |s| nameUsedInExpr(name, s.cond) or nameUsedInStmts(name, s.else_body),
-        .destruct => |s| nameUsedInExpr(name, s.init),
-        else      => false,
+        .guard       => |s| nameUsedInExpr(name, s.cond) or nameUsedInStmts(name, s.else_body),
+        .destruct    => |s| nameUsedInExpr(name, s.init),
+        .arena_scope => |s| nameUsedInStmts(name, s.body),
+        else         => false,
     };
 }
 fn nameUsedInExpr(name: []const u8, expr: *const Ast.Expr) bool {
@@ -1076,11 +1091,22 @@ const Generator = struct {
     /// Resolved Zig element-type string for an imminent `List()` call.
     /// Set by `genAssign` when the LHS field type is known; cleared after use.
     lhs_list_elem: ?[]const u8 = null,
+    /// Incremented each time we enter an `arena` block so nested scopes get
+    /// unique variable names (_arena_scope_1, _arena_scope_2, …).
+    arena_depth: u32 = 0,
+    /// Module interfaces of `use`d deps — used in `genUse` to decide whether to
+    /// import the whole module or unwrap a same-named class.
+    imported_modules: ?*const std.StringHashMap(TypeChecker.ModuleInterface) = null,
 
     // ── Context-adjustment helpers ────────────────────────────────────────────
 
     fn withOwner(g: Generator, new_owner: []const u8) Generator {
         var c = g; c.owner = new_owner; return c;
+    }
+    /// Set owner name + owner_class pointer for a non-generic concrete class.
+    /// This enables `resolveFieldTypeRef` for `^T` boxing in the class body.
+    fn withClass(g: Generator, cls: *const Ast.DeclClass) Generator {
+        var c = g; c.owner = cls.name; c.owner_class = cls; return c;
     }
     fn withGeneric(g: Generator, cls: *const Ast.DeclClass) Generator {
         var c = g; c.is_generic = true; c.owner_class = cls; return c;
@@ -1095,6 +1121,20 @@ const Generator = struct {
     /// Examples:
     ///   `items as List(T)` with type_params=["T"] → "T"   (comptime param name)
     ///   `items as List(str)`                       → "[]const u8"
+    /// Return the declared TypeRef for a field of the current class, or null.
+    fn resolveFieldTypeRef(g: Generator, field_name: []const u8) ?Ast.TypeRef {
+        const cls = g.owner_class orelse return null;
+        for (cls.members) |m| {
+            const vd: *const Ast.DeclVar = switch (m) {
+                .var_ => |v| v,
+                else  => continue,
+            };
+            if (!std.mem.eql(u8, vd.name, field_name)) continue;
+            return vd.type_;
+        }
+        return null;
+    }
+
     fn resolveListElemType(g: Generator, field_name: []const u8) ?[]const u8 {
         const cls = g.owner_class orelse return null;
         for (cls.members) |m| {
@@ -1113,7 +1153,7 @@ const Generator = struct {
             // Check if the arg is a type parameter of the class.
             if (arg == .named) {
                 for (cls.type_params) |tp| {
-                    if (std.mem.eql(u8, tp, arg.named.name)) return tp; // use param name directly
+                    if (std.mem.eql(u8, tp.name, arg.named.name)) return tp.name; // use param name directly
                 }
                 // Not a type param — treat as a concrete type.
                 return Builtins.zigTypeName(arg.named.name);
@@ -1179,7 +1219,11 @@ const Generator = struct {
         // that do many small allocations (string ops, trigram maps, etc.).
         // For leak detection during development, swap to GeneralPurposeAllocator.
         try g.w.writeAll("var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);\n");
-        try g.w.writeAll("const _allocator = _arena.allocator();\n\n");
+        // `var` (not `const`) so that `arena` blocks can save/restore it.
+        try g.w.writeAll("var _allocator: std.mem.Allocator = undefined;\n");
+        // Called from the root module's `main` after the arena is set up,
+        // so that library modules share the same allocator.
+        try g.w.writeAll("pub fn _initAllocator(a: std.mem.Allocator) void { _allocator = a; }\n\n");
         // Thread-local error context — populated by `raise` statements.
         try g.w.writeAll("const _Stringable = struct {\n");
         try g.w.writeAll("    ptr:         *anyopaque,\n");
@@ -2682,10 +2726,29 @@ const Generator = struct {
                 const m = findMainMethod(module.decls).?;
                 break :blk m.throws or (m.body != null and bodyHasRaise(m.body.?, g.tc));
             };
+            // Build allocator-init calls for all Zebra-dep `use` modules so that
+            // library code that calls allocating functions (string interp, etc.)
+            // shares the root module's arena allocator.
+            var alloc_init_buf: std.ArrayListUnmanaged(u8) = .{};
+            defer alloc_init_buf.deinit(g.alloc);
+            for (module.decls) |decl| {
+                const u = switch (decl) { .use => |u| u, else => continue };
+                // Skip native (Zig/C) imports — they don't have `_initAllocator`.
+                if (g.native_uses) |nu| if (nu.get(u.path) != null) continue;
+                // Compute import path (dots → slashes).
+                const imp_path = try std.mem.replaceOwned(u8, g.alloc, u.path, ".", "/");
+                defer g.alloc.free(imp_path);
+                try alloc_init_buf.writer(g.alloc).print(
+                    "    @import(\"{s}.zig\")._initAllocator(_allocator);\n", .{imp_path});
+            }
+            const alloc_init = alloc_init_buf.items;
+
             if (main_throws) {
                 try g.w.print(
                     "pub fn main() void {{\n" ++
+                    "    _allocator = _arena.allocator();\n" ++
                     "    defer _arena.deinit();\n" ++
+                    "{s}" ++
                     "    {s}.main() catch |_err| {{\n" ++
                     "        if (_err == error.ZebraError) {{\n" ++
                     "            std.debug.print(\"Error: {{s}}\\n\", .{{_error_ctx.message}});\n" ++
@@ -2695,12 +2758,17 @@ const Generator = struct {
                     "        std.process.exit(1);\n" ++
                     "    }};\n" ++
                     "}}\n",
-                    .{class_name},
+                    .{ alloc_init, class_name },
                 );
             } else {
                 try g.w.print(
-                    "pub fn main() void {{\n    defer _arena.deinit();\n    {s}.main();\n}}\n",
-                    .{class_name},
+                    "pub fn main() void {{\n" ++
+                    "    _allocator = _arena.allocator();\n" ++
+                    "    defer _arena.deinit();\n" ++
+                    "{s}" ++
+                    "    {s}.main();\n" ++
+                    "}}\n",
+                    .{ alloc_init, class_name },
                 );
             }
         }
@@ -2756,9 +2824,21 @@ const Generator = struct {
                 try g.w.print("// {s}: C source compiled inline (use zig\"extern fn...\" for declarations)\n", .{alias});
             },
         } else {
-            // Zebra dep: the generated .zig exports a type matching the last path
-            // segment.  Unwrap it so `Utils.method()` works without double qualifier.
-            try g.w.print("const {s} = @import(\"{s}.zig\").{s};\n", .{ alias, import_rel, alias });
+            // Zebra dep: if the module exports a type with the same name as the alias,
+            // unwrap it so `Alias.method()` works without double qualification.
+            // Otherwise, import the whole module so `Alias.TypeName` works for cross-module types.
+            const has_same_named_type = blk: {
+                const imp = g.imported_modules orelse break :blk false;
+                const iface = imp.get(alias) orelse break :blk false;
+                break :blk iface.types.contains(alias);
+            };
+            if (has_same_named_type) {
+                try g.w.print("const {s} = @import(\"{s}.zig\").{s};\n", .{ alias, import_rel, alias });
+            } else {
+                // Multi-type module or module whose primary type has a different name —
+                // import the whole file so `Alias.TypeName.method()` works.
+                try g.w.print("const {s} = @import(\"{s}.zig\");\n", .{ alias, import_rel });
+            }
         }
     }
 
@@ -2855,7 +2935,7 @@ const Generator = struct {
         try g.w.print("pub fn {s}(", .{n.name});
         for (n.type_params, 0..) |tp, i| {
             if (i > 0) try g.w.writeAll(", ");
-            try g.w.print("comptime {s}: type", .{tp});
+            try g.w.print("comptime {s}: type", .{tp.name});
         }
         try g.w.writeAll(") type {\n");
 
@@ -2904,7 +2984,7 @@ const Generator = struct {
 
     fn genClass(g: Generator, n: *Ast.DeclClass) anyerror!void {
         if (n.type_params.len > 0) return g.genGenericClass(n);
-        const cg = g.withOwner(n.name);
+        const cg = g.withClass(n);
 
         try g.writeIndent();
         try g.w.print("pub const {s} = struct {{\n", .{n.name});
@@ -3580,6 +3660,7 @@ const Generator = struct {
             .try_catch     => |s| s.span,
             .guard         => |s| s.span,
             .destruct      => |s| s.span,
+            .arena_scope   => |s| s.span,
             .pass, .break_, .continue_, .contract => null,
         };
     }
@@ -3678,7 +3759,8 @@ const Generator = struct {
             .continue_ => try g.line("continue;"),
             .defer_    => |s| try g.genDefer(s),
             .contract  => {}, // contracts not emitted (runtime verification out of scope)
-            .with      => |s| try g.genWith(s),
+            .with        => |s| try g.genWith(s),
+            .arena_scope => |s| try g.genArenaScope(s),
             .var_except    => |s| try g.genVarExcept(s),
             .assign_except => |s| try g.genAssignExcept(s),
             .raise         => |s| try g.genRaise(s),
@@ -3719,7 +3801,18 @@ const Generator = struct {
         // Use `const` unless the variable is actually reassigned somewhere in
         // the body (Zig treats `var` that is never mutated as a compile error).
         const is_mutated = if (g.mutated) |m| m.contains(n.name) else false;
-        const kw: []const u8 = if (n.is_const or !is_mutated) "const" else "var";
+        // User-defined type instances and cross-module instances must be `var`
+        // even when not reassigned, because their methods take `*Self` receivers.
+        // Zig rejects calling a `*Self` method on a `*const Self`.
+        const tc_init_type: TypeChecker.Type = blk: {
+            if (n.init) |init| if (g.tc) |tc| break :blk tc.expr_types.get(init) orelse .unknown;
+            break :blk .unknown;
+        };
+        // Cross-module instances must be `var` even when not reassigned: their methods
+        // take `*Self` receivers, and Zig rejects passing `*const Self` to `*Self`.
+        // Same-module instances are handled per-method via normal mutation scanning.
+        const needs_var_for_methods = (tc_init_type == .cross_module);
+        const kw: []const u8 = if (n.is_const or (!is_mutated and !needs_var_for_methods)) "const" else "var";
 
         // StringBuilder constructor: `var sb as StringBuilder = StringBuilder()`
         if (n.init) |e| {
@@ -5874,6 +5967,83 @@ const Generator = struct {
                     if (rhs_t != .named) break :blk false;
                     break :blk lhs_t.optional.named == rhs_t.named;
                 };
+                // `^T` heap-indirection field assignment:
+                // If the field's declared type is `^T` or `^T?`, and the RHS is a
+                // plain `T` value (not nil), we must heap-allocate so Zig gets a `*T`.
+                const ref_box_type_name: ?[]const u8 = blk: {
+                    if (s.op != .assign) break :blk null;
+                    // Skip if RHS is nil — no allocation needed for null assignment.
+                    if (s.value.* == .nil) break :blk null;
+                    // Resolve the TypeRef for the target field.  We handle two cases:
+                    //
+                    //   1. `field = x` or `self.field = x` — look up in owner_class.
+                    //   2. `a.b.field = x` (nested member) — look up `field` in the
+                    //      declared type of the intermediate object `a.b`.
+                    const field_tr_opt: ?Ast.TypeRef = blk2: {
+                        switch (s.target.*) {
+                            .ident => |id| {
+                                break :blk2 g.resolveFieldTypeRef(id.name);
+                            },
+                            .member => |mem| {
+                                if (mem.object.* == .ident) {
+                                    // `self.field = x` or `localVar.field = x`:
+                                    // First try the owner class (covers `self.field`).
+                                    if (g.resolveFieldTypeRef(mem.member)) |tr| break :blk2 tr;
+                                    // Fall back: look up via TC type of the object
+                                    // (covers `localVar.field` where localVar is
+                                    // a different class).
+                                    if (g.tc) |tc| {
+                                        const obj_t = tc.expr_types.get(mem.object) orelse break :blk2 null;
+                                        const sym = switch (obj_t) {
+                                            .named => |s2| s2,
+                                            else  => break :blk2 null,
+                                        };
+                                        if (sym.own_scope) |scope| {
+                                            if (scope.lookupLocal(mem.member)) |field_sym| {
+                                                if (field_sym.decl == .var_) {
+                                                    if (field_sym.decl.var_.type_) |*tr|
+                                                        break :blk2 tr.*;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    break :blk2 null;
+                                }
+                                // Nested `a.b.field = x` — look up `field` in a.b's TC type.
+                                if (g.tc) |tc| {
+                                    const parent_t = tc.expr_types.get(mem.object) orelse break :blk2 null;
+                                    const sym = switch (parent_t) {
+                                        .named => |s2| s2,
+                                        else  => break :blk2 null,
+                                    };
+                                    if (sym.own_scope) |scope| {
+                                        if (scope.lookupLocal(mem.member)) |field_sym| {
+                                            if (field_sym.decl == .var_) {
+                                                if (field_sym.decl.var_.type_) |*tr|
+                                                    break :blk2 tr.*;
+                                            }
+                                        }
+                                    }
+                                }
+                                break :blk2 null;
+                            },
+                            else => break :blk2 null,
+                        }
+                    };
+                    const field_tr = field_tr_opt orelse break :blk null;
+                    if (field_tr != .ref_to) break :blk null;
+                    // The inner TypeRef must resolve to a named type for codegen.
+                    // Handle both `^T` and `^T?` (nilable optional pointer).
+                    const inner = field_tr.ref_to;
+                    break :blk switch (inner.*) {
+                        .named   => |n| n.name,
+                        .nilable => |ni| switch (ni.*) {
+                            .named => |n| n.name,
+                            else   => null,
+                        },
+                        else     => null,
+                    };
+                };
                 if (needs_box) {
                     // Emit: { const _rp = _allocator.create(T) catch @panic("OOM"); _rp.* = value; target = _rp; }
                     // Block statement — no trailing semicolon (it is added by the else branch below).
@@ -5891,6 +6061,16 @@ const Generator = struct {
                     try g.genExpr(s.target);
                     try g.w.writeAll(" = _rp; }\n");
                     return; // skip trailing ;\n — block statement has no semicolon in Zig
+                } else if (ref_box_type_name) |type_name| {
+                    // Emit: { const _rp = _allocator.create(T) catch @panic("OOM"); _rp.* = value; target = _rp; }
+                    try g.w.writeAll("{ const _rp = _allocator.create(");
+                    try g.w.writeAll(type_name);
+                    try g.w.writeAll(") catch @panic(\"OOM\"); _rp.* = ");
+                    try g.genExpr(s.value);
+                    try g.w.writeAll("; ");
+                    try g.genExpr(s.target);
+                    try g.w.writeAll(" = _rp; }\n");
+                    return;
                 } else {
                     try g.genExpr(s.target);
                     try g.w.writeAll(" ");
@@ -6714,6 +6894,40 @@ const Generator = struct {
         try g.w.writeAll("}\n");
     }
 
+    /// `arena eol Block` — emit a scoped ArenaAllocator that shadows `_allocator`.
+    /// All allocations within the block use the sub-arena; freed on block exit.
+    ///
+    ///   {   // arena
+    ///       var _arena_scope = std.heap.ArenaAllocator.init(_allocator);
+    ///       defer _arena_scope.deinit();
+    ///       const _allocator = _arena_scope.allocator();
+    ///       // body
+    ///   }
+    /// `arena eol Block` — swap `_allocator` to a fresh sub-arena for the block,
+    /// then restore the parent allocator on exit.
+    ///
+    ///   {   // arena
+    ///       var _arena_scope = std.heap.ArenaAllocator.init(_allocator);
+    ///       const _parent_alloc = _allocator;         // save
+    ///       _allocator = _arena_scope.allocator();    // switch to sub-arena
+    ///       defer { _allocator = _parent_alloc; _arena_scope.deinit(); }
+    ///       // body uses _allocator → sub-arena
+    ///   }
+    fn genArenaScope(g: Generator, s: *Ast.StmtArenaScope) anyerror!void {
+        const depth = g.arena_depth + 1;
+        try g.writeIndent();
+        try g.w.writeAll("{ // arena\n");
+        var ig = g.indented();
+        ig.arena_depth = depth;
+        try ig.writeIndent(); try ig.w.print("var _arena_scope_{d} = std.heap.ArenaAllocator.init(_allocator);\n", .{depth});
+        try ig.writeIndent(); try ig.w.print("const _parent_alloc_{d} = _allocator;\n", .{depth});
+        try ig.writeIndent(); try ig.w.print("_allocator = _arena_scope_{d}.allocator();\n", .{depth});
+        try ig.writeIndent(); try ig.w.print("defer {{ _allocator = _parent_alloc_{d}; _arena_scope_{d}.deinit(); }}\n", .{ depth, depth });
+        try ig.genStmts(s.body);
+        try g.writeIndent();
+        try g.w.writeAll("}\n");
+    }
+
     /// `var name [: T] = base except field=val ...`
     /// Emits: `const name [: T] = blk: { var _tmp = base; _tmp.f = v; break :blk _tmp; };`
     fn genVarExcept(g: Generator, s: *Ast.StmtVarExcept) anyerror!void {
@@ -7384,6 +7598,13 @@ const Generator = struct {
         // Detected by type_args.len > 0 (set by AstBuilder.buildGenericConstruct).
         if (e.type_args.len > 0 and e.callee.* == .ident) {
             const class_name = e.callee.ident.name;
+            // Stdlib generics: List(T)() → std.ArrayList(T){} (allocator passed to each op)
+            if (std.mem.eql(u8, class_name, "List") and e.type_args.len == 1) {
+                try g.w.writeAll("std.ArrayList(");
+                try g.genType(e.type_args[0]);
+                try g.w.writeAll("){}");
+                return;
+            }
             try g.w.writeAll(class_name);
             try g.w.writeAll("(");
             for (e.type_args, 0..) |ta, i| {
@@ -7740,18 +7961,46 @@ const Generator = struct {
                         .method => |m| m.mods.shared,
                         else    => false,
                     };
-                    if (is_shared) {
-                        try g.w.print("{s}.{s}(", .{ g.owner, ident.name });
-                    } else {
-                        try g.w.print("self.{s}(", .{ident.name});
-                    }
+                    // Top-level functions have no owner class — call directly.
+                    const is_top_level: bool = switch (sym.decl) {
+                        .method => |m| m.is_top_level,
+                        else    => false,
+                    };
                     const bare_params: ?[]const Ast.Param = switch (sym.decl) {
                         .method => |m| m.params,
                         else    => null,
                     };
+                    if (is_top_level) {
+                        try g.w.writeAll(ident.name);
+                    } else if (is_shared) {
+                        try g.w.print("{s}.{s}", .{ g.owner, ident.name });
+                    } else {
+                        try g.w.print("self.{s}", .{ident.name});
+                    }
+                    try g.w.writeAll("(");
                     try g.genArgs(bare_params, e.args);
                     try g.w.writeAll(")");
                     return;
+                }
+            }
+        }
+        // Cross-module constructor call: `Mod.TypeName(args)` → `Mod.TypeName.init(args)`
+        // Detected when the callee is `member_access(module_ident, "TypeName")` and the
+        // module's interface exports `TypeName` as a type (not a method).
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident) {
+                const mod_name = mem.object.ident.name;
+                if (g.imported_modules) |imp| {
+                    if (imp.get(mod_name)) |iface| {
+                        if (iface.types.contains(mem.member)) {
+                            // It's a cross-module type constructor.
+                            try g.w.print("{s}.{s}.init(", .{ mod_name, mem.member });
+                            try g.genArgs(null, e.args);
+                            try g.w.writeAll(")");
+                            return;
+                        }
+                    }
                 }
             }
         }
@@ -8241,6 +8490,18 @@ const Generator = struct {
                 try g.w.writeAll("anyerror!");
                 try g.genType(inner.*);
             },
+            .ref_to      => |inner| {
+                // ^T — heap-indirection pointer; emits `*T` in Zig to break recursive struct size.
+                // Special case: ^T? (ref_to wrapping nilable) → `?*T` rather than `*?T`.
+                // This is the natural form for optional recursive references (linked list next, tree children).
+                if (inner.* == .nilable) {
+                    try g.w.writeAll("?*");
+                    try g.genType(inner.nilable.*);
+                } else {
+                    try g.w.writeAll("*");
+                    try g.genType(inner.*);
+                }
+            },
             .generic     => |gtr| {
                 // Result(T, E) → _Result(T, E)
                 if (std.mem.eql(u8, gtr.name, "Result")) {
@@ -8498,7 +8759,8 @@ fn printFmt(tc: ?*const TypeChecker.TypeCheckResult, catch_var: []const u8, expr
         .csv_row,
         .optional,
         .tuple,
-        .generic_named                 => "{any}",
+        .generic_named,
+        .cross_module                  => "{any}",
     };
 }
 
@@ -8757,13 +9019,13 @@ fn generateSnippet(src: []const u8, alloc: Allocator) anyerror![]u8 {
     var bind = try Binder.bindPass1(module, sym_arena.allocator(), alloc);
     defer bind.deinit();
 
-    var resolve = try Resolver.resolvePass2(module, &bind.table, alloc, alloc);
+    var resolve = try Resolver.resolvePass2(module, &bind.table, alloc, alloc, null);
     defer resolve.deinit();
 
     var out = std.ArrayList(u8){};
     errdefer out.deinit(alloc);
 
-    _ = try generate(module, &resolve, null, alloc, out.writer(alloc).any(), .stub, null, false);
+    _ = try generate(module, &resolve, null, alloc, out.writer(alloc).any(), .stub, null, false, null);
     return out.toOwnedSlice(alloc);
 }
 

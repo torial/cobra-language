@@ -1,0 +1,30 @@
+interface Comparable
+    def compareTo(other as same) as int
+
+class Score implements Comparable
+    var value as int
+
+    cue init(v as int)
+        value = v
+
+    def compareTo(other as same) as int
+        return value - other.value
+
+# A generic class that constrains T to Comparable.
+# The TypeChecker enforces this at instantiation.
+class MinHeap(T where T implements Comparable)
+    var best as T
+
+    cue init(seed as T)
+        best = seed
+
+    def top as T
+        return best
+
+class Main
+    shared
+        def main
+            # Score implements Comparable → accepted
+            var h = MinHeap(Score)(Score(42))
+            print h.top().value    # 42
+            print "constrained generics OK"

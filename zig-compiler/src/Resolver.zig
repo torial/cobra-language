@@ -23,11 +23,12 @@
 //! const sym = result.exprs.get(some_ident_ptr);
 //! ```
 
-const std      = @import("std");
-const Ast      = @import("Ast.zig");
-const ST       = @import("SymbolTable.zig");
-const Binder   = @import("Binder.zig");
-const Builtins = @import("Builtins.zig");
+const std         = @import("std");
+const Ast         = @import("Ast.zig");
+const ST          = @import("SymbolTable.zig");
+const Binder      = @import("Binder.zig");
+const Builtins    = @import("Builtins.zig");
+const TypeChecker = @import("TypeChecker.zig");
 
 const Allocator   = std.mem.Allocator;
 const SymbolTable = ST.SymbolTable;
@@ -82,21 +83,23 @@ pub const ResolveResult = struct {
 /// - `map_alloc`  — owns the hash-map entries in `ResolveResult`.
 /// - `diag_alloc` — owns the `diags` slice and message strings.
 pub fn resolvePass2(
-    module:     Ast.Module,
-    table:      *SymbolTable,
-    map_alloc:  Allocator,
-    diag_alloc: Allocator,
+    module:           Ast.Module,
+    table:            *SymbolTable,
+    map_alloc:        Allocator,
+    diag_alloc:       Allocator,
+    imported_modules: ?*const std.StringHashMap(TypeChecker.ModuleInterface),
 ) anyerror!ResolveResult {
     var types = std.AutoHashMap(*const Ast.NamedTypeRef, ResolvedType).init(map_alloc);
     var exprs = std.AutoHashMap(*const Ast.ExprIdent, *Symbol).init(map_alloc);
     var diags = std.ArrayList(Diagnostic){};
 
     const r = Resolver{
-        .table      = table,
-        .diag_alloc = diag_alloc,
-        .types      = &types,
-        .exprs      = &exprs,
-        .diags      = &diags,
+        .table            = table,
+        .diag_alloc       = diag_alloc,
+        .types            = &types,
+        .exprs            = &exprs,
+        .diags            = &diags,
+        .imported_modules = imported_modules,
     };
 
     try r.walkModule(module, table.root);
@@ -112,11 +115,12 @@ pub fn resolvePass2(
 // ── Resolver context ──────────────────────────────────────────────────────────
 
 const Resolver = struct {
-    table:      *SymbolTable,
-    diag_alloc: Allocator,
-    types:      *std.AutoHashMap(*const Ast.NamedTypeRef, ResolvedType),
-    exprs:      *std.AutoHashMap(*const Ast.ExprIdent, *Symbol),
-    diags:      *std.ArrayList(Diagnostic),
+    table:            *SymbolTable,
+    diag_alloc:       Allocator,
+    types:            *std.AutoHashMap(*const Ast.NamedTypeRef, ResolvedType),
+    exprs:            *std.AutoHashMap(*const Ast.ExprIdent, *Symbol),
+    diags:            *std.ArrayList(Diagnostic),
+    imported_modules: ?*const std.StringHashMap(TypeChecker.ModuleInterface) = null,
 
     // ── Module ────────────────────────────────────────────────────────────────
 
@@ -157,10 +161,10 @@ const Resolver = struct {
         const inner = sym.own_scope orelse return;
         // Inject type parameters as placeholder symbols so that TypeRef.named("T")
         // resolves correctly inside the class body (Approach B: eager specialization).
-        for (n.type_params) |tp_name| {
+        for (n.type_params) |tp| {
             const dummy = Ast.Span{ .line = 0, .col = 0, .end_line = 0, .end_col = 0 };
-            const tp_sym = try r.table.newSymbol(tp_name, .type_param, .{ .type_param = dummy });
-            _ = try inner.define(tp_name, tp_sym);
+            const tp_sym = try r.table.newSymbol(tp.name, .type_param, .{ .type_param = dummy });
+            _ = try inner.define(tp.name, tp_sym);
         }
         for (n.implements) |*tr| try r.resolveTypeRef(tr, scope);
         for (n.adds)       |*tr| try r.resolveTypeRef(tr, scope);
@@ -373,7 +377,8 @@ const Resolver = struct {
             .expr     => |e| try r.walkExpr(e, scope),
             .contract => |s| { for (s.exprs) |e| try r.walkExpr(e, scope); },
             .defer_   => |s| try r.walkStmt(s.body, scope),
-            .with     => |s| { try r.walkExpr(s.target, scope); try r.walkStmts(s.body, scope); },
+            .with        => |s| { try r.walkExpr(s.target, scope); try r.walkStmts(s.body, scope); },
+            .arena_scope => |s| try r.walkStmts(s.body, scope),
             .var_except => |s| {
                 if (s.type_ref) |*tr| try r.resolveTypeRef(tr, scope);
                 try r.walkExpr(s.base, scope);
@@ -486,6 +491,7 @@ const Resolver = struct {
             .call          => |e| {
                 try r.walkExpr(e.callee, scope);
                 for (e.args) |a| try r.walkExpr(a.value, scope);
+                for (e.type_args) |*ta| try r.resolveTypeRef(ta, scope);
             },
             .index         => |e| {
                 try r.walkExpr(e.object, scope);
@@ -921,6 +927,9 @@ const Resolver = struct {
                 try r.checkCaptureBoundary(s.target, lambda_local);
                 for (s.body) |st| try r.checkCaptureBoundaryStmt(st, lambda_local);
             },
+            .arena_scope => |s| {
+                for (s.body) |st| try r.checkCaptureBoundaryStmt(st, lambda_local);
+            },
             .var_except    => |s| {
                 try r.checkCaptureBoundary(s.base, lambda_local);
                 for (s.fields) |f| try r.checkCaptureBoundary(f.value, lambda_local);
@@ -955,6 +964,7 @@ const Resolver = struct {
             .nilable     => |inner| try r.resolveTypeRef(inner, scope),
             .stream      => |inner| try r.resolveTypeRef(inner, scope),
             .error_union => |inner| try r.resolveTypeRef(inner, scope),
+            .ref_to      => |inner| try r.resolveTypeRef(inner, scope),
             .generic     => |*g| {
                 if (scope.lookup(g.name) == null and BUILTINS.get(g.name) == null)
                     try r.emitUnresolved(g.span, g.name);
@@ -972,9 +982,27 @@ const Resolver = struct {
         }
         if (scope.lookup(n.name)) |sym| {
             try r.types.put(n, .{ .symbol = sym });
-        } else {
-            try r.emitUnresolved(n.span, n.name);
+            return;
         }
+        // Cross-module qualified type reference: "ModuleName.TypeName"
+        // e.g. `var x as Ast.Expr` when `use Ast` is in scope.
+        // Split on the first dot and check if the left side is an imported module
+        // that exports the right side as a type name.
+        if (r.imported_modules) |imp| {
+            if (std.mem.indexOfScalar(u8, n.name, '.')) |dot_pos| {
+                const mod_name  = n.name[0..dot_pos];
+                const type_name = n.name[dot_pos + 1..];
+                if (imp.get(mod_name)) |iface| {
+                    if (iface.types.contains(type_name)) {
+                        // Mark as builtin so TC doesn't error; CodeGen emits the
+                        // dotted Zig name directly from the TypeRef text.
+                        try r.types.put(n, .builtin);
+                        return;
+                    }
+                }
+            }
+        }
+        try r.emitUnresolved(n.span, n.name);
     }
 
     // ── Identifier resolution ─────────────────────────────────────────────────

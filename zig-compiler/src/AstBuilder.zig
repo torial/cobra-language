@@ -104,6 +104,11 @@ const Builder = struct {
             .EnumDecl      => .{ .enum_     = try b.box(Ast.DeclEnum,      try b.buildEnumDecl(decl_node)) },
             .ExtendDecl    => .{ .extend    = try b.box(Ast.DeclExtend,    try b.buildExtendDecl(decl_node)) },
             .DeclUnion     => .{ .union_    = try b.box(Ast.DeclUnion,      try b.buildDeclUnion(decl_node)) },
+            .MethodDecl    => blk: {
+                var m = try b.buildMethodDecl(decl_node);
+                m.is_top_level = true;
+                break :blk .{ .method = try b.box(Ast.DeclMethod, m) };
+            },
             .AspectDecl    => @panic("TODO: AspectDecl"),
             .WeaveDecl     => @panic("TODO: WeaveDecl"),
             .AtDirective   => @panic("TODO: top-level AtDirective"),
@@ -187,7 +192,7 @@ const Builder = struct {
         const kids = ch(node);
         const is_generic = isLeafKind(kids[2], .open_call);
 
-        var type_params = std.ArrayList([]const u8){};
+        var type_params = std.ArrayList(Ast.TypeParam){};
         var implements  = std.ArrayList(Ast.TypeRef){};
         var adds        = std.ArrayList(Ast.TypeRef){};
 
@@ -219,15 +224,29 @@ const Builder = struct {
         }
     }
 
-    /// Collect type parameter names from a `TypeParamListNE` node.
-    /// TypeParamListNE → id | TypeParamListNE comma id
-    fn collectTypeParamListNE(b: Builder, node: TN, out: *std.ArrayList([]const u8)) !void {
+    /// Build a single TypeParam from a `TypeParam` grammar node.
+    /// TypeParam → id                                      (unconstrained)
+    /// TypeParam → id kw_where id kw_implements id         (constrained)
+    fn buildTypeParam(b: Builder, node: TN) Ast.TypeParam {
         const kids = ch(node);
         if (kids.len == 1) {
-            try out.append(b.arena, leafText(kids[0], b.tokens));
-        } else { // 3: TypeParamListNE comma id
+            // Plain: `T`
+            return .{ .name = leafText(kids[0], b.tokens), .constraint = null };
+        }
+        // Constrained: `T where T implements Interface` (5 children: id where id implements id)
+        // kids[0]=id(T), kids[1]=kw_where, kids[2]=id(T), kids[3]=kw_implements, kids[4]=id(Interface)
+        return .{ .name = leafText(kids[0], b.tokens), .constraint = leafText(kids[4], b.tokens) };
+    }
+
+    /// Collect TypeParams from a `TypeParamListNE` node.
+    /// TypeParamListNE → TypeParam | TypeParamListNE comma TypeParam
+    fn collectTypeParamListNE(b: Builder, node: TN, out: *std.ArrayList(Ast.TypeParam)) !void {
+        const kids = ch(node);
+        if (kids.len == 1) {
+            try out.append(b.arena, b.buildTypeParam(kids[0]));
+        } else { // 3: TypeParamListNE comma TypeParam
             try b.collectTypeParamListNE(kids[0], out);
-            try out.append(b.arena, leafText(kids[2], b.tokens));
+            try out.append(b.arena, b.buildTypeParam(kids[2]));
         }
     }
 
@@ -846,6 +865,11 @@ const Builder = struct {
                     const inner = try b.box(Ast.TypeRef, try b.buildTypeRef(kids[1]));
                     break :blk .{ .error_union = inner };
                 }
+                if (isLeafKind(kids[0], .caret)) {
+                    // ^T — heap-indirection pointer
+                    const inner = try b.box(Ast.TypeRef, try b.buildTypeRef(kids[1]));
+                    break :blk .{ .ref_to = inner };
+                }
                 if (isLeafKind(kids[1], .question)) {
                     // T? — nilable
                     const inner = try b.box(Ast.TypeRef, try b.buildTypeRef(kids[0]));
@@ -1025,7 +1049,8 @@ const Builder = struct {
             .StmtAssign   => try b.buildStmtAssignDispatch(inner),
             .StmtExpr     => .{ .expr    = try b.box(Ast.Expr,       try b.buildExpr(kids[0])) },
             .StmtDefer    => .{ .defer_    = try b.box(Ast.StmtDefer,    try b.buildStmtDefer(inner)) },
-            .StmtWith     => .{ .with      = try b.box(Ast.StmtWith,     try b.buildStmtWith(inner)) },
+            .StmtWith       => .{ .with        = try b.box(Ast.StmtWith,       try b.buildStmtWith(inner)) },
+            .StmtArenaScope => .{ .arena_scope = try b.box(Ast.StmtArenaScope, try b.buildStmtArenaScope(inner)) },
             .StmtRaise    => .{ .raise     = try b.box(Ast.StmtRaise,    try b.buildStmtRaise(inner)) },
             .StmtTryCatch => .{ .try_catch = try b.box(Ast.StmtTryCatch, try b.buildStmtTryCatch(inner)) },
             .StmtGuard, .StmtGuardInline => .{ .guard = try b.box(Ast.StmtGuard, try b.buildStmtGuard(inner)) },
@@ -1161,18 +1186,38 @@ const Builder = struct {
     fn collectBranchOnList(b: Builder, node: TN, out: *std.ArrayList(Ast.BranchOn)) !void {
         const kids = ch(node);
         if (kids.len == 1) {
-            try out.append(b.arena,try b.buildBranchOnClause(kids[0]));
-        } else {
+            // BranchOnList → BranchOnClause
+            try out.append(b.arena, try b.buildBranchOnClause(kids[0]));
+        } else if (isLeafKind(kids[1], .eol)) {
+            // BranchOnList → BranchOnList eol  (blank line — skip)
             try b.collectBranchOnList(kids[0], out);
-            try out.append(b.arena,try b.buildBranchOnClause(kids[1]));
+        } else {
+            // BranchOnList → BranchOnList BranchOnClause
+            try b.collectBranchOnList(kids[0], out);
+            try out.append(b.arena, try b.buildBranchOnClause(kids[1]));
         }
     }
 
     fn buildBranchOnClause(b: Builder, node: TN) anyerror!Ast.BranchOn {
         // on ExprListNE eol Block       — value list form
         // on ExprListNE , Stmt          — inline form
+        // on Expr return Expr eol       — short return form (kids.len == 5)
         // on Expr as id eol Block       — union binding form (kids.len == 6)
         const kids = ch(node);
+
+        // Detect short-return form: on Expr kw_return Expr eol (5 children)
+        if (kids.len == 5 and isLeafKind(kids[2], .kw_return)) {
+            const expr      = try b.box(Ast.Expr, try b.buildExpr(kids[1]));
+            const ret_val   = try b.box(Ast.Expr, try b.buildExpr(kids[3]));
+            const ret_span  = spanOf(kids[3], b.tokens);
+            var tmp = try b.arena.alloc(Ast.Stmt, 1);
+            tmp[0] = .{ .return_ = try b.box(Ast.StmtReturn, .{ .span = ret_span, .value = ret_val }) };
+            return .{
+                .span   = spanOf(node, b.tokens),
+                .values = try b.arena.dupe(*Ast.Expr, &.{expr}),
+                .body   = tmp,
+            };
+        }
 
         // Detect union binding form: kids[2] is kw_as
         if (kids.len == 6 and isLeafKind(kids[2], .kw_as)) {
@@ -1339,6 +1384,16 @@ const Builder = struct {
             .span   = span,
             .target = target_expr,
             .body   = try body.toOwnedSlice(b.arena),
+        };
+    }
+
+    fn buildStmtArenaScope(b: Builder, node: TN) anyerror!Ast.StmtArenaScope {
+        // kw_arena eol Block
+        const kids       = ch(node);
+        const block_kids = ch(kids[2]); // Block → indent StmtList dedent
+        return .{
+            .span = spanOf(node, b.tokens),
+            .body = try b.buildStmtList(block_kids[1]),
         };
     }
 

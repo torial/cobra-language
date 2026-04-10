@@ -1,0 +1,16 @@
+# Cross-module type test: library module exporting a user-defined type.
+
+class Point
+    var x as int
+    var y as int
+    cue init(px as int, py as int)
+        x = px
+        y = py
+
+    def distFromOrigin as float
+        var dx = x * x
+        var dy = y * y
+        return Math.sqrt(dx + dy)
+
+    def show as str
+        return "(${x}, ${y})"

@@ -1,0 +1,109 @@
+# Tests for the `on X return Y` inline branch form.
+# Covers: simple values, binary expressions, member calls,
+# conditional expressions, and blank lines between/after on-clauses.
+#
+# Note: a blank line between `branch expr` and the first `on` clause is NOT
+# supported (the blank eol appears before the indent token).  Blank lines
+# are only supported between/after on-clauses once inside the branch block.
+
+union Op
+    add
+    sub
+    mul
+    neg
+
+# Top-level free function — exercises LANG-001 + LANG-002 together
+def opName(o as Op) as str
+    branch o
+        on Op.add return "add"
+        on Op.sub return "sub"
+        on Op.mul return "mul"
+        on Op.neg return "neg"
+
+def opSymbol(o as Op) as str
+    branch o
+        on Op.add return "+"
+        on Op.sub return "-"
+        on Op.mul return "*"
+        on Op.neg return "-"
+
+# Binary expression in the return value
+def opPriority(o as Op) as int
+    branch o
+        on Op.add return 1 + 0
+        on Op.sub return 1 + 0
+        on Op.mul return 2 + 0
+        on Op.neg return 3 + 0
+
+# Bool returns
+def isAdditive(o as Op) as bool
+    branch o
+        on Op.add return true
+        on Op.sub return true
+        on Op.mul return false
+        on Op.neg return false
+
+class Calc
+    var scale as int
+    cue init(s as int)
+        scale = s
+
+    def scaled(n as int) as int
+        return n * scale
+
+    # top-level free function called from inside a class method (LANG-001 + is_top_level check)
+    def describe(o as Op) as str
+        branch o
+            on Op.add return opName(o)
+            on Op.sub return opName(o)
+            on Op.mul return opName(o)
+            on Op.neg return opName(o)
+
+# Blank-line sensitivity: blank lines between on-clauses (not before first or after last)
+def opCode(o as Op) as int
+    branch o
+        on Op.add return 10
+
+        on Op.sub return 20
+
+        on Op.mul return 30
+
+        on Op.neg return 40
+
+class Main
+    shared
+        def main
+            # Simple values
+            assert opName(Op.add())   == "add"
+            assert opName(Op.neg())   == "neg"
+            assert opSymbol(Op.mul()) == "*"
+
+            # Binary expression in return
+            assert opPriority(Op.add()) == 1
+            assert opPriority(Op.mul()) == 2
+            assert opPriority(Op.neg()) == 3
+
+            # Bool returns
+            assert isAdditive(Op.add()) == true
+            assert isAdditive(Op.mul()) == false
+
+            # Top-level call from inside class method (is_top_level flag)
+            var c = Calc(10)
+            assert c.describe(Op.add()) == "add"
+            assert c.scaled(5) == 50
+
+            # Blank lines between on-clauses (blank-line fix)
+            assert opCode(Op.add()) == 10
+            assert opCode(Op.sub()) == 20
+            assert opCode(Op.mul()) == 30
+            assert opCode(Op.neg()) == 40
+
+            # Comma inline form (regression guard)
+            var x = Op.mul()
+            branch x
+                on Op.add, print "unexpected"
+                on Op.sub, print "unexpected"
+                on Op.mul, print "matched mul"
+                on Op.neg, print "unexpected"
+
+            print "branch inline return OK"
