@@ -1,0 +1,31 @@
+class UriTest
+    shared def main
+        var u = Uri.parse("https://api.example.com/v1/users?page=2")
+        assert u.scheme == "https"
+        print "scheme: OK"
+
+        assert u.host == "api.example.com"
+        print "host: OK"
+
+        assert u.path == "/v1/users"
+        print "path: OK"
+
+        assert u.query == "page=2"
+        print "query: OK"
+
+        # No port specified → 0
+        assert u.port == 0
+        print "port absent: OK"
+
+        # With explicit port
+        var uport = Uri.parse("http://localhost:8080/health")
+        assert uport.port == 8080
+        print "port present: OK"
+
+        # Scheme and path only
+        var ufile = Uri.parse("file:///etc/hosts")
+        assert ufile.scheme == "file"
+        assert ufile.path == "/etc/hosts"
+        print "file uri: OK"
+
+        print "All URI tests passed."

@@ -2886,6 +2886,135 @@ const Generator = struct {
             \\fn _log_timestamp(v: bool) void { _log_timestamps = v; }
             \\
         );
+        // ── Uri stdlib ──────────────────────────────────────────────────────────
+        // Parses a URI string into scheme/host/path/query/port components.
+        try g.w.writeAll(
+            \\const UriResult = struct {
+            \\    scheme: []const u8,
+            \\    host:   []const u8,
+            \\    path:   []const u8,
+            \\    query:  []const u8,
+            \\    port:   i64,
+            \\};
+            \\fn _uri_parse(url: []const u8) UriResult {
+            \\    const _u = std.Uri.parse(url) catch return UriResult{ .scheme="", .host="", .path="", .query="", .port=0 };
+            \\    const _host: []const u8 = if (_u.host) |h| switch (h) {
+            \\        .raw => |r| r, .percent_encoded => |p| p,
+            \\    } else "";
+            \\    const _path: []const u8 = switch (_u.path) {
+            \\        .raw => |r| r, .percent_encoded => |p| p,
+            \\    };
+            \\    const _query: []const u8 = if (_u.query) |q| switch (q) {
+            \\        .raw => |r| r, .percent_encoded => |p| p,
+            \\    } else "";
+            \\    return UriResult{
+            \\        .scheme = _u.scheme,
+            \\        .host   = _host,
+            \\        .path   = _path,
+            \\        .query  = _query,
+            \\        .port   = if (_u.port) |p| @intCast(p) else 0,
+            \\    };
+            \\}
+            \\
+        );
+        // ── Compress stdlib ─────────────────────────────────────────────────────
+        // gzip is stubbed (std.compress.flate.Compress not yet implemented in Zig 0.15.2).
+        // gunzip uses std.compress.flate.Decompress; returns null on failure.
+        try g.w.writeAll(
+            \\fn _compress_gzip(_: []const u8) []const u8 { return ""; }
+            \\fn _compress_gunzip(data: []const u8) ?[]const u8 {
+            \\    var _in = std.Io.Reader.fixed(data);
+            \\    var _window: [std.compress.flate.max_window_len]u8 = undefined;
+            \\    var _decomp = std.compress.flate.Decompress.init(&_in, .gzip, &_window);
+            \\    return _decomp.reader.allocRemaining(_allocator, .unlimited) catch null;
+            \\}
+            \\
+        );
+        // ── Mime stdlib ─────────────────────────────────────────────────────────
+        // Static extension ↔ MIME type lookup tables.
+        try g.w.writeAll(
+            \\fn _mime_from_ext(ext: []const u8) []const u8 {
+            \\    const _map = [_]struct { []const u8, []const u8 }{
+            \\        .{ ".html",  "text/html" },          .{ ".htm",   "text/html" },
+            \\        .{ ".css",   "text/css" },
+            \\        .{ ".js",    "text/javascript" },    .{ ".mjs",   "text/javascript" },
+            \\        .{ ".ts",    "text/typescript" },
+            \\        .{ ".json",  "application/json" },
+            \\        .{ ".xml",   "application/xml" },
+            \\        .{ ".txt",   "text/plain" },
+            \\        .{ ".csv",   "text/csv" },
+            \\        .{ ".md",    "text/markdown" },
+            \\        .{ ".png",   "image/png" },
+            \\        .{ ".jpg",   "image/jpeg" },         .{ ".jpeg",  "image/jpeg" },
+            \\        .{ ".gif",   "image/gif" },
+            \\        .{ ".svg",   "image/svg+xml" },
+            \\        .{ ".ico",   "image/x-icon" },
+            \\        .{ ".webp",  "image/webp" },
+            \\        .{ ".pdf",   "application/pdf" },
+            \\        .{ ".zip",   "application/zip" },
+            \\        .{ ".gz",    "application/gzip" },
+            \\        .{ ".tar",   "application/x-tar" },
+            \\        .{ ".mp3",   "audio/mpeg" },
+            \\        .{ ".mp4",   "video/mp4" },
+            \\        .{ ".wav",   "audio/wav" },
+            \\        .{ ".ogg",   "audio/ogg" },
+            \\        .{ ".webm",  "video/webm" },
+            \\        .{ ".wasm",  "application/wasm" },
+            \\        .{ ".ttf",   "font/ttf" },
+            \\        .{ ".woff",  "font/woff" },
+            \\        .{ ".woff2", "font/woff2" },
+            \\    };
+            \\    for (_map) |e| if (std.mem.eql(u8, e[0], ext)) return e[1];
+            \\    return "application/octet-stream";
+            \\}
+            \\fn _mime_to_ext(mime: []const u8) []const u8 {
+            \\    const _map = [_]struct { []const u8, []const u8 }{
+            \\        .{ "text/html",        ".html" },
+            \\        .{ "text/css",         ".css"  },
+            \\        .{ "text/javascript",  ".js"   },
+            \\        .{ "text/plain",       ".txt"  },
+            \\        .{ "text/csv",         ".csv"  },
+            \\        .{ "text/markdown",    ".md"   },
+            \\        .{ "application/json", ".json" },
+            \\        .{ "application/xml",  ".xml"  },
+            \\        .{ "application/pdf",  ".pdf"  },
+            \\        .{ "application/zip",  ".zip"  },
+            \\        .{ "application/gzip", ".gz"   },
+            \\        .{ "application/wasm", ".wasm" },
+            \\        .{ "image/png",        ".png"  },
+            \\        .{ "image/jpeg",       ".jpg"  },
+            \\        .{ "image/gif",        ".gif"  },
+            \\        .{ "image/svg+xml",    ".svg"  },
+            \\        .{ "image/webp",       ".webp" },
+            \\        .{ "audio/mpeg",       ".mp3"  },
+            \\        .{ "audio/wav",        ".wav"  },
+            \\        .{ "video/mp4",        ".mp4"  },
+            \\    };
+            \\    for (_map) |e| if (std.mem.eql(u8, e[0], mime)) return e[1];
+            \\    return "";
+            \\}
+            \\
+        );
+        // ── Timer stdlib ────────────────────────────────────────────────────────
+        // High-resolution elapsed time backed by std.time.nanoTimestamp().
+        try g.w.writeAll(
+            \\const TimerHandle = struct {
+            \\    _start_ns: i128,
+            \\    pub fn elapsed(self: *const TimerHandle) f64 {
+            \\        const _ns: i128 = std.time.nanoTimestamp() - self._start_ns;
+            \\        return @as(f64, @floatFromInt(_ns)) / 1_000_000.0;
+            \\    }
+            \\    pub fn elapsedMicros(self: *const TimerHandle) i64 {
+            \\        const _ns: i128 = std.time.nanoTimestamp() - self._start_ns;
+            \\        return @intCast(@divFloor(_ns, 1000));
+            \\    }
+            \\    pub fn reset(self: *TimerHandle) void {
+            \\        self._start_ns = std.time.nanoTimestamp();
+            \\    }
+            \\};
+            \\fn _timer_start() TimerHandle { return .{ ._start_ns = std.time.nanoTimestamp() }; }
+            \\
+        );
         for (module.decls) |decl| try g.genTopDecl(decl);
 
         // Emit a top-level `pub fn main()` thunk if any class has a
@@ -3984,7 +4113,8 @@ const Generator = struct {
         // Cross-module instances must be `var` even when not reassigned: their methods
         // take `*Self` receivers, and Zig rejects passing `*const Self` to `*Self`.
         // Same-module instances are handled per-method via normal mutation scanning.
-        const needs_var_for_methods = (tc_init_type == .cross_module);
+        const needs_var_for_methods = (tc_init_type == .cross_module or
+                                       tc_init_type == .timer_handle);
         const kw: []const u8 = if (n.is_const or (!is_mutated and !needs_var_for_methods)) "const" else "var";
 
         // StringBuilder constructor: `var sb as StringBuilder = StringBuilder()`
@@ -5130,6 +5260,80 @@ const Generator = struct {
             try g.w.writeAll("_log_timestamp(");
             if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("true");
             try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    // ── Uri static calls ─────────────────────────────────────────────────────
+    fn genUriCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "parse")) {
+            try g.w.writeAll("_uri_parse(");
+            if (args.len > 0) try g.genExpr(args[0].value);
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    // ── Compress static calls ────────────────────────────────────────────────
+    fn genCompressCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "gzip")) {
+            try g.w.writeAll("_compress_gzip(");
+            if (args.len > 0) try g.genExpr(args[0].value);
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "gunzip")) {
+            try g.w.writeAll("_compress_gunzip(");
+            if (args.len > 0) try g.genExpr(args[0].value);
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    // ── Mime static calls ────────────────────────────────────────────────────
+    fn genMimeCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "fromExt")) {
+            try g.w.writeAll("_mime_from_ext(");
+            if (args.len > 0) try g.genExpr(args[0].value);
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "toExt")) {
+            try g.w.writeAll("_mime_to_ext(");
+            if (args.len > 0) try g.genExpr(args[0].value);
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    // ── Timer static calls ───────────────────────────────────────────────────
+    fn genTimerCall(g: Generator, method: []const u8, _: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "start")) {
+            try g.w.writeAll("_timer_start()");
+            return true;
+        }
+        return false;
+    }
+
+    // ── TimerHandle instance method calls ────────────────────────────────────
+    fn genTimerResultMethod(g: Generator, obj: *const Ast.Expr, method: []const u8, _: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "elapsed")) {
+            try g.genExpr(obj);
+            try g.w.writeAll(".elapsed()");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "elapsedMicros")) {
+            try g.genExpr(obj);
+            try g.w.writeAll(".elapsedMicros()");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "reset")) {
+            try g.genExpr(obj);
+            try g.w.writeAll(".reset()");
             return true;
         }
         return false;
@@ -8184,6 +8388,34 @@ const Generator = struct {
                 if (try g.genLogCall(mem.member, e.args)) return;
             }
         }
+        // Uri static calls: Uri.parse(url).
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Uri")) {
+                if (try g.genUriCall(mem.member, e.args)) return;
+            }
+        }
+        // Compress static calls: Compress.gzip(data), Compress.gunzip(data).
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Compress")) {
+                if (try g.genCompressCall(mem.member, e.args)) return;
+            }
+        }
+        // Mime static calls: Mime.fromExt(ext), Mime.toExt(mime).
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Mime")) {
+                if (try g.genMimeCall(mem.member, e.args)) return;
+            }
+        }
+        // Timer static calls: Timer.start().
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Timer")) {
+                if (try g.genTimerCall(mem.member, e.args)) return;
+            }
+        }
         // Json static calls: Json.parse(s), Json.stringify(v), Json.object(), Json.array().
         if (e.callee.* == .member) {
             const mem = e.callee.member;
@@ -8343,6 +8575,7 @@ const Generator = struct {
                     .csv_writer    => if (try g.genCsvWriterMethod(mem.object, mem.member, e.args)) return,
                     .csv_row       => if (try g.genListMethod(mem.object, mem.member, e.args)) return,
                     .arg_result    => if (try g.genArgResultMethod(mem.object, mem.member, e.args)) return,
+                    .timer_handle  => if (try g.genTimerResultMethod(mem.object, mem.member, e.args)) return,
                     .unknown       => if (try g.genListMethod(mem.object, mem.member, e.args)) return,
                     else           => {},
                 }
@@ -9168,6 +9401,8 @@ fn printFmt(tc: ?*const TypeChecker.TypeCheckResult, catch_var: []const u8, expr
         .csv_writer,
         .csv_row,
         .arg_result,
+        .uri_result,
+        .timer_handle,
         .optional,
         .tuple,
         .generic_named,

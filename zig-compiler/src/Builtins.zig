@@ -100,6 +100,13 @@ pub const NAMES = std.StaticStringMap(void).initComptime(&.{
     .{ "ArgResult",     {} },
     .{ "Terminal",      {} },
     .{ "Log",           {} },
+    // Stdlib batteries-included phase 2 (0.10)
+    .{ "Uri",           {} },
+    .{ "UriResult",     {} },
+    .{ "Compress",      {} },
+    .{ "Mime",          {} },
+    .{ "Timer",         {} },
+    .{ "TimerHandle",   {} },
 });
 
 /// Returns true iff `name` is a built-in type name.

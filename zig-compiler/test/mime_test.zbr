@@ -1,0 +1,37 @@
+class MimeTest
+    shared def main
+        # fromExt: known extensions
+        assert Mime.fromExt(".png") == "image/png"
+        print "fromExt png: OK"
+
+        assert Mime.fromExt(".html") == "text/html"
+        print "fromExt html: OK"
+
+        assert Mime.fromExt(".json") == "application/json"
+        print "fromExt json: OK"
+
+        assert Mime.fromExt(".js") == "text/javascript"
+        print "fromExt js: OK"
+
+        assert Mime.fromExt(".mp4") == "video/mp4"
+        print "fromExt mp4: OK"
+
+        # fromExt: unknown → octet-stream
+        assert Mime.fromExt(".zbr") == "application/octet-stream"
+        print "fromExt unknown: OK"
+
+        # toExt: known MIME types
+        assert Mime.toExt("text/html") == ".html"
+        print "toExt html: OK"
+
+        assert Mime.toExt("image/png") == ".png"
+        print "toExt png: OK"
+
+        assert Mime.toExt("application/json") == ".json"
+        print "toExt json: OK"
+
+        # toExt: unknown → empty string
+        assert Mime.toExt("application/x-unknown") == ""
+        print "toExt unknown: OK"
+
+        print "All MIME tests passed."

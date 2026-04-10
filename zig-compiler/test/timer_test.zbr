@@ -1,0 +1,30 @@
+class TimerTest
+    shared def main
+        var t = Timer.start()
+
+        # elapsed returns milliseconds as float (>= 0)
+        var ms = t.elapsed()
+        assert ms >= 0.0
+        print "elapsed: OK"
+
+        # elapsedMicros returns microseconds as int (>= 0)
+        var us = t.elapsedMicros()
+        assert us >= 0
+        print "elapsedMicros: OK"
+
+        # reset restarts the clock; subsequent elapsed should still be >= 0
+        t.reset()
+        var ms2 = t.elapsed()
+        assert ms2 >= 0.0
+        print "reset: OK"
+
+        # Two timers are independent
+        var t1 = Timer.start()
+        var t2 = Timer.start()
+        var e1 = t1.elapsed()
+        var e2 = t2.elapsed()
+        assert e1 >= 0.0
+        assert e2 >= 0.0
+        print "independent timers: OK"
+
+        print "All timer tests passed."

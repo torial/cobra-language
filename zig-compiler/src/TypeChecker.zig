@@ -106,6 +106,10 @@ pub const Type = union(enum) {
     csv_row,
     /// `ArgResult` — parsed command-line arguments from `Arg.parse()`.
     arg_result,
+    /// `UriResult` — parsed URI from `Uri.parse(url)`.
+    uri_result,
+    /// `TimerHandle` — high-resolution timer from `Timer.start()`.
+    timer_handle,
 
     // ── Optional ──────────────────────────────────────────────────────────────
     /// `?T` — nilable wrapper around another type.
@@ -169,6 +173,8 @@ pub const Type = union(enum) {
             .csv_writer     => b == .csv_writer,
             .csv_row        => b == .csv_row,
             .arg_result     => b == .arg_result,
+            .uri_result     => b == .uri_result,
+            .timer_handle   => b == .timer_handle,
             .json_array     => b == .json_array,
             .tuple => |ea| switch (b) {
                 .tuple => |eb| blk: {
@@ -249,6 +255,8 @@ pub const Type = union(enum) {
             .csv_writer     => "CsvWriter",
             .csv_row        => "CsvRow",
             .arg_result     => "ArgResult",
+            .uri_result     => "UriResult",
+            .timer_handle   => "TimerHandle",
             .optional       => "?T",
             .tuple          => "tuple",
             .cross_module   => |cm| cm.type_name,
@@ -1338,6 +1346,14 @@ const TypeChecker = struct {
             if (std.mem.eql(u8, e.member, "stdout"))    return .string;
             if (std.mem.eql(u8, e.member, "stderr"))    return .string;
         }
+        // UriResult field access.
+        if (obj_type == .uri_result) {
+            if (std.mem.eql(u8, e.member, "scheme") or
+                std.mem.eql(u8, e.member, "host")   or
+                std.mem.eql(u8, e.member, "path")   or
+                std.mem.eql(u8, e.member, "query"))  return .string;
+            if (std.mem.eql(u8, e.member, "port"))   return .int;
+        }
         // If the object is an optional type (e.g. after `n?.next` where n is `?Node`),
         // strip the optional wrapper and look up the member on the inner type.
         // This lets the TC correctly infer member types through optional chains.
@@ -1721,6 +1737,46 @@ const TypeChecker = struct {
                     _ = try tc.inferExpr(mem.object);
                     for (e.args) |a| _ = try tc.inferExpr(a.value);
                     return .void_;
+                }
+                // Uri.* static methods.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Uri")) {
+                    _ = try tc.inferExpr(mem.object);
+                    for (e.args) |a| _ = try tc.inferExpr(a.value);
+                    if (std.mem.eql(u8, mem.member, "parse")) return .uri_result;
+                    return .unknown;
+                }
+                // Compress.* static methods.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Compress")) {
+                    _ = try tc.inferExpr(mem.object);
+                    for (e.args) |a| _ = try tc.inferExpr(a.value);
+                    if (std.mem.eql(u8, mem.member, "gzip")) return .string;
+                    if (std.mem.eql(u8, mem.member, "gunzip")) {
+                        const boxed = tc.map_alloc.create(Type) catch return .string;
+                        boxed.* = .string;
+                        return .{ .optional = boxed };
+                    }
+                    return .unknown;
+                }
+                // Mime.* static methods — all return strings.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Mime")) {
+                    _ = try tc.inferExpr(mem.object);
+                    for (e.args) |a| _ = try tc.inferExpr(a.value);
+                    return .string;
+                }
+                // Timer.* static methods.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Timer")) {
+                    _ = try tc.inferExpr(mem.object);
+                    for (e.args) |a| _ = try tc.inferExpr(a.value);
+                    if (std.mem.eql(u8, mem.member, "start")) return .timer_handle;
+                    return .unknown;
+                }
+                // TimerHandle instance method calls.
+                if (try tc.inferExpr(mem.object) == .timer_handle) {
+                    for (e.args) |a| _ = try tc.inferExpr(a.value);
+                    if (std.mem.eql(u8, mem.member, "elapsed"))       return .float;
+                    if (std.mem.eql(u8, mem.member, "elapsedMicros")) return .int;
+                    if (std.mem.eql(u8, mem.member, "reset"))         return .void_;
+                    return .unknown;
                 }
                 // Json.* static methods.
                 if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Json")) {

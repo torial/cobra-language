@@ -1,0 +1,13 @@
+class CompressTest
+    shared def main
+        # gzip: stubbed in Zig 0.15.2 (std.compress.flate.Compress not yet implemented)
+        # Returns "" since compression is not yet implemented
+        print Compress.gzip("hello world").len
+        print "gzip (stubbed): OK"
+
+        # gunzip: valid gzip data is non-trivial to embed; test failure path returns nil
+        var result = Compress.gunzip("not valid gzip")
+        assert result == nil
+        print "gunzip bad input: OK"
+
+        print "All compress tests passed."
