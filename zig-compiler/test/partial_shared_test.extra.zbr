@@ -1,0 +1,7 @@
+# Partial file: adds a shared method to PartialSharedTest.
+# Tests that shared methods in partials are merged correctly.
+
+class PartialSharedTest
+    shared
+        def describe as str
+            return "PartialSharedTest v1"

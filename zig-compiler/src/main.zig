@@ -391,10 +391,45 @@ fn mergePartialInto(root: *Ast.Module, partial: *const Ast.Module, arena: std.me
                     if (rdecl != .class) continue;
                     const rc = rdecl.class; // *Ast.DeclClass — mutable pointer into arena
                     if (!std.mem.eql(u8, rc.name, pc.name)) continue;
-                    rc.members    = try concatSlice(Ast.Decl,    rc.members,    pc.members,    arena);
-                    rc.implements = try concatSlice(Ast.TypeRef, rc.implements, pc.implements, arena);
-                    rc.adds       = try concatSlice(Ast.TypeRef, rc.adds,       pc.adds,       arena);
-                    rc.invariants = try concatSlice(*Ast.Expr,   rc.invariants, pc.invariants, arena);
+                    // Check for duplicate method names before merging.
+                    // Duplicate methods cause Zig compile errors and are almost
+                    // always an accidental copy-paste between partial files.
+                    // NOTE: Zebra supports overloading via different signatures,
+                    // but the Binder does not currently distinguish overloads by
+                    // parameter count — same-named methods ARE duplicates.
+                    for (pc.members) |pm| {
+                        if (pm != .method) continue;
+                        const pname = pm.method.name;
+                        for (rc.members) |rm| {
+                            if (rm != .method) continue;
+                            if (std.mem.eql(u8, rm.method.name, pname)) {
+                                std.debug.print(
+                                    "{s}: duplicate method '{s}.{s}' — already defined in root; skipping partial definition\n",
+                                    .{ partial.file, rc.name, pname });
+                                break;
+                            }
+                        }
+                    }
+                    // Filter out duplicates before appending.
+                    var filtered = std.ArrayListUnmanaged(Ast.Decl){};
+                    for (pc.members) |pm| {
+                        if (pm == .method) {
+                            const pname = pm.method.name;
+                            var is_dup = false;
+                            for (rc.members) |rm| {
+                                if (rm == .method and std.mem.eql(u8, rm.method.name, pname)) {
+                                    is_dup = true;
+                                    break;
+                                }
+                            }
+                            if (is_dup) continue;
+                        }
+                        try filtered.append(arena, pm);
+                    }
+                    rc.members    = try concatSlice(Ast.Decl,    rc.members,    filtered.items, arena);
+                    rc.implements = try concatSlice(Ast.TypeRef, rc.implements, pc.implements,  arena);
+                    rc.adds       = try concatSlice(Ast.TypeRef, rc.adds,       pc.adds,        arena);
+                    rc.invariants = try concatSlice(*Ast.Expr,   rc.invariants, pc.invariants,  arena);
                     matched = true;
                     break;
                 }

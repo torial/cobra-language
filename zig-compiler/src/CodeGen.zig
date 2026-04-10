@@ -628,9 +628,16 @@ fn seedEscapedFromReturns(stmts: []const Ast.Stmt, set: *std.StringHashMap(void)
     }
 }
 
-/// One propagation pass over var decls:  if variable `y` is already escaped and
-/// `var y = <expr>`, add all idents from <expr> to the escaped set (because y's
-/// value was constructed from those idents — their buffers may be embedded in y).
+/// One propagation pass over var decls and field-write assigns:
+///
+///   • `var y = <expr>` — if `y` is escaped, add all idents in <expr> to the
+///     escaped set (y's buffers may have come from those idents).
+///   • `obj.field = <expr>` — if `obj` is escaped, add all idents in <expr> to
+///     the escaped set.  Without this, code like:
+///       var list = List(); result.items = list; return result
+///     would incorrectly emit `defer list.deinit()` while `result.items`
+///     still references the freed ArrayList — a UAF.
+///
 /// Returns true if the set grew (caller loops until stable).
 fn propagateEscapesOnce(stmts: []const Ast.Stmt, set: *std.StringHashMap(void)) anyerror!bool {
     var grew = false;
@@ -640,6 +647,16 @@ fn propagateEscapesOnce(stmts: []const Ast.Stmt, set: *std.StringHashMap(void)) 
                 if (set.contains(n.name)) {
                     const before = set.count();
                     try collectAllIdents(e, set);
+                    if (set.count() > before) grew = true;
+                }
+            },
+            // Field write: `escaped_obj.field = rhs` — rhs values may embed
+            // into escaped_obj so they should not be freed before the caller.
+            .assign => |s| if (s.target.* == .member) {
+                const m = s.target.member;
+                if (m.object.* == .ident and set.contains(m.object.ident.name)) {
+                    const before = set.count();
+                    try collectAllIdents(s.value, set);
                     if (set.count() > before) grew = true;
                 }
             },

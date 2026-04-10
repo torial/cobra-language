@@ -1,0 +1,32 @@
+# Tests that tcTypeAnnotation correctly annotates optional-typed `var` locals.
+# Previously only primitives were annotated; optionals could silently get the
+# wrong Zig type if TC returned .optional(.string) and the annotation was omitted.
+
+class Main
+    shared
+        def findFirst(items as List(str), prefix as str) as str?
+            for item in items
+                if item.contains(prefix)
+                    return item
+            return nil
+
+        def main
+            var items as List(str) = List()
+            items.add("apple")
+            items.add("banana")
+            items.add("cherry")
+
+            # Optional result — should annotate as ?[]const u8 when mutable
+            var found = Main.findFirst(items, "ban")
+            if found != nil
+                print "found"
+            else
+                print "not found"
+
+            var missing = Main.findFirst(items, "xyz")
+            if missing == nil
+                print "correctly nil"
+            else
+                print "unexpected"
+
+            print "optional_ann_test: done"

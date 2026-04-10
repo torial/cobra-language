@@ -86,4 +86,34 @@ These fail WITH A COMPILER ERROR — that IS the test passing:
 
 ---
 
+---
+
+### BUG-008: Mutation scanner — `.unknown` TC type caused spurious `var` — FIXED
+- **Status:** Fixed 2026-04-09
+- **Was:** When `tc.resolve.exprs` had no entry for an ident used as a method receiver (common for stdlib builtins like `sys.args()`), `inferIdent` returned `.unknown`, which the scanner conservatively treated as always-mutating — marking variables like `args` as `var` when they should be `const`.
+- **Fix:** Removed the `if (obj_type == .unknown) break :blk true` conservative path. Unknown types now fall through to the explicit allow-list. Added `if (obj_type == .string) break :blk false` guard: Zebra strings are always immutable, so no method call should mark a string var as `var`. These two changes together fix `string_methods_test` (`str.reverse()` was in the List-mutation allow-list) and `sys_test` (`args.count()` was treating the unresolved `args` as always-mutating).
+
+---
+
+### BUG-009: Escape analysis — field writes not propagated — FIXED
+- **Status:** Fixed 2026-04-09
+- **Was:** `propagateEscapesOnce` only traced `var y = <expr>` alias chains. If a variable was stored into a returned struct's field (`result.items = list; return result`), `list` was not marked escaped and would get a `defer list.deinit()` while `result.items` still referenced its memory — a UAF.
+- **Fix:** Added `.assign => |s|` handling in `propagateEscapesOnce`: if the assignment target is a field access (`obj.field`) and `obj` is already in the escaped set, all idents in the RHS value are added to the escaped set.
+
+---
+
+### BUG-010: Partial class — duplicate method silently appended — FIXED
+- **Status:** Fixed 2026-04-09
+- **Was:** `mergePartialInto` concatenated all members from a partial without checking for name conflicts. If a partial redefined a method already in the root file, both definitions were appended, producing a Zig compile error with a confusing message about the generated file.
+- **Fix:** `mergePartialInto` now scans for duplicate method names before merging. Duplicates emit a clear warning (`"duplicate method 'ClassName.method' — already defined in root"`) and the partial definition is skipped. Non-method members (vars, properties) are still appended unconditionally.
+
+---
+
+### BUG-011: `tcTypeAnnotation` — comprehensive type annotation for `var` locals
+- **Status:** Fixed 2026-04-09
+- **Context:** Previously `genLocalVar` used an ad-hoc 6-case inline switch (`.int`, `.uint`, `.float`, `.bool`, `.char`, `.string`) to emit type annotations on mutable local variables. Several cases were missing: sized numerics (`int32`, `uint8`), optional wrappers (`?str`), and `str_slice` (`[]str`).
+- **Fix:** Replaced the inline switch with `tcTypeAnnotation(t, alloc)` — a dedicated module-level function mapping all `TypeChecker.Type` variants to Zig annotation strings. All results are uniformly heap-allocated and freed with `defer`. Unknown types and named/stdlib types return null (Zig infers correctly for those). The generic-type assumption (generics always have explicit AST annotations so tcTypeAnnotation is never called for them) is documented inline.
+
+---
+
 *Last updated: 2026-04-09*
