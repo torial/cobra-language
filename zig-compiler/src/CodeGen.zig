@@ -1066,11 +1066,18 @@ const Generator = struct {
     /// Used to emit `// zbr:file:line` markers before each statement so
     /// that Zig compiler errors can be remapped to Zebra source locations.
     source_file: []const u8 = "",
+    /// True when generating the body of a generic class (emitted as a comptime
+    /// function `pub fn Name(comptime T: type) type { return struct { … }; }`).
+    /// Enables `@This()` instead of `owner` for self-type references in init/methods.
+    is_generic: bool = false,
 
     // ── Context-adjustment helpers ────────────────────────────────────────────
 
     fn withOwner(g: Generator, new_owner: []const u8) Generator {
         var c = g; c.owner = new_owner; return c;
+    }
+    fn withGeneric(g: Generator) Generator {
+        var c = g; c.is_generic = true; return c;
     }
     fn withExtSelf(g: Generator, t: TypeChecker.Type) Generator {
         var c = g; c.ext_self_type = t; return c;
@@ -2792,7 +2799,71 @@ const Generator = struct {
         }
     }
 
+    /// Emit a generic class as a Zig comptime function.
+    ///
+    /// `class Stack(T)` →
+    ///   pub fn Stack(comptime T: type) type { return struct { … }; }
+    ///   const _ttag_Stack: u64 = <hash>;
+    ///
+    /// Inside the returned struct:
+    ///   - `init(…)` returns `@This()` and uses `var self: @This() = undefined`
+    ///   - instance methods use `self: *@This()`
+    ///   - `_type_tag` defaults to `_ttag_Stack` (module-scope const, always accessible)
+    fn genGenericClass(g: Generator, n: *Ast.DeclClass) anyerror!void {
+        try g.writeIndent();
+        // Emit comptime function signature: pub fn Stack(comptime T: type, ...) type {
+        try g.w.print("pub fn {s}(", .{n.name});
+        for (n.type_params, 0..) |tp, i| {
+            if (i > 0) try g.w.writeAll(", ");
+            try g.w.print("comptime {s}: type", .{tp});
+        }
+        try g.w.writeAll(") type {\n");
+
+        const fg = g.indented();
+        try fg.writeIndent();
+        try fg.w.writeAll("return struct {\n");
+
+        // Inner generator: owner = class name, is_generic = true
+        const ig = fg.indented().withOwner(n.name).withGeneric();
+
+        // ① Type-tag field (references module-scope _ttag_ClassName constant).
+        try ig.writeIndent();
+        try ig.w.print("_type_tag: u64 = _ttag_{s},\n", .{n.name});
+
+        // ② Regular members (fields, methods, init).
+        for (n.members) |decl| try ig.genMember(decl);
+
+        // ③ Synthetic default init if no explicit cue init.
+        {
+            var has_init = false;
+            for (n.members) |m| { if (m == .init) { has_init = true; break; } }
+            if (!has_init) {
+                try ig.writeIndent();
+                try ig.w.writeAll("pub fn init() @This() {\n");
+                const dig = ig.indented();
+                try dig.writeIndent();
+                try dig.w.writeAll("var self: @This() = undefined;\n");
+                try dig.writeIndent();
+                try dig.w.print("self._type_tag = _ttag_{s};\n", .{n.name});
+                try dig.writeIndent();
+                try dig.w.writeAll("return self;\n");
+                try ig.writeIndent();
+                try ig.w.writeAll("}\n\n");
+            }
+        }
+
+        try fg.writeIndent();
+        try fg.w.writeAll("};\n");
+        try g.writeIndent();
+        try g.w.writeAll("}\n\n");
+
+        // Type-tag constant — same as for non-generic classes: low 32 bits = class hash.
+        // High 32 bits stay 0 until Phase 3 (is Stack(int) checks).
+        try g.w.print("const _ttag_{s}: u64 = {d};\n\n", .{ n.name, @as(u64, zbr_hash_str(n.name)) });
+    }
+
     fn genClass(g: Generator, n: *Ast.DeclClass) anyerror!void {
+        if (n.type_params.len > 0) return g.genGenericClass(n);
         const cg = g.withOwner(n.name);
 
         try g.writeIndent();
@@ -3253,7 +3324,12 @@ const Generator = struct {
             scanTco(body, n.name, g.owner, n.mods.shared) else false;
 
         if (has_self) {
-            try g.w.print("self: *{s}", .{g.owner});
+            // Generic class methods use *@This() (the struct is anonymous inside the comptime fn).
+            if (g.is_generic) {
+                try g.w.writeAll("self: *@This()");
+            } else {
+                try g.w.print("self: *{s}", .{g.owner});
+            }
             if (n.params.len > 0) try g.w.writeAll(", ");
         }
 
@@ -3403,7 +3479,10 @@ const Generator = struct {
             try g.w.writeAll(": ");
             if (p.type_) |tr| try g.genType(tr) else try g.w.writeAll("anytype");
         }
-        try g.w.print(") {s} {{\n", .{g.owner});
+        // Generic class init returns @This() (the anonymous struct from the comptime fn).
+        // Non-generic init returns the named owner type.
+        const self_type_name = if (g.is_generic) "@This()" else g.owner;
+        try g.w.print(") {s} {{\n", .{self_type_name});
         const body = n.body orelse &[_]Ast.Stmt{};
         var refs = try collectRefs(body, g.resolve, g.alloc);
         defer refs.deinit();
@@ -3413,7 +3492,7 @@ const Generator = struct {
         defer cv_map.deinit();
         const bg = mg.indented().withMutated(&mut_set).withClosureVars(&cv_map);
         try bg.writeIndent();
-        try bg.w.print("var self: {s} = undefined;\n", .{g.owner});
+        try bg.w.print("var self: {s} = undefined;\n", .{self_type_name});
         // Initialise the type-ID field so `expr is TypeName` works correctly
         // even when the struct was allocated with `= undefined`.
         try bg.writeIndent();
@@ -7235,6 +7314,25 @@ const Generator = struct {
     }
 
     fn genCall(g: Generator, e: *Ast.ExprCall) anyerror!void {
+        // Generic construction: Stack(int)(42) → Stack(i64).init(42)
+        // Detected by type_args.len > 0 (set by AstBuilder.buildGenericConstruct).
+        if (e.type_args.len > 0 and e.callee.* == .ident) {
+            const class_name = e.callee.ident.name;
+            try g.w.writeAll(class_name);
+            try g.w.writeAll("(");
+            for (e.type_args, 0..) |ta, i| {
+                if (i > 0) try g.w.writeAll(", ");
+                try g.genType(ta);
+            }
+            try g.w.writeAll(").init(");
+            for (e.args, 0..) |a, i| {
+                if (i > 0) try g.w.writeAll(", ");
+                try g.genExpr(a.value);
+            }
+            try g.w.writeAll(")");
+            return;
+        }
+
         // Union construction: TypeName.variant(value) → TypeName{ .variant = value }
         // or TypeName.variant() → TypeName{ .variant = {} } for unit variants.
         // e.details.toString() inside a catch block →
@@ -7286,7 +7384,14 @@ const Generator = struct {
         if (e.callee.* == .ident and e.args.len == 0) {
             const name = e.callee.ident.name;
             if (std.mem.eql(u8, name, "List")) {
-                try g.w.writeAll("std.ArrayList([]const u8){}");
+                // Inside a generic class, emit `.{}` so Zig infers the element type
+                // from the assignment target (e.g., `self.items: std.ArrayList(T)`).
+                // Outside generic context, default to string-element list.
+                if (g.is_generic) {
+                    try g.w.writeAll(".{}");
+                } else {
+                    try g.w.writeAll("std.ArrayList([]const u8){}");
+                }
                 return;
             }
             if (std.mem.eql(u8, name, "HashMap")) {

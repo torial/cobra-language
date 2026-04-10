@@ -1384,6 +1384,17 @@ const TypeChecker = struct {
     fn inferCall(tc: TypeChecker, e: *Ast.ExprCall) anyerror!Type {
         for (e.args) |arg| _ = try tc.inferExpr(arg.value);
 
+        // Generic construction: Stack(int)(42) — callee ident resolves to a generic class.
+        // type_args.len > 0 is the discriminator set by AstBuilder.buildGenericConstruct.
+        if (e.type_args.len > 0) {
+            if (e.callee.* == .ident) {
+                if (tc.resolve.exprs.get(&e.callee.ident)) |sym| {
+                    if (sym.kind == .class) return Type{ .named = sym };
+                }
+            }
+            return .unknown;
+        }
+
         // Special case: direct call of a named method — return its declared
         // return type so that callers can type-check against it.
         switch (e.callee.*) {
@@ -1922,7 +1933,9 @@ const TypeChecker = struct {
         // Fallback must be assignable to the inner type.
         if (inner != .unknown and ft != .unknown and !Type.isAssignable(ft, inner))
             try tc.emitMismatch(spanOf(e.fallback), ft, inner);
-        return inner;
+        // When the optional's inner type is unknown (e.g., generic type param),
+        // use the fallback's type so print/assignment gets a concrete type hint.
+        return if (inner != .unknown) inner else ft;
     }
 
     fn inferCatch(tc: TypeChecker, e: *Ast.ExprCatch) anyerror!Type {
@@ -1994,6 +2007,7 @@ const TypeChecker = struct {
             .union_        => .{ .named = sym }, // the union type itself
             .union_variant => .unknown, // TODO: resolve to parent union type
             .module        => .unknown, // imported module — cross-file types not yet resolved
+            .type_param    => .unknown, // generic type parameter — concrete type determined at instantiation
         };
     }
 
@@ -2013,7 +2027,7 @@ const TypeChecker = struct {
                 const resolved = tc.resolve.types.get(n) orelse break :blk .unknown;
                 break :blk switch (resolved) {
                     .builtin => builtinType(n.name),
-                    .symbol  => |s| .{ .named = s },
+                    .symbol  => |s| if (s.kind == .type_param) .unknown else .{ .named = s },
                 };
             },
             .nilable => |inner| blk: {

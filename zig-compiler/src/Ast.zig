@@ -101,6 +101,9 @@ pub const DeclClass = struct {
     span: Span,
     mods: Modifiers,
     name: []const u8,
+    /// Type parameter names for generic classes: `class Stack(T)` → `["T"]`.
+    /// Empty slice for non-generic classes.
+    type_params: []const []const u8,
     /// `implements IFoo, IBar`
     implements: []const TypeRef,
     /// `adds Mixin`

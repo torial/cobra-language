@@ -74,6 +74,8 @@ pub const SymbolKind = enum {
     union_,
     /// Imported module alias introduced by a `use` directive.
     module,
+    /// Generic type parameter (e.g., `T` in `class Stack(T)`).
+    type_param,
 };
 
 // ── Declaration reference ─────────────────────────────────────────────────────
@@ -105,6 +107,9 @@ pub const DeclRef = union(enum) {
     union_:        *Ast.DeclUnion,
     /// `use` directive — the alias names the imported module.
     use:           *Ast.DeclUse,
+    /// Generic type parameter placeholder (e.g., `T` in `class Stack(T)`).
+    /// Stores the span of the type-param name token for error reporting.
+    type_param:    Ast.Span,
 };
 
 // ── Symbol ────────────────────────────────────────────────────────────────────

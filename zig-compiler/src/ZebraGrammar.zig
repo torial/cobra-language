@@ -64,6 +64,8 @@ pub const NT = enum {
     ImplementsClauseOpt,
     AddsClauseOpt,
     TypeRefListNE,       // comma-separated type references (≥1)
+    TypeParamListNE,     // comma-separated type parameter names (≥1) in class(T, U) decls
+    GenericConstruct,    // ClassName(TypeArgs)(ValueArgs) — generic class instantiation
 
     InterfaceDecl,
     InterfaceHeader,     // optional inherits list
@@ -397,13 +399,25 @@ const type_rules: []const Rule = &.{
     // Comma-separated list of type references (for implements/adds)
     .{ .lhs = .TypeRefListNE, .rhs = &.{ n(.TypeRef) } },
     .{ .lhs = .TypeRefListNE, .rhs = &.{ n(.TypeRefListNE), t(.comma), n(.TypeRef) } },
+
+    // Type parameter names in a generic class declaration: class Stack(T) or class Pair(A, B)
+    .{ .lhs = .TypeParamListNE, .rhs = &.{ t(.id) } },
+    .{ .lhs = .TypeParamListNE, .rhs = &.{ n(.TypeParamListNE), t(.comma), t(.id) } },
 };
 
 // ── Class declaration ─────────────────────────────────────────────────────────
 
 const class_rules: []const Rule = &.{
+    // Non-generic class: class Dog implements IAnimal
     .{ .lhs = .ClassDecl, .rhs = &.{
         n(.ModList), t(.kw_class), t(.id),
+        n(.ClassHeader), n(.IsClauseOpt), n(.HasOpt), n(.WeavesOpt), t(.eol),
+        t(.indent), n(.MemberDeclList), t(.dedent),
+    } },
+    // Generic class: class Stack(T) or class Pair(A, B)
+    // Tokenizer emits `open_call` for `ClassName(` (identifier fused with open paren).
+    .{ .lhs = .ClassDecl, .rhs = &.{
+        n(.ModList), t(.kw_class), t(.open_call), n(.TypeParamListNE), t(.rparen),
         n(.ClassHeader), n(.IsClauseOpt), n(.HasOpt), n(.WeavesOpt), t(.eol),
         t(.indent), n(.MemberDeclList), t(.dedent),
     } },
@@ -1132,6 +1146,13 @@ const expr_rules: []const Rule = &.{
     .{ .lhs = .Atom, .rhs = &.{ t(.dot), t(.open_call), n(.ArgList), t(.rparen) } },
     // — Call: open_call consumes the `(`; args follow; `)` is rparen
     .{ .lhs = .Atom, .rhs = &.{ t(.open_call), n(.ArgList), t(.rparen) } },
+    // Generic construction: Stack(int)() or Stack(int)(5)
+    // The tokenizer emits `open_call` for `Stack(`, then TypeRefListNE for type args,
+    // then `rparen` closing the type args, then `lparen` (standalone) for value args.
+    // Unambiguous because `lparen` after `rparen` never appears in regular call syntax.
+    .{ .lhs = .Atom, .rhs = &.{ n(.GenericConstruct) } },
+    .{ .lhs = .GenericConstruct, .rhs = &.{ t(.open_call), n(.TypeRefListNE), t(.rparen), t(.lparen), t(.rparen) } },
+    .{ .lhs = .GenericConstruct, .rhs = &.{ t(.open_call), n(.TypeRefListNE), t(.rparen), t(.lparen), n(.ArgList), t(.rparen) } },
     // — Grouped expression
     .{ .lhs = .Atom, .rhs = &.{ t(.lparen), n(.Expr), t(.rparen) } },
     // — Tuple literal: (a, b)  (a, b, c)  …

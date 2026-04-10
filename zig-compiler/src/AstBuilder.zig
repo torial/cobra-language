@@ -177,19 +177,58 @@ const Builder = struct {
     //      8      9              10
 
     fn buildClassDecl(b: Builder, node: TN) anyerror!Ast.DeclClass {
+        // Detect generic vs non-generic by whether kids[2] is open_call (generic) or id (plain).
+        //
+        // Non-generic: ModList kw_class id ClassHeader IsClauseOpt HasOpt WeavesOpt eol indent MemberDeclList dedent
+        //   indices:   0       1         2  3           4           5      6         7    8      9              10
+        //
+        // Generic:     ModList kw_class open_call TypeParamListNE rparen ClassHeader IsClauseOpt HasOpt WeavesOpt eol indent MemberDeclList dedent
+        //   indices:   0       1         2         3               4      5           6           7      8         9   10     11             12
         const kids = ch(node);
-        var implements = std.ArrayList(Ast.TypeRef){};
-        var adds       = std.ArrayList(Ast.TypeRef){};
-        try b.collectClassHeader(kids[3], &implements, &adds);
-        return .{
-            .span       = spanOf(node, b.tokens),
-            .mods       = b.buildModList(kids[0]),
-            .name       = leafText(kids[2], b.tokens),
-            .implements = try implements.toOwnedSlice(b.arena),
-            .adds       = try adds.toOwnedSlice(b.arena),
-            .invariants = &.{},
-            .members    = try b.buildMemberDeclList(kids[9]),
-        };
+        const is_generic = isLeafKind(kids[2], .open_call);
+
+        var type_params = std.ArrayList([]const u8){};
+        var implements  = std.ArrayList(Ast.TypeRef){};
+        var adds        = std.ArrayList(Ast.TypeRef){};
+
+        if (is_generic) {
+            try b.collectTypeParamListNE(kids[3], &type_params);
+            try b.collectClassHeader(kids[5], &implements, &adds);
+            return .{
+                .span        = spanOf(node, b.tokens),
+                .mods        = b.buildModList(kids[0]),
+                .name        = leafText(kids[2], b.tokens),
+                .type_params = try type_params.toOwnedSlice(b.arena),
+                .implements  = try implements.toOwnedSlice(b.arena),
+                .adds        = try adds.toOwnedSlice(b.arena),
+                .invariants  = &.{},
+                .members     = try b.buildMemberDeclList(kids[11]),
+            };
+        } else {
+            try b.collectClassHeader(kids[3], &implements, &adds);
+            return .{
+                .span        = spanOf(node, b.tokens),
+                .mods        = b.buildModList(kids[0]),
+                .name        = leafText(kids[2], b.tokens),
+                .type_params = &.{},
+                .implements  = try implements.toOwnedSlice(b.arena),
+                .adds        = try adds.toOwnedSlice(b.arena),
+                .invariants  = &.{},
+                .members     = try b.buildMemberDeclList(kids[9]),
+            };
+        }
+    }
+
+    /// Collect type parameter names from a `TypeParamListNE` node.
+    /// TypeParamListNE → id | TypeParamListNE comma id
+    fn collectTypeParamListNE(b: Builder, node: TN, out: *std.ArrayList([]const u8)) !void {
+        const kids = ch(node);
+        if (kids.len == 1) {
+            try out.append(b.arena, leafText(kids[0], b.tokens));
+        } else { // 3: TypeParamListNE comma id
+            try b.collectTypeParamListNE(kids[0], out);
+            try out.append(b.arena, leafText(kids[2], b.tokens));
+        }
     }
 
     fn collectClassHeader(b: Builder, node: TN, impls: *std.ArrayList(Ast.TypeRef), adds: *std.ArrayList(Ast.TypeRef)) anyerror!void {
@@ -1881,12 +1920,15 @@ const Builder = struct {
                     else => std.debug.panic("buildAtom leaf: {s}", .{@tagName(tok)}),
                 };
             }
-            // Inner child (AllAnyExpr, LambdaExpr, or LambdaBlockExpr)
+            // Inner child: LambdaExpr, LambdaBlockExpr, or GenericConstruct
             if (kid == .inner and ntOf(kid) == .LambdaExpr) {
                 return b.buildLambdaExpr(kid);
             }
             if (kid == .inner and ntOf(kid) == .LambdaBlockExpr) {
                 return b.buildLambdaBlockExpr(kid);
+            }
+            if (kid == .inner and ntOf(kid) == .GenericConstruct) {
+                return b.buildGenericConstruct(kid);
             }
             return b.buildExpr(kid);
         }
@@ -2051,6 +2093,41 @@ const Builder = struct {
             },
             .leaf => return,
         }
+    }
+
+    // ── Generic construction ──────────────────────────────────────────────────
+
+    /// Build `Stack(int)(42)` → `ExprCall { callee: ExprIdent("Stack"), type_args: [int], args: [42] }`.
+    ///
+    /// GenericConstruct grammar (5 children, no args):
+    ///   open_call TypeRefListNE rparen lparen rparen
+    /// GenericConstruct grammar (6 children, with args):
+    ///   open_call TypeRefListNE rparen lparen ArgList rparen
+    fn buildGenericConstruct(b: Builder, node: TN) anyerror!Ast.Expr {
+        const kids = ch(node);
+        const s    = spanOf(node, b.tokens);
+
+        // kids[0] = open_call  → class name (tokenizer strips the `(`)
+        const class_name = leafText(kids[0], b.tokens);
+        const callee = try b.box(Ast.Expr, .{ .ident = .{ .span = s, .name = class_name } });
+
+        // kids[1] = TypeRefListNE
+        var type_args = std.ArrayList(Ast.TypeRef){};
+        try b.collectTypeRefListNE(kids[1], &type_args);
+
+        // kids.len == 5: open_call TypeRefListNE rparen lparen rparen  (no value args)
+        // kids.len == 6: open_call TypeRefListNE rparen lparen ArgList rparen
+        const args: []const Ast.Arg = if (kids.len == 6)
+            try b.buildArgListNode(kids[4])
+        else
+            &.{};
+
+        return .{ .call = try b.box(Ast.ExprCall, .{
+            .span      = s,
+            .callee    = callee,
+            .type_args = try type_args.toOwnedSlice(b.arena),
+            .args      = args,
+        }) };
     }
 
     // ── Pipeline desugaring ───────────────────────────────────────────────────

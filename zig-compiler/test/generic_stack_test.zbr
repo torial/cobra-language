@@ -1,0 +1,43 @@
+class Stack(T)
+    var items as List(T)
+    var count as int
+
+    cue init()
+        items = List()
+        count = 0
+
+    def push(val as T)
+        items.add(val)
+        count = count + 1
+
+    def pop() as T?
+        if count == 0
+            return nil
+        count = count - 1
+        return items.at(count)
+
+    def peek() as T?
+        if count == 0
+            return nil
+        return items.at(count - 1)
+
+    def isEmpty() as bool
+        return count == 0
+
+class Main
+    shared
+        def main
+            var s = Stack(int)()
+            s.push(10)
+            s.push(20)
+            s.push(30)
+            print s.pop()        # 30
+            print s.pop()        # 20
+            print s.count        # 1
+            print s.isEmpty()    # false
+
+            var ss = Stack(str)()
+            ss.push("hello")
+            ss.push("world")
+            print ss.pop() orelse ""     # world
+            print ss.peek() orelse ""    # hello

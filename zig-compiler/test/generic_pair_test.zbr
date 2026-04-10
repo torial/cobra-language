@@ -1,0 +1,27 @@
+class Pair(A, B)
+    var first as A
+    var second as B
+
+    cue init(a as A, b as B)
+        first = a
+        second = b
+
+    def swap() as Pair(B, A)
+        return Pair(B, A)(second, first)
+
+class Main
+    shared
+        def main
+            var p = Pair(str, int)("hello", 42)
+            print p.second     # 42
+
+            var q = Pair(int, bool)(100, true)
+            print q.first      # 100
+            print q.second     # true
+
+            var r = Pair(int, str)(1, "one")
+            print r.first      # 1
+
+            # swap: Pair(int, str) → Pair(str, int)
+            var s = r.swap()
+            print s.second     # 1

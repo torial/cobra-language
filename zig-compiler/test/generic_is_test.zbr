@@ -1,0 +1,15 @@
+class Box(T)
+    var value as T
+
+    cue init(v as T)
+        value = v
+
+class Main
+    shared
+        def main
+            var b = Box(int)(42)
+            print b is Box           # true  — bare class check
+            print not (b is Box)     # false
+
+            var s = Box(str)("hi")
+            print s is Box           # true  — same class, different type arg

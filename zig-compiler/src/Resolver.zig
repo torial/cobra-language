@@ -155,6 +155,13 @@ const Resolver = struct {
     fn walkClass(r: Resolver, n: *Ast.DeclClass, scope: *Scope) anyerror!void {
         const sym   = scope.lookupLocal(n.name) orelse return;
         const inner = sym.own_scope orelse return;
+        // Inject type parameters as placeholder symbols so that TypeRef.named("T")
+        // resolves correctly inside the class body (Approach B: eager specialization).
+        for (n.type_params) |tp_name| {
+            const dummy = Ast.Span{ .line = 0, .col = 0, .end_line = 0, .end_col = 0 };
+            const tp_sym = try r.table.newSymbol(tp_name, .type_param, .{ .type_param = dummy });
+            _ = try inner.define(tp_name, tp_sym);
+        }
         for (n.implements) |*tr| try r.resolveTypeRef(tr, scope);
         for (n.adds)       |*tr| try r.resolveTypeRef(tr, scope);
         for (n.invariants) |e|   try r.walkExpr(e, inner);
