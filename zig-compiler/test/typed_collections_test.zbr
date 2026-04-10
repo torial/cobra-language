@@ -1,0 +1,48 @@
+class Program
+    shared
+        # Method accepting and returning List(int)
+        def doubleAll(nums as List(int)) as List(int)
+            var result as List(int) = List()
+            for n in nums
+                result.add(n * 2)
+            return result
+
+        # Method with List(str)
+        def countWords(words as List(str)) as int
+            return words.count()
+
+        def main
+            # List(int) — annotated type
+            var nums as List(int) = List()
+            nums.add(10)
+            nums.add(20)
+            nums.add(30)
+            print nums.len        # 3
+            print nums.at(0)      # 10
+
+            # Pass to method, get back typed result
+            var doubled as List(int) = Program.doubleAll(nums)
+            for n in doubled
+                print n           # 20, 40, 60
+
+            # List(str) — string elements
+            var words as List(str) = List()
+            words.add("alpha")
+            words.add("beta")
+            words.add("gamma")
+            print Program.countWords(words)  # 3
+
+            # HashMap(str, int) — string keys
+            var scores as HashMap(str, int) = HashMap()
+            scores.put("alice", 95)
+            scores.put("bob", 87)
+            print scores.contains("alice")   # true
+            print scores.fetch("alice")      # 95
+            print scores.len                 # 2
+
+            # HashMap(int, str) — non-string keys (AutoHashMap)
+            var codes as HashMap(int, str) = HashMap()
+            codes.put(200, "OK")
+            codes.put(404, "Not Found")
+            print codes.contains(200)        # true
+            print codes.fetch(200)           # OK

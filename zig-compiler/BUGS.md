@@ -40,10 +40,8 @@ Running triage list. Updated each milestone. Format: severity (blocker/high/medi
 ## Library Files with No Entry Point (Expected "Failures")
 
 These are not bugs — they're library files that can't run standalone:
-- `MathUtils.zbr` — utility class, imported by other tests
-- `StringHelper.zbr` — utility class
-- `mathlib_test.zbr` — uses multi-file `use` which the compiler handles separately
-- `hello.zbr` — no `main`, depends on another file
+- `MathUtils.zbr` — utility class, imported by `crossmod_*`, `use_test`, `transitive_test`
+- `StringHelper.zbr` — utility class, imported by `transitive_test`
 
 ---
 

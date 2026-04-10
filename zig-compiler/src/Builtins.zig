@@ -82,6 +82,15 @@ pub const NAMES = std.StaticStringMap(void).initComptime(&.{
     .{ "sys",           {} },
     // Result(T, E) — functional error handling
     .{ "Result",        {} },
+    // Stdlib date/time
+    .{ "DateTime",      {} },
+    .{ "Calendar",      {} },
+    .{ "CalendarView",  {} },
+    // Stdlib CSV
+    .{ "Csv",           {} },
+    .{ "CsvWriter",     {} },
+    // Stdlib reflection
+    .{ "Reflect",       {} },
 });
 
 /// Returns true iff `name` is a built-in type name.

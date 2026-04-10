@@ -1,0 +1,19 @@
+class PartialTest
+    shared
+        def greet(name as str) as str
+            return "Hello, " + name
+
+class Main
+    shared
+        def main
+            # greet() is in this file; describe() and score() are in partials.
+            var g = PartialTest.greet("Alice")
+            assert g == "Hello, Alice", "greet works"
+
+            var d = PartialTest.describe("Bob", 42)
+            assert d == "Bob: 42", "describe from .meta partial"
+
+            var s = PartialTest.score(10, 3)
+            assert s == 7, "score from .math partial"
+
+            print "partial_test: all assertions passed"

@@ -1,0 +1,92 @@
+class Main
+    shared
+        def main
+            # --- Construction ---
+            var epoch = DateTime.fromEpoch(0)
+            var dt    = DateTime.of(2024, 3, 15)
+            var dt2   = DateTime.of(2024, 3, 15, 14, 30, 45)
+
+            # --- Field access on epoch (1970-01-01 Thursday) ---
+            print epoch.year     # 1970
+            print epoch.month    # 1
+            print epoch.day      # 1
+            print epoch.weekday  # 4  (Thursday, ISO 8601)
+
+            # --- Field access on known date ---
+            print dt.year    # 2024
+            print dt.month   # 3
+            print dt.day     # 15
+
+            # --- Time fields ---
+            print dt2.hour    # 14
+            print dt2.minute  # 30
+            print dt2.second  # 45
+
+            # --- toEpoch round-trip ---
+            print epoch.toEpoch()   # 0
+
+            # --- toIso8601 ---
+            print epoch.toIso8601()   # 1970-01-01T00:00:00Z
+            print dt2.toIso8601()     # 2024-03-15T14:30:45Z
+
+            # --- format ---
+            print dt2.format("yyyy-MM-dd HH:mm:ss")   # 2024-03-15 14:30:45
+            print dt2.format("d MMMM yyyy")            # 15 March 2024
+            print dt2.format("EEE, d MMM yyyy")        # Fri, 15 Mar 2024
+
+            # --- addDays ---
+            var d_plus = DateTime.of(2024, 3, 15).addDays(10)
+            print d_plus.day    # 25
+
+            # --- addMonths with month-end clamping ---
+            var jan31  = DateTime.of(2024, 1, 31)
+            var feb_dt = jan31.addMonths(1)   # 2024 is a leap year → Feb 29
+            print feb_dt.month   # 2
+            print feb_dt.day     # 29
+
+            var jan31_23 = DateTime.of(2023, 1, 31)
+            var feb23_dt = jan31_23.addMonths(1)  # 2023 not leap → Feb 28
+            print feb23_dt.day   # 28
+
+            # --- addYears with leap-year clamping ---
+            var feb29_24 = DateTime.of(2024, 2, 29)
+            var next_yr  = feb29_24.addYears(1)   # 2025 not leap → Feb 28
+            print next_yr.year   # 2025
+            print next_yr.day    # 28
+
+            # --- addHours / addMinutes / addSeconds ---
+            var t = DateTime.of(2024, 1, 1, 23, 59, 0)
+            var t2 = t.addHours(1)
+            print t2.day     # 2  (crosses midnight)
+            print t2.hour    # 0
+
+            # --- before / after / equals ---
+            var a = DateTime.of(2020, 1, 1)
+            var b = DateTime.of(2021, 1, 1)
+            print a.before(b)   # true
+            print b.before(a)   # false
+            print b.after(a)    # true
+            print a.equals(a)   # true
+            print a.equals(b)   # false
+
+            # --- daysBetween ---
+            print a.daysBetween(b)   # 366  (2020 is leap year)
+            print b.daysBetween(a)   # -366
+
+            # --- secondsBetween ---
+            var s1 = DateTime.of(2024, 1, 1, 0, 0, 0)
+            var s2 = DateTime.of(2024, 1, 1, 0, 0, 30)
+            print s1.secondsBetween(s2)   # 30
+
+            # --- inCalendar (Gregorian view) ---
+            var view = dt.inCalendar(Calendar.Gregorian)
+            print view.year       # 2024
+            print view.month      # 3
+            print view.day        # 15
+            print view.weekday    # 5  (Friday)
+            print view.monthName  # March
+            print view.era        # (empty)
+
+            # --- DateTime.now() sanity check (year >= 2024) ---
+            var now = DateTime.now()
+            print now.year >= 2024   # true

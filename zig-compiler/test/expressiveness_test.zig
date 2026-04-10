@@ -373,7 +373,7 @@ fn _json_arr_bool(v: *JsonValue, val: bool) void {
     if (v.* != .array) return;
     v.array.append(.{ .bool = val }) catch {};
 }
-const HttpResponse = struct { status: u16, text: []const u8 };
+const HttpResponse = struct { status: u16, text: []const u8, headers: []const [2][]const u8 = &.{} };
 fn _http_request(method: std.http.Method, url: []const u8, payload: ?[]const u8) ?HttpResponse {
     var _hc = std.http.Client{ .allocator = _allocator };
     defer _hc.deinit();
@@ -383,6 +383,22 @@ fn _http_request(method: std.http.Method, url: []const u8, payload: ?[]const u8)
 }
 fn _http_get(url: []const u8) ?HttpResponse { return _http_request(.GET, url, null); }
 fn _http_post(url: []const u8, payload: []const u8) ?HttpResponse { return _http_request(.POST, url, payload); }
+fn _http_json_get(url: []const u8) ?JsonValue { const _r = _http_request(.GET, url, null) orelse return null; return _json_parse(_r.text); }
+fn _http_json_post(url: []const u8, body: []const u8) ?JsonValue {
+    var _hc = std.http.Client{ .allocator = _allocator };
+    defer _hc.deinit();
+    var _hb = std.io.Writer.Allocating.init(std.heap.page_allocator);
+    _ = _hc.fetch(.{ .location = .{ .url = url }, .method = .POST, .payload = body,
+        .extra_headers = &.{ .{ .name = "Content-Type", .value = "application/json" } },
+        .response_writer = &_hb.writer }) catch return null;
+    return _json_parse(_hb.written());
+}
+fn _http_with_header(resp: HttpResponse, key: []const u8, val: []const u8) HttpResponse {
+    var _new = std.heap.page_allocator.alloc([2][]const u8, resp.headers.len + 1) catch return resp;
+    @memcpy(_new[0..resp.headers.len], resp.headers);
+    _new[resp.headers.len] = .{ key, val };
+    return .{ .status = resp.status, .text = resp.text, .headers = _new };
+}
 const HttpRequest = struct { method: []const u8, path: []const u8, content: []const u8 };
 fn _http_serve(port: u16, handler: anytype) void {
     const _HFn = *const fn(HttpRequest) HttpResponse;
@@ -448,9 +464,11 @@ fn _http_serve(port: u16, handler: anytype) void {
                 500 => "Internal Server Error",
                 else => "Unknown",
             };
+            var _xh: std.ArrayList(u8) = .{};
+            for (_resp.headers) |_kv| { _xh.appendSlice(_alloc, _kv[0]) catch {}; _xh.appendSlice(_alloc, ": ") catch {}; _xh.appendSlice(_alloc, _kv[1]) catch {}; _xh.appendSlice(_alloc, "\r\n") catch {}; }
             const _out = std.fmt.allocPrint(_alloc,
-                "HTTP/1.1 {d} {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
-                .{ _resp.status, _st, _resp.text.len, _resp.text }) catch @panic("OOM");
+                "HTTP/1.1 {d} {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n{s}\r\n{s}",
+                .{ _resp.status, _st, _resp.text.len, _xh.items, _resp.text }) catch @panic("OOM");
             ctx.conn.stream.writeAll(_out) catch {};
         }
     };
@@ -468,6 +486,99 @@ fn _http_serve(port: u16, handler: anytype) void {
     }
 }
 
+const _CsvTable = struct { rows: []const []const []const u8 };
+fn _csv_parse(src: []const u8) _CsvTable {
+    const _pa = std.heap.page_allocator;
+    var _rows: std.ArrayList([]const []const u8) = .{};
+    var _row:  std.ArrayList([]const u8) = .{};
+    var _f:    std.ArrayList(u8) = .{};
+    const _St = enum { s, fld, q, aq };
+    var _st: _St = .s;
+    for (src) |c| {
+        switch (_st) {
+            .s => switch (c) {
+                '"'  => { _st = .q; },
+                ','  => { _row.append(_pa, "") catch {}; },
+                '\r' => {},
+                '\n' => { if (_row.items.len > 0) { _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {}; _row = .{}; } },
+                else => { _f.append(_pa, c) catch {}; _st = .fld; },
+            },
+            .fld => switch (c) {
+                ',' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _st = .s; },
+                '\r' => {},
+                '\n' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {}; _row = .{}; _st = .s; },
+                else => { _f.append(_pa, c) catch {}; },
+            },
+            .q  => switch (c) {
+                '"'  => { _st = .aq; },
+                else => { _f.append(_pa, c) catch {}; },
+            },
+            .aq => switch (c) {
+                '"' => { _f.append(_pa, '"') catch {}; _st = .q; },
+                ',' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _st = .s; },
+                '\r' => {},
+                '\n' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {}; _row = .{}; _st = .s; },
+                else => { _st = .s; },
+            },
+        }
+    }
+    if (_st == .fld or _st == .aq or _st == .q) {
+        _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {};
+    } else if (_st == .s and _row.items.len > 0) {
+        _row.append(_pa, "") catch {};
+    }
+    if (_row.items.len > 0) _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {};
+    return .{ .rows = _rows.toOwnedSlice(_pa) catch &.{} };
+}
+fn _csv_parse_file(path: []const u8) _CsvTable {
+    const src = std.fs.cwd().readFileAlloc(std.heap.page_allocator, path, std.math.maxInt(usize)) catch return .{ .rows = &.{} };
+    return _csv_parse(src);
+}
+fn _csv_row_count(t: _CsvTable) i64 { return @as(i64, @intCast(t.rows.len)); }
+fn _csv_col_count(t: _CsvTable) i64 { return if (t.rows.len > 0) @as(i64, @intCast(t.rows[0].len)) else 0; }
+fn _csv_header(t: _CsvTable) std.ArrayList([]const u8) {
+    var _r: std.ArrayList([]const u8) = .{};
+    if (t.rows.len > 0) for (t.rows[0]) |f| _r.append(std.heap.page_allocator, f) catch {};
+    return _r;
+}
+fn _csv_row(t: _CsvTable, n: i64) std.ArrayList([]const u8) {
+    var _r: std.ArrayList([]const u8) = .{};
+    const _i: usize = @intCast(@max(0, n));
+    if (_i < t.rows.len) for (t.rows[_i]) |f| _r.append(std.heap.page_allocator, f) catch {};
+    return _r;
+}
+fn _csv_rows(t: _CsvTable) std.ArrayList(std.ArrayList([]const u8)) {
+    var _out: std.ArrayList(std.ArrayList([]const u8)) = .{};
+    for (t.rows) |row| { var _r: std.ArrayList([]const u8) = .{}; for (row) |f| _r.append(std.heap.page_allocator, f) catch {}; _out.append(std.heap.page_allocator, _r) catch {}; }
+    return _out;
+}
+fn _csv_data_rows(t: _CsvTable) std.ArrayList(std.ArrayList([]const u8)) {
+    var _out: std.ArrayList(std.ArrayList([]const u8)) = .{};
+    const _s: usize = if (t.rows.len > 0) 1 else 0;
+    for (t.rows[_s..]) |row| { var _r: std.ArrayList([]const u8) = .{}; for (row) |f| _r.append(std.heap.page_allocator, f) catch {}; _out.append(std.heap.page_allocator, _r) catch {}; }
+    return _out;
+}
+fn _csv_get(t: _CsvTable, row: std.ArrayList([]const u8), col: []const u8) []const u8 {
+    if (t.rows.len == 0) return "";
+    for (t.rows[0], 0..) |h, i| { if (std.mem.eql(u8, h, col)) return if (i < row.items.len) row.items[i] else ""; }
+    return "";
+}
+const _CsvWriter = struct { buf: std.ArrayList(u8) };
+fn _csv_writer_init() _CsvWriter { return .{ .buf = .{} }; }
+fn _csv_write_row(w: *_CsvWriter, row: std.ArrayList([]const u8)) void {
+    const _pa = std.heap.page_allocator;
+    for (row.items, 0..) |field, i| {
+        if (i > 0) w.buf.append(_pa, ',') catch {};
+        const _nq = std.mem.indexOfAny(u8, field, ",\"\r\n") != null;
+        if (_nq) {
+            w.buf.append(_pa, '"') catch {};
+            for (field) |c| { if (c == '"') w.buf.append(_pa, '"') catch {}; w.buf.append(_pa, c) catch {}; }
+            w.buf.append(_pa, '"') catch {};
+        } else { w.buf.appendSlice(_pa, field) catch {}; }
+    }
+    w.buf.appendSlice(_pa, "\r\n") catch {};
+}
+fn _csv_build(w: *const _CsvWriter) []const u8 { return w.buf.items; }
 const TcpConn = struct { stream: std.net.Stream };
 fn _tcp_connect(host: []const u8, port: u16) ?TcpConn {
     const s = std.net.tcpConnectToHost(_allocator, host, port) catch return null;
@@ -1098,6 +1209,10 @@ pub const Greeter = struct {
 
 };
 
+const _reflect_Greeter_name: []const u8 = "Greeter";
+const _reflect_Greeter_fields: []const []const u8 = &.{};
+const _reflect_Greeter_field_types: []const []const u8 = &.{};
+
 pub const Program = struct {
     pub fn main() void {
 // zbr:test/expressiveness_test.zbr:11
@@ -1166,6 +1281,10 @@ pub const Program = struct {
     }
 
 };
+
+const _reflect_Program_name: []const u8 = "Program";
+const _reflect_Program_fields: []const []const u8 = &.{};
+const _reflect_Program_field_types: []const []const u8 = &.{};
 
 pub fn main() !void {
     defer _arena.deinit();

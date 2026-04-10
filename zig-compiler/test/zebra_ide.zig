@@ -31,6 +31,40 @@ fn _zebra_gt(a: anytype, b: anytype) bool {
 fn _zebra_ge(a: anytype, b: anytype) bool {
     if (comptime @TypeOf(a) == []const u8) return std.mem.order(u8, a, b) != .lt;
     return a >= b;
+}
+/// `item in container` — membership test for List, string (substring), HashMap.
+fn _zebra_in(item: anytype, container: anytype) bool {
+    const C = @TypeOf(container);
+    const I = @TypeOf(item);
+    // Struct types: ArrayList (has .items field) or HashMap (has .contains decl).
+    if (comptime @typeInfo(C) == .@"struct") {
+        if (comptime @hasField(C, "items")) {
+            for (container.items) |elem| {
+                if (comptime I == []const u8 or @typeInfo(I) == .pointer) {
+                    if (std.mem.eql(u8, elem, item)) return true;
+                } else {
+                    if (elem == item) return true;
+                }
+            }
+            return false;
+        }
+        if (comptime @hasDecl(C, "contains")) return container.contains(item);
+        return false;
+    }
+    // Pointer/array types: string substring check (coerce to []const u8).
+    return std.mem.indexOf(u8, @as([]const u8, container), @as([]const u8, item)) != null;
+}
+/// `s + t` — string concatenation.
+fn _str_concat(a: []const u8, b: []const u8, alloc: std.mem.Allocator) []const u8 {
+    return std.mem.concat(alloc, u8, &.{ a, b }) catch @panic("OOM");
+}
+/// `s * n` — repeat string s n times.
+fn _str_repeat(s: []const u8, n: anytype, alloc: std.mem.Allocator) []const u8 {
+    const count: usize = @intCast(n);
+    if (count == 0 or s.len == 0) return "";
+    const buf = alloc.alloc(u8, s.len * count) catch @panic("OOM");
+    for (0..count) |i| @memcpy(buf[i * s.len ..][0..s.len], s);
+    return buf;
 }fn _Result(comptime T: type, comptime E: type) type {
     return union(enum) {
         ok: T,
@@ -339,7 +373,7 @@ fn _json_arr_bool(v: *JsonValue, val: bool) void {
     if (v.* != .array) return;
     v.array.append(.{ .bool = val }) catch {};
 }
-const HttpResponse = struct { status: u16, text: []const u8 };
+const HttpResponse = struct { status: u16, text: []const u8, headers: []const [2][]const u8 = &.{} };
 fn _http_request(method: std.http.Method, url: []const u8, payload: ?[]const u8) ?HttpResponse {
     var _hc = std.http.Client{ .allocator = _allocator };
     defer _hc.deinit();
@@ -349,6 +383,22 @@ fn _http_request(method: std.http.Method, url: []const u8, payload: ?[]const u8)
 }
 fn _http_get(url: []const u8) ?HttpResponse { return _http_request(.GET, url, null); }
 fn _http_post(url: []const u8, payload: []const u8) ?HttpResponse { return _http_request(.POST, url, payload); }
+fn _http_json_get(url: []const u8) ?JsonValue { const _r = _http_request(.GET, url, null) orelse return null; return _json_parse(_r.text); }
+fn _http_json_post(url: []const u8, body: []const u8) ?JsonValue {
+    var _hc = std.http.Client{ .allocator = _allocator };
+    defer _hc.deinit();
+    var _hb = std.io.Writer.Allocating.init(std.heap.page_allocator);
+    _ = _hc.fetch(.{ .location = .{ .url = url }, .method = .POST, .payload = body,
+        .extra_headers = &.{ .{ .name = "Content-Type", .value = "application/json" } },
+        .response_writer = &_hb.writer }) catch return null;
+    return _json_parse(_hb.written());
+}
+fn _http_with_header(resp: HttpResponse, key: []const u8, val: []const u8) HttpResponse {
+    var _new = std.heap.page_allocator.alloc([2][]const u8, resp.headers.len + 1) catch return resp;
+    @memcpy(_new[0..resp.headers.len], resp.headers);
+    _new[resp.headers.len] = .{ key, val };
+    return .{ .status = resp.status, .text = resp.text, .headers = _new };
+}
 const HttpRequest = struct { method: []const u8, path: []const u8, content: []const u8 };
 fn _http_serve(port: u16, handler: anytype) void {
     const _HFn = *const fn(HttpRequest) HttpResponse;
@@ -414,9 +464,11 @@ fn _http_serve(port: u16, handler: anytype) void {
                 500 => "Internal Server Error",
                 else => "Unknown",
             };
+            var _xh: std.ArrayList(u8) = .{};
+            for (_resp.headers) |_kv| { _xh.appendSlice(_alloc, _kv[0]) catch {}; _xh.appendSlice(_alloc, ": ") catch {}; _xh.appendSlice(_alloc, _kv[1]) catch {}; _xh.appendSlice(_alloc, "\r\n") catch {}; }
             const _out = std.fmt.allocPrint(_alloc,
-                "HTTP/1.1 {d} {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
-                .{ _resp.status, _st, _resp.text.len, _resp.text }) catch @panic("OOM");
+                "HTTP/1.1 {d} {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n{s}\r\n{s}",
+                .{ _resp.status, _st, _resp.text.len, _xh.items, _resp.text }) catch @panic("OOM");
             ctx.conn.stream.writeAll(_out) catch {};
         }
     };
@@ -434,6 +486,99 @@ fn _http_serve(port: u16, handler: anytype) void {
     }
 }
 
+const _CsvTable = struct { rows: []const []const []const u8 };
+fn _csv_parse(src: []const u8) _CsvTable {
+    const _pa = std.heap.page_allocator;
+    var _rows: std.ArrayList([]const []const u8) = .{};
+    var _row:  std.ArrayList([]const u8) = .{};
+    var _f:    std.ArrayList(u8) = .{};
+    const _St = enum { s, fld, q, aq };
+    var _st: _St = .s;
+    for (src) |c| {
+        switch (_st) {
+            .s => switch (c) {
+                '"'  => { _st = .q; },
+                ','  => { _row.append(_pa, "") catch {}; },
+                '\r' => {},
+                '\n' => { if (_row.items.len > 0) { _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {}; _row = .{}; } },
+                else => { _f.append(_pa, c) catch {}; _st = .fld; },
+            },
+            .fld => switch (c) {
+                ',' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _st = .s; },
+                '\r' => {},
+                '\n' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {}; _row = .{}; _st = .s; },
+                else => { _f.append(_pa, c) catch {}; },
+            },
+            .q  => switch (c) {
+                '"'  => { _st = .aq; },
+                else => { _f.append(_pa, c) catch {}; },
+            },
+            .aq => switch (c) {
+                '"' => { _f.append(_pa, '"') catch {}; _st = .q; },
+                ',' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _st = .s; },
+                '\r' => {},
+                '\n' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {}; _row = .{}; _st = .s; },
+                else => { _st = .s; },
+            },
+        }
+    }
+    if (_st == .fld or _st == .aq or _st == .q) {
+        _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {};
+    } else if (_st == .s and _row.items.len > 0) {
+        _row.append(_pa, "") catch {};
+    }
+    if (_row.items.len > 0) _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {};
+    return .{ .rows = _rows.toOwnedSlice(_pa) catch &.{} };
+}
+fn _csv_parse_file(path: []const u8) _CsvTable {
+    const src = std.fs.cwd().readFileAlloc(std.heap.page_allocator, path, std.math.maxInt(usize)) catch return .{ .rows = &.{} };
+    return _csv_parse(src);
+}
+fn _csv_row_count(t: _CsvTable) i64 { return @as(i64, @intCast(t.rows.len)); }
+fn _csv_col_count(t: _CsvTable) i64 { return if (t.rows.len > 0) @as(i64, @intCast(t.rows[0].len)) else 0; }
+fn _csv_header(t: _CsvTable) std.ArrayList([]const u8) {
+    var _r: std.ArrayList([]const u8) = .{};
+    if (t.rows.len > 0) for (t.rows[0]) |f| _r.append(std.heap.page_allocator, f) catch {};
+    return _r;
+}
+fn _csv_row(t: _CsvTable, n: i64) std.ArrayList([]const u8) {
+    var _r: std.ArrayList([]const u8) = .{};
+    const _i: usize = @intCast(@max(0, n));
+    if (_i < t.rows.len) for (t.rows[_i]) |f| _r.append(std.heap.page_allocator, f) catch {};
+    return _r;
+}
+fn _csv_rows(t: _CsvTable) std.ArrayList(std.ArrayList([]const u8)) {
+    var _out: std.ArrayList(std.ArrayList([]const u8)) = .{};
+    for (t.rows) |row| { var _r: std.ArrayList([]const u8) = .{}; for (row) |f| _r.append(std.heap.page_allocator, f) catch {}; _out.append(std.heap.page_allocator, _r) catch {}; }
+    return _out;
+}
+fn _csv_data_rows(t: _CsvTable) std.ArrayList(std.ArrayList([]const u8)) {
+    var _out: std.ArrayList(std.ArrayList([]const u8)) = .{};
+    const _s: usize = if (t.rows.len > 0) 1 else 0;
+    for (t.rows[_s..]) |row| { var _r: std.ArrayList([]const u8) = .{}; for (row) |f| _r.append(std.heap.page_allocator, f) catch {}; _out.append(std.heap.page_allocator, _r) catch {}; }
+    return _out;
+}
+fn _csv_get(t: _CsvTable, row: std.ArrayList([]const u8), col: []const u8) []const u8 {
+    if (t.rows.len == 0) return "";
+    for (t.rows[0], 0..) |h, i| { if (std.mem.eql(u8, h, col)) return if (i < row.items.len) row.items[i] else ""; }
+    return "";
+}
+const _CsvWriter = struct { buf: std.ArrayList(u8) };
+fn _csv_writer_init() _CsvWriter { return .{ .buf = .{} }; }
+fn _csv_write_row(w: *_CsvWriter, row: std.ArrayList([]const u8)) void {
+    const _pa = std.heap.page_allocator;
+    for (row.items, 0..) |field, i| {
+        if (i > 0) w.buf.append(_pa, ',') catch {};
+        const _nq = std.mem.indexOfAny(u8, field, ",\"\r\n") != null;
+        if (_nq) {
+            w.buf.append(_pa, '"') catch {};
+            for (field) |c| { if (c == '"') w.buf.append(_pa, '"') catch {}; w.buf.append(_pa, c) catch {}; }
+            w.buf.append(_pa, '"') catch {};
+        } else { w.buf.appendSlice(_pa, field) catch {}; }
+    }
+    w.buf.appendSlice(_pa, "\r\n") catch {};
+}
+fn _csv_build(w: *const _CsvWriter) []const u8 { return w.buf.items; }
 const TcpConn = struct { stream: std.net.Stream };
 fn _tcp_connect(host: []const u8, port: u16) ?TcpConn {
     const s = std.net.tcpConnectToHost(_allocator, host, port) catch return null;
@@ -1055,6 +1200,7 @@ pub const IDE = struct {
     pub var run_output: []const u8 = "";
     pub var file_list: std.ArrayList([]const u8) = std.ArrayList([]const u8){};
     pub fn loadFileList() void {
+// zbr:test/zebra_ide.zbr:13
         var entries: std.ArrayList([]const u8) = (blk: {
             var _ld_dir = std.fs.cwd().openDir(".", .{ .iterate = true }) catch @panic("File.listDir error");
             defer _ld_dir.close();
@@ -1066,32 +1212,46 @@ pub const IDE = struct {
             break :blk _ld_list;
         });
         defer entries.deinit(_allocator);
+// zbr:test/zebra_ide.zbr:14
         IDE.file_list = std.ArrayList([]const u8){};
+// zbr:test/zebra_ide.zbr:15
         for (entries.items) |f| {
+// zbr:test/zebra_ide.zbr:16
             if ((std.mem.endsWith(u8, f, ".zbr") and (!std.mem.endsWith(u8, f, "zebra_ide.zbr")))) {
+// zbr:test/zebra_ide.zbr:17
                 IDE.file_list.append(_allocator, f) catch unreachable;
             }
         }
     }
 
     pub fn loadFile(path: []const u8) void {
+// zbr:test/zebra_ide.zbr:20
         IDE.current_file = path;
+// zbr:test/zebra_ide.zbr:21
         IDE.source_code = (std.fs.cwd().readFileAlloc(_allocator, path, std.math.maxInt(usize)) catch @panic("File.read error"));
+// zbr:test/zebra_ide.zbr:22
         IDE.run_output = "";
     }
 
     pub fn saveFile() void {
+// zbr:test/zebra_ide.zbr:25
         if ((!(IDE.current_file.len == 0))) {
+// zbr:test/zebra_ide.zbr:26
             (std.fs.cwd().writeFile(.{ .sub_path = IDE.current_file, .data = IDE.source_code }) catch @panic("File.write error"));
         }
     }
 
     pub fn runFile() void {
+// zbr:test/zebra_ide.zbr:29
         if ((IDE.current_file.len == 0)) {
+// zbr:test/zebra_ide.zbr:30
             IDE.run_output = "(no file open)";
+// zbr:test/zebra_ide.zbr:31
             return;
         }
+// zbr:test/zebra_ide.zbr:32
         IDE.saveFile();
+// zbr:test/zebra_ide.zbr:33
         IDE.run_output = (blk: {
             const _sh_cmd = (std.fmt.allocPrint(_allocator, "zebra {s}", .{IDE.current_file}) catch @panic("OOM"));
             const _sh_argv = if (comptime builtin.os.tag == .windows)
@@ -1108,45 +1268,71 @@ pub const IDE = struct {
     }
 
     pub fn frame(g: GuiContext) void {
+// zbr:test/zebra_ide.zbr:37
         g.text("Files");
+// zbr:test/zebra_ide.zbr:38
         g.separator();
+// zbr:test/zebra_ide.zbr:39
         for (IDE.file_list.items) |f| {
+// zbr:test/zebra_ide.zbr:40
             if (g.button(f)) {
+// zbr:test/zebra_ide.zbr:41
                 IDE.loadFile(f);
             }
         }
+// zbr:test/zebra_ide.zbr:42
         if (g.button("Reload")) {
+// zbr:test/zebra_ide.zbr:43
             IDE.loadFileList();
         }
+// zbr:test/zebra_ide.zbr:44
         g.separator();
+// zbr:test/zebra_ide.zbr:47
         if ((IDE.current_file.len == 0)) {
+// zbr:test/zebra_ide.zbr:48
             g.text("(no file selected)");
         } else {
+// zbr:test/zebra_ide.zbr:50
             {
                 const _gw0 = (std.fmt.allocPrint(_allocator, "Editing: {s}", .{IDE.current_file}) catch @panic("OOM"));
                 defer _allocator.free(_gw0);
                 g.text(_gw0);
             }
         }
+// zbr:test/zebra_ide.zbr:53
         IDE.source_code = g.inputMultiline("##editor", IDE.source_code, 760.0, 380.0);
+// zbr:test/zebra_ide.zbr:55
         if (g.button("Save")) {
+// zbr:test/zebra_ide.zbr:56
             IDE.saveFile();
         }
+// zbr:test/zebra_ide.zbr:57
         g.sameLine();
+// zbr:test/zebra_ide.zbr:58
         if (g.button("Run")) {
+// zbr:test/zebra_ide.zbr:59
             IDE.runFile();
         }
+// zbr:test/zebra_ide.zbr:60
         g.separator();
+// zbr:test/zebra_ide.zbr:63
         g.text("Output:");
+// zbr:test/zebra_ide.zbr:64
         g.text(IDE.run_output);
     }
 
     pub fn main() void {
+// zbr:test/zebra_ide.zbr:67
         IDE.loadFileList();
+// zbr:test/zebra_ide.zbr:68
         _gui_run("Zebra IDE", 900, 700, IDE.frame);
     }
 
 };
+
+const _reflect_IDE_name: []const u8 = "IDE";
+const _reflect_IDE_fields: []const []const u8 = &.{};
+const _reflect_IDE_field_types: []const []const u8 = &.{};
 
 pub fn main() !void {
     defer _arena.deinit();

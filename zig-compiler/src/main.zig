@@ -35,7 +35,7 @@ const CodeGen     = @import("CodeGen.zig");
 //   0.2  JSON stdlib
 //   0.3  Date/time stdlib
 //   0.4  CSV stdlib
-//   0.5  Source-mapped error messages
+//   0.5  Source-mapped error messages ✅ DONE
 //   0.6  REPL
 //   0.7  Escape analysis (replace scanReturnedNames heuristic)
 //   0.8  User-defined generics (struct(T))
@@ -181,7 +181,11 @@ fn run(src: []const u8, path: []const u8, mode: Mode, gui_backend: CodeGen.GuiBa
     var module = try AstBuilder.build(ok, sym_arena.allocator());
     module.file = path;
 
-    // ── 3b. Compile imported dependencies ────────────────────────────────────
+    // ── 3b. Merge partial class files (<stem>.*.zbr) ──────────────────────────
+    var partial_srcs = try mergePartials(&module, path, sym_arena.allocator(), alloc);
+    defer { for (partial_srcs.items) |s| alloc.free(s); partial_srcs.deinit(alloc); }
+
+    // ── 3c. Compile imported dependencies ────────────────────────────────────
     // Before running the semantic passes, ensure every `use`d module has been
     // compiled to a .zig file (for Zebra deps) or noted as native (zig/c deps).
     var dep_visited = std.StringHashMap(void).init(alloc);
@@ -275,6 +279,147 @@ fn run(src: []const u8, path: []const u8, mode: Mode, gui_backend: CodeGen.GuiBa
     defer alloc.free(zig_path);
 
     return backend(module, &resolve, &tc, zig_path, mode, gui_backend, &native_uses, c_sources.items, emit_exports, release, alloc);
+}
+
+// ── Partial class merging ─────────────────────────────────────────────────────
+
+/// Scan the directory of `root_path` for partial files matching `<stem>.*.zbr`
+/// (where `<stem>` is the root filename without `.zbr`) and merge their
+/// declarations into `module`.
+///
+/// Convention: `Foo.zbr` is the primary file; `Foo.json.zbr`, `Foo.ui.zbr`
+/// etc. are partials.  Each partial may contain:
+///   - `class Foo` — members/implements/adds/invariants merged into root's Foo.
+///   - `use X`     — appended to root's decl list so dep resolution finds them.
+///   - Other decls — appended to root's decl list directly.
+///
+/// Source text for each partial is heap-allocated and returned in the result
+/// list.  The caller must free each slice and deinit the list after the full
+/// compilation pipeline completes (arena nodes may reference the text).
+fn mergePartials(
+    module:    *Ast.Module,
+    root_path: []const u8,
+    arena:     std.mem.Allocator,
+    alloc:     std.mem.Allocator,
+) !std.ArrayListUnmanaged([]u8) {
+    var srcs = std.ArrayListUnmanaged([]u8){};
+    errdefer { for (srcs.items) |s| alloc.free(s); srcs.deinit(alloc); }
+
+    // Only primary files (stem has no dots) can own partials.
+    const basename = std.fs.path.basename(root_path);
+    if (!std.mem.endsWith(u8, basename, ".zbr")) return srcs;
+    const stem = basename[0 .. basename.len - 4];
+    if (std.mem.indexOfScalar(u8, stem, '.') != null) return srcs;
+
+    const src_dir_path = std.fs.path.dirname(root_path) orelse ".";
+
+    // Collect matching partial paths.
+    var partial_paths = std.ArrayListUnmanaged([]u8){};
+    defer { for (partial_paths.items) |p| alloc.free(p); partial_paths.deinit(alloc); }
+
+    var dir = std.fs.cwd().openDir(src_dir_path, .{ .iterate = true }) catch return srcs;
+    defer dir.close();
+    var dir_it = dir.iterate();
+    while (try dir_it.next()) |entry| {
+        if (entry.kind != .file) continue;
+        const name = entry.name;
+        if (!std.mem.startsWith(u8, name, stem)) continue;
+        if (name.len <= stem.len + 1) continue;
+        if (name[stem.len] != '.') continue;
+        if (!std.mem.endsWith(u8, name, ".zbr")) continue;
+        if (std.mem.eql(u8, name, basename)) continue;
+        // Require at least one char between the first dot and ".zbr".
+        // e.g. "Foo.json.zbr" → after_stem="json.zbr" (len 8, > 4)
+        const after_stem = name[stem.len + 1..];
+        if (after_stem.len <= 4) continue;
+        const full = try std.fs.path.join(alloc, &.{ src_dir_path, name });
+        try partial_paths.append(alloc, full);
+    }
+
+    if (partial_paths.items.len == 0) return srcs;
+
+    // Sort for deterministic merge order across platforms.
+    std.mem.sort([]u8, partial_paths.items, {}, struct {
+        fn lt(_: void, a: []u8, b: []u8) bool { return std.mem.lessThan(u8, a, b); }
+    }.lt);
+
+    for (partial_paths.items) |partial_path| {
+        const partial_src = std.fs.cwd().readFileAlloc(alloc, partial_path, 64 * 1024 * 1024) catch |err| {
+            std.debug.print("error reading partial '{s}': {}\n", .{ partial_path, err });
+            continue;
+        };
+        try srcs.append(alloc, partial_src);
+
+        const ptokens = try Tokenizer.tokenize(partial_src, alloc);
+        defer alloc.free(ptokens);
+
+        var presult = try Parser.parse(ptokens, alloc);
+        defer presult.deinit();
+
+        const pok = switch (presult) {
+            .ok  => |*s| s,
+            .err => |e| {
+                const bad = if (e.error_pos < ptokens.len) ptokens[e.error_pos] else ptokens[ptokens.len - 1];
+                std.debug.print("{s}:{}:{}: syntax error near '{s}'\n", .{
+                    partial_path, bad.line, bad.col, bad.text,
+                });
+                continue;
+            },
+        };
+
+        var partial_module = try AstBuilder.build(pok, arena);
+        // Dupe the path into the arena so it outlives the partial_paths list.
+        partial_module.file = try arena.dupe(u8, partial_path);
+
+        try mergePartialInto(module, &partial_module, arena);
+    }
+
+    return srcs;
+}
+
+/// Merge top-level declarations from `partial` into `root`.
+/// Class declarations are merged member-by-member; everything else is appended.
+fn mergePartialInto(root: *Ast.Module, partial: *const Ast.Module, arena: std.mem.Allocator) !void {
+    var extra = std.ArrayListUnmanaged(Ast.Decl){};
+    // Arena-allocated — no explicit deinit needed; freed when arena is freed.
+
+    for (partial.decls) |pdecl| {
+        switch (pdecl) {
+            .class => |pc| {
+                var matched = false;
+                for (root.decls) |rdecl| {
+                    if (rdecl != .class) continue;
+                    const rc = rdecl.class; // *Ast.DeclClass — mutable pointer into arena
+                    if (!std.mem.eql(u8, rc.name, pc.name)) continue;
+                    rc.members    = try concatSlice(Ast.Decl,    rc.members,    pc.members,    arena);
+                    rc.implements = try concatSlice(Ast.TypeRef, rc.implements, pc.implements, arena);
+                    rc.adds       = try concatSlice(Ast.TypeRef, rc.adds,       pc.adds,       arena);
+                    rc.invariants = try concatSlice(*Ast.Expr,   rc.invariants, pc.invariants, arena);
+                    matched = true;
+                    break;
+                }
+                if (!matched) {
+                    std.debug.print("{s}: partial class '{s}' has no matching class in root — skipped\n",
+                        .{ partial.file, pc.name });
+                }
+            },
+            else => try extra.append(arena, pdecl),
+        }
+    }
+
+    if (extra.items.len > 0) {
+        root.decls = try concatSlice(Ast.Decl, root.decls, extra.items, arena);
+    }
+}
+
+/// Concatenate two slices using `arena`.  Returns `a` unchanged when `b` is empty.
+fn concatSlice(comptime T: type, a: []const T, b: []const T, arena: std.mem.Allocator) ![]const T {
+    if (b.len == 0) return a;
+    if (a.len == 0) return b;
+    const out = try arena.alloc(T, a.len + b.len);
+    @memcpy(out[0..a.len], a);
+    @memcpy(out[a.len..], b);
+    return out;
 }
 
 // ── Dependency discovery ──────────────────────────────────────────────────────
@@ -404,6 +549,10 @@ fn compileZbrToZig(
 
     var module = try AstBuilder.build(ok, sym_arena.allocator());
     module.file = zbr_path;
+
+    // Merge partial class files alongside this dep module.
+    var partial_srcs_dep = try mergePartials(&module, zbr_path, sym_arena.allocator(), alloc);
+    defer { for (partial_srcs_dep.items) |s| alloc.free(s); partial_srcs_dep.deinit(alloc); }
 
     // ── 3b. Recurse into this file's own dependencies ─────────────────────────
     const dep_dir = std.fs.path.dirname(zbr_path) orelse ".";

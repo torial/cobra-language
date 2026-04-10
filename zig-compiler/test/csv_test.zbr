@@ -1,0 +1,132 @@
+class Main
+    shared
+        def main
+            # ── Basic parse ───────────────────────────────────────────────────
+            var simple = "name,score,city\nAlice,95,Boston\nBob,87,Austin\nCarla,100,Denver"
+            var csv = Csv.parse(simple)
+
+            assert csv.rowCount() == 4, "rowCount includes header"
+            assert csv.colCount() == 3, "colCount = 3 columns"
+
+            # ── Header row ────────────────────────────────────────────────────
+            var hdr = csv.header()
+            assert hdr.at(0) == "name",  "header col 0"
+            assert hdr.at(1) == "score", "header col 1"
+            assert hdr.at(2) == "city",  "header col 2"
+            assert hdr.count() == 3, "header count"
+
+            # ── Row access by index (0-based, 0 = header row) ─────────────────
+            var r1 = csv.row(1)
+            assert r1.at(0) == "Alice", "row 1 name"
+            assert r1.at(1) == "95",    "row 1 score"
+            assert r1.at(2) == "Boston","row 1 city"
+
+            var r3 = csv.row(3)
+            assert r3.at(0) == "Carla", "row 3 name"
+            assert r3.at(1) == "100",   "row 3 score"
+
+            # ── Column-name lookup ────────────────────────────────────────────
+            var r2 = csv.row(2)
+            assert csv.get(r2, "name")  == "Bob",    "get name"
+            assert csv.get(r2, "city")  == "Austin", "get city"
+            assert csv.get(r2, "score") == "87",     "get score"
+            assert csv.get(r2, "nope")  == "",       "get missing col"
+
+            # ── for-in over dataRows ──────────────────────────────────────────
+            # 4 total rows - 1 header = 3 data rows
+            assert csv.rowCount() - 1 == 3, "dataRows count"
+
+            # for-in with where clause
+            var high as int = 0
+            for row in csv.dataRows()
+                var s = csv.get(row, "score")
+                if s == "95" or s == "100"
+                    high = high + 1
+            assert high == 2, "high scorers"
+
+            # ── rows() includes header — verify via rowCount ──────────────────
+            assert csv.rowCount() == 4, "rows() count matches rowCount"
+
+            # ── RFC 4180: quoted field with embedded comma ────────────────────
+            # CSV:  name,city
+            #       "Smith, Jr",Boston
+            var comma_csv = "name,city\n\"Smith, Jr\",Boston"
+            var cc = Csv.parse(comma_csv)
+            assert cc.rowCount() == 2, "comma csv rowCount"
+            var cr = cc.row(1)
+            assert cr.at(0) == "Smith, Jr", "embedded comma in field"
+            assert cr.at(1) == "Boston",    "field after quoted comma-field"
+
+            # ── RFC 4180: quoted field with embedded double-quote (\"\" escape) ─
+            # CSV:  name,note
+            #       Alice,"She said ""hello"""
+            var quote_csv = "name,note\nAlice,\"She said \"\"hello\"\"\""
+            var qc = Csv.parse(quote_csv)
+            assert qc.rowCount() == 2, "quote csv rowCount"
+            var qr = qc.row(1)
+            assert qr.at(0) == "Alice",           "quote csv name"
+            assert qr.at(1) == "She said \"hello\"", "embedded double-quote"
+
+            # ── RFC 4180: mixed — comma AND quote in same field ───────────────
+            # CSV:  key,value
+            #       "Jones, ""Jr""","New York"
+            var mixed_csv = "key,value\n\"Jones, \"\"Jr\"\"\",\"New York\""
+            var mc = Csv.parse(mixed_csv)
+            var mr = mc.row(1)
+            assert mr.at(0) == "Jones, \"Jr\"", "mixed: comma + quote"
+            assert mr.at(1) == "New York",      "mixed: second field"
+
+            # ── parseFile with MAR.csv ────────────────────────────────────────
+            var file_csv = Csv.parseFile("test/texts/MAR.csv")
+            assert file_csv.rowCount() > 1, "MAR.csv has rows"
+            assert file_csv.colCount() == 3, "MAR.csv has 3 columns"
+
+            var fhdr = file_csv.header()
+            assert fhdr.at(0) == "book",          "MAR col 0"
+            assert fhdr.at(1) == "chapter:verse", "MAR col 1"
+            assert fhdr.at(2) == "text",          "MAR col 2"
+
+            var first_data = file_csv.row(1)
+            assert first_data.at(0) == "MAR", "first data row book"
+            assert file_csv.get(first_data, "book") == "MAR", "get book col"
+
+            # MAR.csv has more than 1 row (header + data)
+            assert file_csv.rowCount() > 1, "MAR has data rows"
+
+            # ── CsvWriter: build a CSV string ─────────────────────────────────
+            var writer = CsvWriter()
+            writer.writeRow(csv.header())
+            for row in csv.dataRows()
+                writer.writeRow(row)
+            var rebuilt = writer.build()
+            assert rebuilt.len > 0, "writer produced output"
+            assert rebuilt.contains("Alice"),  "writer output has Alice"
+            assert rebuilt.contains("name"),   "writer output has header"
+            assert rebuilt.contains("Boston"), "writer output has Boston"
+
+            # ── CsvWriter: RFC 4180 quoting ───────────────────────────────────
+            # Write the comma-field CSV, rebuild, re-parse, verify round-trip
+            var writer2 = CsvWriter()
+            writer2.writeRow(cc.header())
+            for row in cc.dataRows()
+                writer2.writeRow(row)
+            var rt = writer2.build()
+            # Re-parse the rebuilt CSV and check the comma-field survives
+            var rt_csv = Csv.parse(rt)
+            assert rt_csv.rowCount() == 2, "round-trip rowCount"
+            var rt_row = rt_csv.row(1)
+            assert rt_row.at(0) == "Smith, Jr", "round-trip comma field"
+
+            # ── HttpResponse.withHeader ───────────────────────────────────────
+            var resp = HttpResponse.ok("hello")
+            assert resp.status == 200, "ok status"
+            assert resp.text   == "hello", "ok text"
+
+            var resp2 = resp.withHeader("Content-Type", "application/json")
+            assert resp2.status == 200,       "withHeader preserves status"
+            assert resp2.text   == "hello",   "withHeader preserves text"
+
+            var resp3 = resp2.withHeader("X-Custom", "value")
+            assert resp3.status == 200, "chained withHeader status"
+
+            print "csv_test: all assertions passed"

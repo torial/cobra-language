@@ -1,0 +1,28 @@
+class Program
+    shared
+        def main
+            # Basic implicit capture: expr-body lambda closes over outer var
+            var base as int = 10
+            var adder = def(x as int) as int
+                return x + base
+            print adder(5)    # 15
+
+            # Implicit capture in expr-body (single-line) lambda
+            var scale as int = 3
+            var triple = def(n as int) = n * scale
+            print triple(4)   # 12
+
+            # Multiple implicit captures
+            var a as int = 100
+            var b as int = 7
+            var combine = def(x as int) as int
+                return x + a - b
+            print combine(0)  # 93
+
+            # Explicit capture still works alongside
+            var offset as int = 20
+            var shifted = def(x as int)
+                capture
+                    var offset as int = offset
+                print x + offset
+            shifted(5)        # 25

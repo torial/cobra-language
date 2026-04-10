@@ -94,6 +94,12 @@ pub const Type = union(enum) {
     date_time,
     /// `CalendarView` — calendar-specific lens over a `DateTime`.
     calendar_view,
+    /// `CsvTable` — parsed CSV data, accessible by row index and column name.
+    csv_table,
+    /// `CsvWriter` — builder for RFC 4180 CSV output.
+    csv_writer,
+    /// A single CSV row (behaves like `List(str)`; each element is a field string).
+    csv_row,
 
     // ── Optional ──────────────────────────────────────────────────────────────
     /// `?T` — nilable wrapper around another type.
@@ -137,6 +143,9 @@ pub const Type = union(enum) {
             .json_value     => b == .json_value,
             .date_time      => b == .date_time,
             .calendar_view  => b == .calendar_view,
+            .csv_table      => b == .csv_table,
+            .csv_writer     => b == .csv_writer,
+            .csv_row        => b == .csv_row,
             .json_array     => b == .json_array,
             .tuple => |ea| switch (b) {
                 .tuple => |eb| blk: {
@@ -207,6 +216,9 @@ pub const Type = union(enum) {
             .json_array     => "[]JsonValue",
             .date_time      => "DateTime",
             .calendar_view  => "CalendarView",
+            .csv_table      => "CsvTable",
+            .csv_writer     => "CsvWriter",
+            .csv_row        => "CsvRow",
             .optional       => "?T",
             .tuple          => "tuple",
             .unknown        => "<unknown>",
@@ -1297,6 +1309,25 @@ const TypeChecker = struct {
                 }
             }
         }
+        // csv.rows() / csv.dataRows() / csv.header() / csv.row(n) → each element is a csv_row
+        if (iter.* == .call) {
+            if (iter.call.callee.* == .member) {
+                const m = iter.call.callee.member;
+                if (std.mem.eql(u8, m.member, "rows")     or
+                    std.mem.eql(u8, m.member, "dataRows") or
+                    std.mem.eql(u8, m.member, "header")   or
+                    std.mem.eql(u8, m.member, "row"))
+                {
+                    const obj_t = tc.expr_types.get(m.object) orelse .unknown;
+                    if (obj_t == .csv_table) return .csv_row;
+                }
+            }
+        }
+        // for col in hdr where hdr is a csv_row (result of csv.header()/csv.row())
+        if (iter.* == .ident) {
+            const t = tc.expr_types.get(iter) orelse .unknown;
+            if (t == .csv_row) return .string;
+        }
         // for_num loop var → int (handled at the call site)
         return .unknown;
     }
@@ -1308,6 +1339,8 @@ const TypeChecker = struct {
         // return type so that callers can type-check against it.
         switch (e.callee.*) {
             .ident => |*ident| {
+                // CsvWriter() bare constructor call.
+                if (std.mem.eql(u8, ident.name, "CsvWriter")) return .csv_writer;
                 if (tc.resolve.exprs.get(ident)) |sym| {
                     _ = try tc.inferExpr(e.callee);
                     if (sym.kind == .method) {
@@ -1348,6 +1381,11 @@ const TypeChecker = struct {
                     if (std.mem.eql(u8, mem.member, "get") or std.mem.eql(u8, mem.member, "post")) {
                         const boxed = tc.map_alloc.create(Type) catch return .http_response;
                         boxed.* = .http_response;
+                        return .{ .optional = boxed };
+                    }
+                    if (std.mem.eql(u8, mem.member, "json") or std.mem.eql(u8, mem.member, "postJson")) {
+                        const boxed = tc.map_alloc.create(Type) catch return .json_value;
+                        boxed.* = .json_value;
                         return .{ .optional = boxed };
                     }
                     if (std.mem.eql(u8, mem.member, "serve")) return .void_;
@@ -1420,6 +1458,22 @@ const TypeChecker = struct {
                 // Calendar.* constant access → string constant in Zig.
                 if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Calendar")) {
                     return .string;
+                }
+                // Csv.* static methods.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Csv")) {
+                    _ = try tc.inferExpr(mem.object);
+                    for (e.args) |a| _ = try tc.inferExpr(a.value);
+                    if (std.mem.eql(u8, mem.member, "parse") or
+                        std.mem.eql(u8, mem.member, "parseFile")) return .csv_table;
+                    return .void_;
+                }
+                // Reflect.* static methods.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Reflect")) {
+                    for (e.args) |a| _ = try tc.inferExpr(a.value);
+                    if (std.mem.eql(u8, mem.member, "className"))  return .string;
+                    if (std.mem.eql(u8, mem.member, "fieldNames") or
+                        std.mem.eql(u8, mem.member, "fieldTypes")) return .str_slice;
+                    return .unknown;
                 }
                 // Json.* static methods.
                 if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Json")) {
@@ -1634,6 +1688,34 @@ const TypeChecker = struct {
             if (std.mem.eql(u8, method, "isObject")) return .bool;
             if (std.mem.eql(u8, method, "isArray"))  return .bool;
             return .void_;  // put/putInt/putFloat/putBool/append/appendInt/appendFloat/appendBool
+        }
+        // HttpResponse instance methods
+        if (obj_type == .http_response) {
+            if (std.mem.eql(u8, method, "withHeader")) return .http_response;
+            return .unknown;
+        }
+        // CsvTable methods
+        if (obj_type == .csv_table) {
+            if (std.mem.eql(u8, method, "rowCount") or std.mem.eql(u8, method, "colCount")) return .int;
+            if (std.mem.eql(u8, method, "header") or std.mem.eql(u8, method, "row")) return .csv_row;
+            if (std.mem.eql(u8, method, "get")) return .string;
+            return .unknown;  // rows(), dataRows() — for-in handles element type separately
+        }
+        // CsvWriter methods
+        if (obj_type == .csv_writer) {
+            if (std.mem.eql(u8, method, "build")) return .string;
+            return .void_;  // writeRow
+        }
+        // CsvRow methods (behaves like List(str))
+        if (obj_type == .csv_row) {
+            if (std.mem.eql(u8, method, "at")) return .string;
+            if (std.mem.eql(u8, method, "count") or std.mem.eql(u8, method, "len")) return .int;
+            return .unknown;
+        }
+        // str_slice methods ([]str — e.g. Reflect.fieldNames, Net.resolve)
+        if (obj_type == .str_slice) {
+            if (std.mem.eql(u8, method, "at"))    return .string;
+            if (std.mem.eql(u8, method, "count")) return .int;
         }
         // File methods (static-style)
         if (obj_type == .file) {

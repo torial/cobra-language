@@ -178,6 +178,45 @@ fn collectUnionNamesInDecls(decls: []const Ast.Decl, set: *std.StringHashMap(voi
 // ── Free helper functions ─────────────────────────────────────────────────────
 
 /// Extract the simple name from a TypeRef, or null for compound forms.
+/// Convert a TypeRef to a human-readable string for reflection metadata.
+/// Caller owns the returned slice (allocated with `alloc`).
+fn typeRefStr(tr: Ast.TypeRef, alloc: Allocator) ![]const u8 {
+    return switch (tr) {
+        .named       => |n| try alloc.dupe(u8, n.name),
+        .nilable     => |inner| blk: {
+            const s = try typeRefStr(inner.*, alloc);
+            defer alloc.free(s);
+            break :blk try std.fmt.allocPrint(alloc, "?{s}", .{s});
+        },
+        .stream      => |inner| blk: {
+            const s = try typeRefStr(inner.*, alloc);
+            defer alloc.free(s);
+            break :blk try std.fmt.allocPrint(alloc, "{s}*", .{s});
+        },
+        .error_union => |inner| blk: {
+            const s = try typeRefStr(inner.*, alloc);
+            defer alloc.free(s);
+            break :blk try std.fmt.allocPrint(alloc, "!{s}", .{s});
+        },
+        .generic     => |g| blk: {
+            var buf: std.ArrayListUnmanaged(u8) = .{};
+            try buf.appendSlice(alloc, g.name);
+            try buf.append(alloc, '(');
+            for (g.args, 0..) |arg, i| {
+                if (i > 0) try buf.appendSlice(alloc, ", ");
+                const s = try typeRefStr(arg, alloc);
+                defer alloc.free(s);
+                try buf.appendSlice(alloc, s);
+            }
+            try buf.append(alloc, ')');
+            break :blk try buf.toOwnedSlice(alloc);
+        },
+        .void_       => try alloc.dupe(u8, "void"),
+        .same        => try alloc.dupe(u8, "same"),
+        .tuple       => try alloc.dupe(u8, "tuple"),
+    };
+}
+
 fn typeRefSimpleName(tr: Ast.TypeRef) ?[]const u8 {
     return switch (tr) {
         .named   => |n| n.name,
@@ -242,13 +281,20 @@ fn binaryOpStr(op: Ast.BinaryOp) []const u8 {
 
 // ── Body reference analysis ───────────────────────────────────────────────────
 //
-// Two pre-scans are run on each method body before emitting code:
+// Three pre-scans are run on each method body before emitting code:
 //
-//  1. collectRefs  — which params / self are actually referenced?
-//                    Used to emit `_ = param;` only when a param is unused.
+//  1. collectRefs    — which params / self are actually referenced?
+//                     Used to emit `_ = param;` only when a param is unused.
 //
-//  2. scanMutations — which local names appear as assignment targets?
-//                    Used to emit `const` vs `var` for local declarations.
+//  2. scanMutations  — which local names appear as assignment targets?
+//                     Used to emit `const` vs `var` for local declarations.
+//
+//  3. analyzeEscapes — which local variables escape the function (i.e. their
+//                     heap-owned values reach a `return` statement)?
+//                     Used to suppress `defer free` / `defer deinit` for vars
+//                     whose ownership transfers to the caller.  Replaces the
+//                     old `scanReturnedNames` heuristic with a proper fixed-point
+//                     propagation through the alias/depends-on graph.
 
 const Refs = struct {
     /// True if any `ExprIdent` in the body resolves to a `.var_` (field) symbol,
@@ -515,49 +561,134 @@ fn refsInExpr(expr: *const Ast.Expr, r: *const Resolver.ResolveResult, o: *Refs)
 /// the sole return value or as an argument to a call in a return expression).
 /// These variables must NOT receive a `defer _allocator.free` because the caller
 /// takes ownership of the allocation.
-fn scanReturnedNames(stmts: []const Ast.Stmt, alloc: Allocator) !std.StringHashMap(void) {
-    var set = std.StringHashMap(void).init(alloc);
-    errdefer set.deinit();
-    try scanReturnedNamesInto(stmts, &set);
-    return set;
+// ── Escape analysis ───────────────────────────────────────────────────────────
+
+/// Exhaustively collect all ExprIdent names reachable within `expr` into `set`.
+/// Used both to seed the initial escape set from return expressions and to compute
+/// the "depends-on" set for each var initialiser.
+fn collectAllIdents(expr: *const Ast.Expr, set: *std.StringHashMap(void)) anyerror!void {
+    switch (expr.*) {
+        .ident         => |e|  try set.put(e.name, {}),
+        .call          => |e|  {
+            if (e.callee.* == .member)     try collectAllIdents(e.callee.member.object, set)
+            else if (e.callee.* == .ident) try set.put(e.callee.ident.name, {});
+            for (e.args) |a| try collectAllIdents(a.value, set);
+        },
+        .member        => |m|  try collectAllIdents(m.object, set),
+        .binary        => |b|  { try collectAllIdents(b.left, set); try collectAllIdents(b.right, set); },
+        .unary         => |u|  try collectAllIdents(u.operand, set),
+        .to_nilable    => |u|  try collectAllIdents(u.expr, set),
+        .to_non_nil    => |u|  try collectAllIdents(u.expr, set),
+        .is_nil        => |u|  try collectAllIdents(u.expr, set),
+        .orelse_       => |o|  { try collectAllIdents(o.expr, set); try collectAllIdents(o.fallback, set); },
+        .catch_        => |c|  { try collectAllIdents(c.expr, set); try collectAllIdents(c.fallback, set); },
+        .if_expr       => |i|  { try collectAllIdents(i.cond, set); try collectAllIdents(i.then_expr, set); try collectAllIdents(i.else_expr, set); },
+        .cast          => |c|  try collectAllIdents(c.expr, set),
+        .old           => |o|  try collectAllIdents(o.expr, set),
+        .try_          => |t|  try collectAllIdents(t.expr, set),
+        .index         => |i|  { try collectAllIdents(i.object, set); try collectAllIdents(i.index, set); },
+        .slice         => |s|  { try collectAllIdents(s.object, set);
+                                  if (s.start) |b| try collectAllIdents(b, set);
+                                  if (s.stop)  |b| try collectAllIdents(b, set); },
+        .tuple_lit     => |t|  { for (t.elems)    |e| try collectAllIdents(e, set); },
+        .list_lit      => |l|  { for (l.elems)    |e| try collectAllIdents(e, set); },
+        .array_lit     => |a|  { for (a.elems)    |e| try collectAllIdents(e, set); },
+        .dict_lit      => |d|  { for (d.entries) |e| { try collectAllIdents(e.key, set); try collectAllIdents(e.value, set); } },
+        .all_any       => |a|  { try collectAllIdents(a.iter, set); try collectAllIdents(a.cond, set); },
+        .string_interp => |si| { for (si.parts) |p| { switch (p) { .expr => |e| try collectAllIdents(e, set), else => {} } } },
+        else           => {},  // literals, nil, this, zig_lit — no idents
+    }
 }
 
-fn scanReturnedNamesInto(stmts: []const Ast.Stmt, set: *std.StringHashMap(void)) !void {
+/// Recursively add all ExprIdent names appearing in any `return` expression to `set`.
+fn seedEscapedFromReturns(stmts: []const Ast.Stmt, set: *std.StringHashMap(void)) anyerror!void {
     for (stmts) |stmt| {
         switch (stmt) {
-            .return_ => |s| if (s.value) |v| collectIdentNames(v, set) catch {},
-            .if_     => |s| {
-                try scanReturnedNamesInto(s.then_body, set);
-                for (s.else_ifs) |ei| try scanReturnedNamesInto(ei.body, set);
-                if (s.else_body) |eb| try scanReturnedNamesInto(eb, set);
+            .return_   => |s| if (s.value) |v| try collectAllIdents(v, set),
+            .if_       => |s| {
+                try seedEscapedFromReturns(s.then_body, set);
+                for (s.else_ifs) |ei| try seedEscapedFromReturns(ei.body, set);
+                if (s.else_body) |eb| try seedEscapedFromReturns(eb, set);
             },
-            .while_  => |s| try scanReturnedNamesInto(s.body, set),
-            .for_in  => |s| try scanReturnedNamesInto(s.body, set),
-            .for_num => |s| try scanReturnedNamesInto(s.body, set),
-            .branch  => |s| {
-                for (s.on) |on| try scanReturnedNamesInto(on.body, set);
-                if (s.else_) |eb| try scanReturnedNamesInto(eb, set);
+            .while_    => |s| { try seedEscapedFromReturns(s.body, set); if (s.post_body) |pb| try seedEscapedFromReturns(pb, set); },
+            .for_in    => |s| try seedEscapedFromReturns(s.body, set),
+            .for_num   => |s| try seedEscapedFromReturns(s.body, set),
+            .branch    => |s| {
+                for (s.on) |on| try seedEscapedFromReturns(on.body, set);
+                if (s.else_) |eb| try seedEscapedFromReturns(eb, set);
             },
-            .with    => |s| try scanReturnedNamesInto(s.body, set),
+            .with      => |s| try seedEscapedFromReturns(s.body, set),
             .try_catch => |s| {
-                try scanReturnedNamesInto(s.body, set);
-                for (s.clauses) |cl| try scanReturnedNamesInto(cl.body, set);
+                try seedEscapedFromReturns(s.body, set);
+                for (s.clauses) |cl| try seedEscapedFromReturns(cl.body, set);
             },
-            .guard => |s| try scanReturnedNamesInto(s.else_body, set),
-            else => {},
+            .guard     => |s| try seedEscapedFromReturns(s.else_body, set),
+            else       => {},
         }
     }
 }
 
-/// Walk expr and record any .ident names into `set` (for return ownership).
-fn collectIdentNames(expr: *const Ast.Expr, set: *std.StringHashMap(void)) !void {
-    switch (expr.*) {
-        .ident => |e| try set.put(e.name, {}),
-        .call  => |e| {
-            for (e.args) |a| try collectIdentNames(a.value, set);
-        },
-        else => {},
+/// One propagation pass over var decls:  if variable `y` is already escaped and
+/// `var y = <expr>`, add all idents from <expr> to the escaped set (because y's
+/// value was constructed from those idents — their buffers may be embedded in y).
+/// Returns true if the set grew (caller loops until stable).
+fn propagateEscapesOnce(stmts: []const Ast.Stmt, set: *std.StringHashMap(void)) anyerror!bool {
+    var grew = false;
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .var_ => |n| if (n.init) |e| {
+                if (set.contains(n.name)) {
+                    const before = set.count();
+                    try collectAllIdents(e, set);
+                    if (set.count() > before) grew = true;
+                }
+            },
+            .if_ => |s| {
+                if (try propagateEscapesOnce(s.then_body, set)) grew = true;
+                for (s.else_ifs) |ei| { if (try propagateEscapesOnce(ei.body, set)) grew = true; }
+                if (s.else_body) |eb| { if (try propagateEscapesOnce(eb, set)) grew = true; }
+            },
+            .while_    => |s| {
+                if (try propagateEscapesOnce(s.body, set)) grew = true;
+                if (s.post_body) |pb| { if (try propagateEscapesOnce(pb, set)) grew = true; }
+            },
+            .for_in    => |s| { if (try propagateEscapesOnce(s.body, set)) grew = true; },
+            .for_num   => |s| { if (try propagateEscapesOnce(s.body, set)) grew = true; },
+            .branch    => |s| {
+                for (s.on) |on| { if (try propagateEscapesOnce(on.body, set)) grew = true; }
+                if (s.else_) |eb| { if (try propagateEscapesOnce(eb, set)) grew = true; }
+            },
+            .with      => |s| { if (try propagateEscapesOnce(s.body, set)) grew = true; },
+            .try_catch => |s| {
+                if (try propagateEscapesOnce(s.body, set)) grew = true;
+                for (s.clauses) |cl| { if (try propagateEscapesOnce(cl.body, set)) grew = true; }
+            },
+            .guard     => |s| { if (try propagateEscapesOnce(s.else_body, set)) grew = true; },
+            else       => {},
+        }
     }
+    return grew;
+}
+
+/// Compute the set of local variable names whose heap-owned values escape this
+/// function body.  A variable escapes if its value (or the value of any variable
+/// that was initialised from it) reaches a `return` statement.
+///
+/// Replaces `scanReturnedNames`, which only caught variables that appeared
+/// *directly* in a return expression.  This implementation propagates through
+/// alias chains (var y = x → if y escapes, x escapes) and struct-embedding
+/// (var r = HttpResponse.ok(msg) → if r escapes, msg escapes).
+///
+/// Conservative: over-escaping (marking a variable escaped when it isn't)
+/// causes a memory leak, never a use-after-free.  Under-escaping causes UAF.
+fn analyzeEscapes(stmts: []const Ast.Stmt, alloc: Allocator) !std.StringHashMap(void) {
+    var set = std.StringHashMap(void).init(alloc);
+    errdefer set.deinit();
+    // Phase 1 — seed from all return expressions.
+    try seedEscapedFromReturns(stmts, &set);
+    // Phase 2 — fixed-point propagation through the depends-on graph.
+    while (try propagateEscapesOnce(stmts, &set)) {}
+    return set;
 }
 
 fn scanMutations(
@@ -621,71 +752,53 @@ fn scanMutationsInto(
     }
 }
 
-/// Mark any local variable that is used directly as a method-call receiver as
-/// "mutated".  Zebra methods always take `self: *Owner`, so even a read-only
-/// call through a local requires that local to be declared `var`.
-/// Extension methods (from `extend` blocks) are pass-by-value and are NOT mutating.
+/// Mark local variables whose values are modified in-place as "mutated" (→ emit
+/// `var` rather than `const`).
+///
+/// Previous approach: a large `non_mutating` *deny-list* — any method not on the
+/// list was assumed mutating.  Problem: every new stdlib method defaulted to
+/// "mutating" until manually added, causing spurious `var` declarations and Zig
+/// "local variable is never mutated" errors.
+///
+/// New approach: a small `mutating_methods` *allow-list* — only methods that
+/// actually modify the receiver's internal state are listed.  Default is
+/// non-mutating.  For user-defined types (TC type `.named`) we conservatively
+/// always mark as mutating because we cannot inspect the method body.
 fn scanMutationsInExpr(
     expr:   *const Ast.Expr,
     set:    *std.StringHashMap(void),
     tc_opt: ?*const TypeChecker.TypeCheckResult,
 ) anyerror!void {
     switch (expr.*) {
-        // obj.method(args) — if obj is a bare identifier, mark it as needing var
-        // unless the method is a non-mutating stdlib operation (strings, reads).
         .call => |e| {
             if (e.callee.* == .member) {
                 const obj    = e.callee.member.object;
                 const method = e.callee.member.member;
-                const non_mutating = std.StaticStringMap(void).initComptime(&.{
-                    .{ "contains",   {} }, .{ "startsWith", {} }, .{ "endsWith",   {} },
-                    .{ "trim",       {} }, .{ "trimLeft",   {} }, .{ "trimRight",  {} },
-                    .{ "concat",     {} }, .{ "toInt",      {} }, .{ "toFloat",    {} },
-                    .{ "format",     {} }, .{ "at",         {} }, .{ "fetch",      {} },
-                    .{ "count",      {} }, .{ "upper",      {} }, .{ "lower",      {} },
-                    .{ "indexOf",    {} }, .{ "replace",    {} }, .{ "repeat",     {} },
-                    .{ "split",      {} }, .{ "lines",      {} }, .{ "toString",   {} },
-                    .{ "padLeft",    {} }, .{ "padRight",   {} }, .{ "center",     {} },
-                    .{ "bytes",      {} }, .{ "isEmpty",    {} }, .{ "isAlpha",    {} },
-                    .{ "isNumeric",  {} }, .{ "join",       {} }, .{ "reverse",    {} },
-                    .{ "toHex",      {} }, .{ "fromHex",    {} },
-                    // StringBuilder read-only ops
-                    .{ "build",          {} }, .{ "len",            {} },
-                    // UTF-8 / Unicode ops
-                    .{ "chars",          {} }, .{ "isValidUtf8",    {} },
-                    .{ "codePointCount", {} },
-                    // Char predicates / transforms
-                    .{ "isAlpha",        {} }, .{ "isDigit",        {} },
-                    .{ "isWhitespace",   {} }, .{ "isUpper",        {} },
-                    .{ "isLower",        {} }, .{ "toUpper",        {} },
-                    .{ "toLower",        {} },
-                    // TCP / UDP — don't reassign the handle, so the variable stays const
-                    .{ "write",          {} }, .{ "read",           {} },
-                    .{ "readLine",       {} }, .{ "readBytes",      {} },
-                    .{ "send",           {} }, .{ "recv",           {} },
-                    .{ "close",          {} },
-                    // Regex — all methods are non-mutating
-                    .{ "match",          {} }, .{ "find",           {} },
-                    .{ "findAll",        {} }, .{ "replace",        {} },
-                    // JsonValue read-only accessors
-                    .{ "getStr",         {} }, .{ "getInt",         {} },
-                    .{ "getFloat",       {} }, .{ "getBool",        {} },
-                    .{ "getObj",         {} }, .{ "getList",        {} },
-                    .{ "isNull",         {} }, .{ "isObject",       {} },
-                    .{ "isArray",        {} }, .{ "stringify",      {} },
-                    // DateTime — all methods return new values; receiver is never mutated
-                    .{ "addDays",        {} }, .{ "addMonths",      {} },
-                    .{ "addYears",       {} }, .{ "addHours",       {} },
-                    .{ "addMinutes",     {} }, .{ "addSeconds",     {} },
-                    .{ "before",         {} }, .{ "after",          {} },
-                    .{ "equals",         {} }, .{ "daysBetween",    {} },
-                    .{ "secondsBetween", {} }, .{ "toEpoch",        {} },
-                    .{ "toIso8601",      {} }, .{ "inCalendar",     {} },
+
+                // Methods that modify the receiver's internal state in-place.
+                // Everything else defaults to non-mutating.
+                const mutating_methods = std.StaticStringMap(void).initComptime(&.{
+                    // List — in-place mutations
+                    .{ "add",            {} }, .{ "remove",        {} },
+                    .{ "clear",          {} }, .{ "sort",          {} },
+                    .{ "sortBy",         {} }, .{ "reverse",       {} },
+                    // HashMap — in-place mutations
+                    .{ "set",            {} },
+                    // StringBuilder — all write methods
+                    .{ "append",         {} }, .{ "appendLine",    {} },
+                    .{ "appendChar",     {} }, .{ "appendInt",     {} },
+                    .{ "appendFloat",    {} }, .{ "appendBool",    {} },
+                    // JsonValue — mutating builders
+                    .{ "put",            {} }, .{ "putInt",        {} },
+                    .{ "putFloat",       {} }, .{ "putBool",       {} },
+                    // CsvWriter — write
+                    .{ "writeRow",       {} },
                 });
-                // Extension methods are pass-by-value: never require var on the receiver.
-                const is_ext_method = blk: {
-                    if (tc_opt) |tc| {
-                        if (obj.* == .ident) {
+
+                if (obj.* == .ident) {
+                    // Extension methods are pass-by-value — never mutate the receiver.
+                    const is_ext = blk: {
+                        if (tc_opt) |tc| {
                             const obj_type = tc.expr_types.get(obj) orelse .unknown;
                             const tname: ?[]const u8 = switch (obj_type) {
                                 .string         => "String",
@@ -704,20 +817,43 @@ fn scanMutationsInExpr(
                                 else => null,
                             };
                             if (tname) |tn| {
-                                // Build key and check — use a fixed buffer to avoid alloc.
                                 var buf: [256]u8 = undefined;
                                 if (std.fmt.bufPrint(&buf, "{s}.{s}", .{tn, method})) |key| {
                                     if (tc.ext_methods.get(key) != null) break :blk true;
                                 } else |_| {}
                             }
                         }
+                        break :blk false;
+                    };
+
+                    if (!is_ext) {
+                        // Determine if this call needs the receiver to be `var`.
+                        const needs_var: bool = blk: {
+                            if (tc_opt) |tc| {
+                                const obj_type = tc.expr_types.get(obj) orelse .unknown;
+                                // User-defined class: conservative — methods take *self,
+                                // so ANY call may mutate the receiver.
+                                if (obj_type == .named) break :blk true;
+                                // Strings are immutable values in Zebra — no method
+                                // mutates a string in-place.  `reverse` is in the
+                                // allow-list for List (which is in-place), but
+                                // str.reverse() always returns a new allocation.
+                                if (obj_type == .string) break :blk false;
+                                // `.unknown` falls through to the allow-list below.
+                                // Previously we treated unknown as always-mutating, which
+                                // caused spurious `var` for stdlib builtins (sys.args(),
+                                // str methods, etc.) whose idents aren't registered in
+                                // resolve.exprs, making TC return .unknown for them.
+                                // User-class instances resolve as .named, so the
+                                // conservative path above still fires for them.
+                            }
+                            // Stdlib / unknown type: only explicitly-listed mutating methods.
+                            break :blk mutating_methods.get(method) != null;
+                        };
+                        if (needs_var) try set.put(obj.ident.name, {});
                     }
-                    break :blk false;
-                };
-                if (!is_ext_method and non_mutating.get(method) == null and obj.* == .ident)
-                    try set.put(obj.ident.name, {});
+                }
             }
-            // Recurse into args.
             for (e.args) |a| try scanMutationsInExpr(a.value, set, tc_opt);
         },
         .binary    => |e| { try scanMutationsInExpr(e.left, set, tc_opt); try scanMutationsInExpr(e.right, set, tc_opt); },
@@ -1345,7 +1481,7 @@ const Generator = struct {
         // ── HTTP networking helpers ─────────────────────────────────────────
         // Returns ?HttpResponse (null on any network/TLS error).
         // ca_bundle is populated on first HTTPS call via next_https_rescan_certs=true (Zig default).
-        try g.w.writeAll("const HttpResponse = struct { status: u16, text: []const u8 };\n");
+        try g.w.writeAll("const HttpResponse = struct { status: u16, text: []const u8, headers: []const [2][]const u8 = &.{} };\n");
         try g.w.writeAll("fn _http_request(method: std.http.Method, url: []const u8, payload: ?[]const u8) ?HttpResponse {\n");
         try g.w.writeAll("    var _hc = std.http.Client{ .allocator = _allocator };\n");
         try g.w.writeAll("    defer _hc.deinit();\n");
@@ -1355,6 +1491,25 @@ const Generator = struct {
         try g.w.writeAll("}\n");
         try g.w.writeAll("fn _http_get(url: []const u8) ?HttpResponse { return _http_request(.GET, url, null); }\n");
         try g.w.writeAll("fn _http_post(url: []const u8, payload: []const u8) ?HttpResponse { return _http_request(.POST, url, payload); }\n");
+        try g.w.writeAll("fn _http_json_get(url: []const u8) ?JsonValue { const _r = _http_request(.GET, url, null) orelse return null; return _json_parse(_r.text); }\n");
+        try g.w.writeAll(
+            \\fn _http_json_post(url: []const u8, body: []const u8) ?JsonValue {
+            \\    var _hc = std.http.Client{ .allocator = _allocator };
+            \\    defer _hc.deinit();
+            \\    var _hb = std.io.Writer.Allocating.init(std.heap.page_allocator);
+            \\    _ = _hc.fetch(.{ .location = .{ .url = url }, .method = .POST, .payload = body,
+            \\        .extra_headers = &.{ .{ .name = "Content-Type", .value = "application/json" } },
+            \\        .response_writer = &_hb.writer }) catch return null;
+            \\    return _json_parse(_hb.written());
+            \\}
+            \\fn _http_with_header(resp: HttpResponse, key: []const u8, val: []const u8) HttpResponse {
+            \\    var _new = std.heap.page_allocator.alloc([2][]const u8, resp.headers.len + 1) catch return resp;
+            \\    @memcpy(_new[0..resp.headers.len], resp.headers);
+            \\    _new[resp.headers.len] = .{ key, val };
+            \\    return .{ .status = resp.status, .text = resp.text, .headers = _new };
+            \\}
+            \\
+        );
         // ── HTTP server ─────────────────────────────────────────────────────
         // Threaded: each accepted connection is dispatched to a std.Thread.
         // page_allocator is used per-thread (thread-safe, unbounded lifetime).
@@ -1424,9 +1579,11 @@ const Generator = struct {
             \\                500 => "Internal Server Error",
             \\                else => "Unknown",
             \\            };
+            \\            var _xh: std.ArrayList(u8) = .{};
+            \\            for (_resp.headers) |_kv| { _xh.appendSlice(_alloc, _kv[0]) catch {}; _xh.appendSlice(_alloc, ": ") catch {}; _xh.appendSlice(_alloc, _kv[1]) catch {}; _xh.appendSlice(_alloc, "\r\n") catch {}; }
             \\            const _out = std.fmt.allocPrint(_alloc,
-            \\                "HTTP/1.1 {d} {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
-            \\                .{ _resp.status, _st, _resp.text.len, _resp.text }) catch @panic("OOM");
+            \\                "HTTP/1.1 {d} {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n{s}\r\n{s}",
+            \\                .{ _resp.status, _st, _resp.text.len, _xh.items, _resp.text }) catch @panic("OOM");
             \\            ctx.conn.stream.writeAll(_out) catch {};
             \\        }
             \\    };
@@ -1446,6 +1603,105 @@ const Generator = struct {
             \\
         );
         try g.w.writeAll("\n");
+        // ── CSV stdlib ─────────────────────────────────────────────────────────
+        // RFC 4180-compliant parser and writer.  Uses page_allocator (program-lifetime,
+        // consistent with JSON and HTTP response bodies).
+        try g.w.writeAll(
+            \\const _CsvTable = struct { rows: []const []const []const u8 };
+            \\fn _csv_parse(src: []const u8) _CsvTable {
+            \\    const _pa = std.heap.page_allocator;
+            \\    var _rows: std.ArrayList([]const []const u8) = .{};
+            \\    var _row:  std.ArrayList([]const u8) = .{};
+            \\    var _f:    std.ArrayList(u8) = .{};
+            \\    const _St = enum { s, fld, q, aq };
+            \\    var _st: _St = .s;
+            \\    for (src) |c| {
+            \\        switch (_st) {
+            \\            .s => switch (c) {
+            \\                '"'  => { _st = .q; },
+            \\                ','  => { _row.append(_pa, "") catch {}; },
+            \\                '\r' => {},
+            \\                '\n' => { if (_row.items.len > 0) { _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {}; _row = .{}; } },
+            \\                else => { _f.append(_pa, c) catch {}; _st = .fld; },
+            \\            },
+            \\            .fld => switch (c) {
+            \\                ',' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _st = .s; },
+            \\                '\r' => {},
+            \\                '\n' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {}; _row = .{}; _st = .s; },
+            \\                else => { _f.append(_pa, c) catch {}; },
+            \\            },
+            \\            .q  => switch (c) {
+            \\                '"'  => { _st = .aq; },
+            \\                else => { _f.append(_pa, c) catch {}; },
+            \\            },
+            \\            .aq => switch (c) {
+            \\                '"' => { _f.append(_pa, '"') catch {}; _st = .q; },
+            \\                ',' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _st = .s; },
+            \\                '\r' => {},
+            \\                '\n' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {}; _row = .{}; _st = .s; },
+            \\                else => { _st = .s; },
+            \\            },
+            \\        }
+            \\    }
+            \\    if (_st == .fld or _st == .aq or _st == .q) {
+            \\        _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {};
+            \\    } else if (_st == .s and _row.items.len > 0) {
+            \\        _row.append(_pa, "") catch {};
+            \\    }
+            \\    if (_row.items.len > 0) _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {};
+            \\    return .{ .rows = _rows.toOwnedSlice(_pa) catch &.{} };
+            \\}
+            \\fn _csv_parse_file(path: []const u8) _CsvTable {
+            \\    const src = std.fs.cwd().readFileAlloc(std.heap.page_allocator, path, std.math.maxInt(usize)) catch return .{ .rows = &.{} };
+            \\    return _csv_parse(src);
+            \\}
+            \\fn _csv_row_count(t: _CsvTable) i64 { return @as(i64, @intCast(t.rows.len)); }
+            \\fn _csv_col_count(t: _CsvTable) i64 { return if (t.rows.len > 0) @as(i64, @intCast(t.rows[0].len)) else 0; }
+            \\fn _csv_header(t: _CsvTable) std.ArrayList([]const u8) {
+            \\    var _r: std.ArrayList([]const u8) = .{};
+            \\    if (t.rows.len > 0) for (t.rows[0]) |f| _r.append(std.heap.page_allocator, f) catch {};
+            \\    return _r;
+            \\}
+            \\fn _csv_row(t: _CsvTable, n: i64) std.ArrayList([]const u8) {
+            \\    var _r: std.ArrayList([]const u8) = .{};
+            \\    const _i: usize = @intCast(@max(0, n));
+            \\    if (_i < t.rows.len) for (t.rows[_i]) |f| _r.append(std.heap.page_allocator, f) catch {};
+            \\    return _r;
+            \\}
+            \\fn _csv_rows(t: _CsvTable) std.ArrayList(std.ArrayList([]const u8)) {
+            \\    var _out: std.ArrayList(std.ArrayList([]const u8)) = .{};
+            \\    for (t.rows) |row| { var _r: std.ArrayList([]const u8) = .{}; for (row) |f| _r.append(std.heap.page_allocator, f) catch {}; _out.append(std.heap.page_allocator, _r) catch {}; }
+            \\    return _out;
+            \\}
+            \\fn _csv_data_rows(t: _CsvTable) std.ArrayList(std.ArrayList([]const u8)) {
+            \\    var _out: std.ArrayList(std.ArrayList([]const u8)) = .{};
+            \\    const _s: usize = if (t.rows.len > 0) 1 else 0;
+            \\    for (t.rows[_s..]) |row| { var _r: std.ArrayList([]const u8) = .{}; for (row) |f| _r.append(std.heap.page_allocator, f) catch {}; _out.append(std.heap.page_allocator, _r) catch {}; }
+            \\    return _out;
+            \\}
+            \\fn _csv_get(t: _CsvTable, row: std.ArrayList([]const u8), col: []const u8) []const u8 {
+            \\    if (t.rows.len == 0) return "";
+            \\    for (t.rows[0], 0..) |h, i| { if (std.mem.eql(u8, h, col)) return if (i < row.items.len) row.items[i] else ""; }
+            \\    return "";
+            \\}
+            \\const _CsvWriter = struct { buf: std.ArrayList(u8) };
+            \\fn _csv_writer_init() _CsvWriter { return .{ .buf = .{} }; }
+            \\fn _csv_write_row(w: *_CsvWriter, row: std.ArrayList([]const u8)) void {
+            \\    const _pa = std.heap.page_allocator;
+            \\    for (row.items, 0..) |field, i| {
+            \\        if (i > 0) w.buf.append(_pa, ',') catch {};
+            \\        const _nq = std.mem.indexOfAny(u8, field, ",\"\r\n") != null;
+            \\        if (_nq) {
+            \\            w.buf.append(_pa, '"') catch {};
+            \\            for (field) |c| { if (c == '"') w.buf.append(_pa, '"') catch {}; w.buf.append(_pa, c) catch {}; }
+            \\            w.buf.append(_pa, '"') catch {};
+            \\        } else { w.buf.appendSlice(_pa, field) catch {}; }
+            \\    }
+            \\    w.buf.appendSlice(_pa, "\r\n") catch {};
+            \\}
+            \\fn _csv_build(w: *const _CsvWriter) []const u8 { return w.buf.items; }
+            \\
+        );
         // ── TCP helpers ────────────────────────────────────────────────────
         try g.w.writeAll("const TcpConn = struct { stream: std.net.Stream };\n");
         try g.w.writeAll("fn _tcp_connect(host: []const u8, port: u16) ?TcpConn {\n");
@@ -2497,6 +2753,43 @@ const Generator = struct {
 
         try g.writeIndent();
         try g.w.writeAll("};\n\n");
+
+        // ④ Tier-1 reflection: emit per-class const arrays for field names and types.
+        //    Linker dead-strips these if nothing references them (zero cost when unused).
+        {
+            var field_names = std.ArrayListUnmanaged([]const u8){};
+            defer field_names.deinit(g.alloc);
+            var field_types = std.ArrayListUnmanaged([]const u8){};
+
+            for (n.members) |decl| {
+                const v = switch (decl) { .var_ => |v| v, else => continue };
+                if (v.mods.shared) continue;
+                try field_names.append(g.alloc, v.name);
+                const ts: []const u8 = if (v.type_) |tr|
+                    try typeRefStr(tr, g.alloc)
+                else
+                    try g.alloc.dupe(u8, "unknown");
+                try field_types.append(g.alloc, ts);
+            }
+            defer { for (field_types.items) |s| g.alloc.free(s); field_types.deinit(g.alloc); }
+
+            try g.w.print("const _reflect_{s}_name: []const u8 = \"{s}\";\n", .{ n.name, n.name });
+
+            try g.w.print("const _reflect_{s}_fields: []const []const u8 = &.{{", .{n.name});
+            for (field_names.items, 0..) |nm, i| {
+                if (i > 0) try g.w.writeAll(", ");
+                try g.w.print("\"{s}\"", .{nm});
+            }
+            try g.w.writeAll("};\n");
+
+            try g.w.print("const _reflect_{s}_field_types: []const []const u8 = &.{{", .{n.name});
+            for (field_types.items, 0..) |ts, i| {
+                if (i > 0) try g.w.writeAll(", ");
+                try g.w.print("\"{s}\"", .{ts});
+            }
+            try g.w.writeAll("};\n\n");
+        }
+
         try g.genExportWrappers(n.name, n.members);
     }
 
@@ -2732,7 +3025,7 @@ const Generator = struct {
             defer refs.deinit();
             var mut_set = try scanMutations(body, g.alloc, g.tc);
             defer mut_set.deinit();
-            var ret_set = try scanReturnedNames(body, g.alloc);
+            var ret_set = try analyzeEscapes(body, g.alloc);
             defer ret_set.deinit();
             var cv_map = std.StringHashMap(void).init(g.alloc);
             defer cv_map.deinit();
@@ -2861,9 +3154,9 @@ const Generator = struct {
             // Pre-scan 2: which locals are mutated? (var vs const)
             var mut_set = try scanMutations(body, g.alloc, g.tc);
             defer mut_set.deinit();
-            // Pre-scan 3: which locals appear in return expressions?
-            // Those must NOT get defer-free (caller takes ownership).
-            var ret_set = try scanReturnedNames(body, g.alloc);
+            // Pre-scan 3: escape analysis — which locals' ownership transfers to caller?
+            // Fixed-point propagation through the alias graph; suppresses defer-free.
+            var ret_set = try analyzeEscapes(body, g.alloc);
             defer ret_set.deinit();
             // Mutable map of closure-var names (populated lazily during genStmts)
             var cv_map = std.StringHashMap(void).init(g.alloc);
@@ -3118,7 +3411,17 @@ const Generator = struct {
                     const lbl = g.try_block_label.?;
                     try g.w.print(" catch |_e| {{ {s} = _e; break :{s}; }}", .{ev, lbl});
                 }
-                try g.w.writeAll(";\n");
+                // zig"stmt;" already ends with ';' — don't append another one.
+                // genZigLit emits text[4..len-1] (strips zig"..."), so check that slice.
+                const already_semi = blk: {
+                    if (e.* != .zig_lit) break :blk false;
+                    const raw = e.zig_lit.text;
+                    if (raw.len < 5) break :blk false;
+                    const content = std.mem.trimRight(u8, raw[4 .. raw.len - 1], " \t\r\n");
+                    break :blk content.len > 0 and content[content.len - 1] == ';';
+                };
+                if (!already_semi) try g.w.writeAll(";");
+                try g.w.writeAll("\n");
             },
             .pass      => try g.line("// pass"),
             .break_    => try g.line("break;"),
@@ -3266,22 +3569,16 @@ const Generator = struct {
             try g.w.writeAll(": ");
             try g.genType(tr);
         } else if (std.mem.eql(u8, kw, "var")) {
-            // Mutable var without explicit type: emit TC-inferred type to avoid
-            // "comptime_int/comptime_float must be const" errors in Zig.
+            // Mutable var without explicit type: emit TC-inferred type annotation
+            // to avoid "comptime_int / *const [N:0]u8 / comptime_float must be
+            // const" errors in Zig and to prevent slice-vs-array type mismatches.
             if (n.init) |e| {
                 if (g.tc) |tc| {
                     const t = tc.expr_types.get(e) orelse .unknown;
-                    const ts: ?[]const u8 = switch (t) {
-                        .int   => "i64",
-                        .uint  => "u64",
-                        .float => "f64",
-                        .bool  => "bool",
-                        .char  => "u21",
-                        else   => null,
-                    };
-                    if (ts) |s| {
+                    if (try tcTypeAnnotation(t, g.alloc)) |ann| {
+                        defer g.alloc.free(ann);
                         try g.w.writeAll(": ");
-                        try g.w.writeAll(s);
+                        try g.w.writeAll(ann);
                     }
                 }
             }
@@ -4092,6 +4389,20 @@ const Generator = struct {
             try g.w.writeAll(")");
             return true;
         }
+        if (std.mem.eql(u8, method, "json")) {
+            try g.w.writeAll("_http_json_get(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "postJson")) {
+            try g.w.writeAll("_http_json_post(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(", ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
         return false;
     }
 
@@ -4123,6 +4434,87 @@ const Generator = struct {
             if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("\"\"");
             try g.w.writeAll(" }");
             return true;
+        }
+        return false;
+    }
+
+    // ── HttpResponse instance methods ─────────────────────────────────────────
+
+    fn genHttpResponseMethod(g: Generator, obj: *const Ast.Expr, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "withHeader")) {
+            try g.w.writeAll("_http_with_header(");
+            try g.genExpr(obj);
+            try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(", ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    // ── Csv static + instance methods ────────────────────────────────────────
+
+    fn genCsvCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "parse")) {
+            try g.w.writeAll("_csv_parse(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "parseFile")) {
+            try g.w.writeAll("_csv_parse_file(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    fn genCsvMethod(g: Generator, obj: *const Ast.Expr, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "rowCount")) {
+            try g.w.writeAll("_csv_row_count("); try g.genExpr(obj); try g.w.writeAll(")"); return true;
+        }
+        if (std.mem.eql(u8, method, "colCount")) {
+            try g.w.writeAll("_csv_col_count("); try g.genExpr(obj); try g.w.writeAll(")"); return true;
+        }
+        if (std.mem.eql(u8, method, "header")) {
+            try g.w.writeAll("_csv_header("); try g.genExpr(obj); try g.w.writeAll(")"); return true;
+        }
+        if (std.mem.eql(u8, method, "row")) {
+            try g.w.writeAll("_csv_row(");
+            try g.genExpr(obj); try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeAll(")"); return true;
+        }
+        if (std.mem.eql(u8, method, "rows")) {
+            try g.w.writeAll("_csv_rows("); try g.genExpr(obj); try g.w.writeAll(")"); return true;
+        }
+        if (std.mem.eql(u8, method, "dataRows")) {
+            try g.w.writeAll("_csv_data_rows("); try g.genExpr(obj); try g.w.writeAll(")"); return true;
+        }
+        if (std.mem.eql(u8, method, "get")) {
+            try g.w.writeAll("_csv_get(");
+            try g.genExpr(obj); try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("undefined");
+            try g.w.writeAll(", ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")"); return true;
+        }
+        return false;
+    }
+
+    fn genCsvWriterMethod(g: Generator, obj: *const Ast.Expr, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "writeRow")) {
+            try g.w.writeAll("_csv_write_row(&");
+            try g.genExpr(obj); try g.w.writeAll(", ");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("undefined");
+            try g.w.writeAll(")"); return true;
+        }
+        if (std.mem.eql(u8, method, "build")) {
+            try g.w.writeAll("_csv_build(&");
+            try g.genExpr(obj); try g.w.writeAll(")"); return true;
         }
         return false;
     }
@@ -4406,11 +4798,49 @@ const Generator = struct {
 
     // ── String-slice methods ([]const []const u8, e.g. Net.resolve result) ──────
 
-    fn genStrSliceMethod(g: Generator, obj: *const Ast.Expr, method: []const u8) anyerror!bool {
+    fn genStrSliceMethod(g: Generator, obj: *const Ast.Expr, method: []const u8, args: []const Ast.Arg) anyerror!bool {
         if (std.mem.eql(u8, method, "count")) {
             try g.w.writeAll("@as(i64, @intCast(");
             try g.genExpr(obj);
             try g.w.writeAll(".len))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "at")) {
+            try g.genExpr(obj);
+            try g.w.writeAll("[@as(usize, @intCast(");
+            if (args.len > 0) try g.genExpr(args[0].value);
+            try g.w.writeAll("))]");
+            return true;
+        }
+        return false;
+    }
+
+    /// Emit code for `Reflect.className(obj)`, `Reflect.fieldNames(obj)`,
+    /// `Reflect.fieldTypes(obj)`.  Resolves the class name from the TC-inferred
+    /// type of the argument and emits a reference to the corresponding
+    /// `_reflect_<ClassName>_*` const generated alongside the class struct.
+    fn genReflectCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (args.len != 1) return false;
+        const arg = args[0].value;
+        const arg_type = if (g.tc) |tc| tc.expr_types.get(arg) orelse .unknown else .unknown;
+        const class_name: []const u8 = switch (arg_type) {
+            .named => |sym| switch (sym.decl) {
+                .class   => |c| c.name,
+                .struct_ => |s| s.name,
+                else     => return false,
+            },
+            else => return false,
+        };
+        if (std.mem.eql(u8, method, "className")) {
+            try g.w.print("_reflect_{s}_name", .{class_name});
+            return true;
+        }
+        if (std.mem.eql(u8, method, "fieldNames")) {
+            try g.w.print("_reflect_{s}_fields[0..]", .{class_name});
+            return true;
+        }
+        if (std.mem.eql(u8, method, "fieldTypes")) {
+            try g.w.print("_reflect_{s}_field_types[0..]", .{class_name});
             return true;
         }
         return false;
@@ -4882,7 +5312,17 @@ const Generator = struct {
             try fg.writeIndent();
             try fg.w.writeAll(cv.name);
             try fg.w.writeAll(": ");
-            if (cv.type_) |tr| try fg.genType(tr) else try fg.w.writeAll("anytype");
+            if (cv.type_) |tr| {
+                try fg.genType(tr);
+            } else if (cv.init) |init| {
+                // No explicit type — use @TypeOf(init_expr) so Zig can infer
+                // the field type from the initialiser at the struct definition site.
+                try fg.w.writeAll("@TypeOf(");
+                try fg.genExpr(init);
+                try fg.w.writeAll(")");
+            } else {
+                try fg.w.writeAll("anytype");
+            }
             try fg.w.writeAll(",\n");
         }
 
@@ -4915,8 +5355,8 @@ const Generator = struct {
         try fg.w.writeAll(" {\n");
 
         // Body: idents matching capture names resolve to self.name
-        // Pre-scan returned names so deferred frees are skipped for returned strings.
-        var ret_set_capture = try scanReturnedNames(
+        // Escape analysis so deferred frees are skipped for vars whose ownership transfers out.
+        var ret_set_capture = try analyzeEscapes(
             if (e.body == .stmts) e.body.stmts else &.{}, g.alloc);
         defer ret_set_capture.deinit();
         const base_bg = fg.indented().withCaptureFields(field_names.items);
@@ -5233,6 +5673,27 @@ const Generator = struct {
                     return g.genForInList(s);
             }
         }
+        // for col in hdr where hdr has TC-type csv_row (result of csv.header()/csv.row())
+        if (s.iter.* == .ident) {
+            const obj_tc = if (g.tc) |tc| tc.expr_types.get(s.iter) orelse .unknown else .unknown;
+            if (obj_tc == .csv_row) return g.genForInList(s);
+        }
+        // for row in csv.rows() / csv.dataRows() / csv.header() / csv.row(n)
+        // Capture the returned ArrayList before iterating — avoids use-after-free on temporaries.
+        if (s.iter.* == .call) {
+            if (s.iter.call.callee.* == .member) {
+                const m = s.iter.call.callee.member;
+                const obj_tc = if (g.tc) |tc| tc.expr_types.get(m.object) orelse .unknown else .unknown;
+                if (obj_tc == .csv_table and (
+                    std.mem.eql(u8, m.member, "rows")     or
+                    std.mem.eql(u8, m.member, "dataRows") or
+                    std.mem.eql(u8, m.member, "header")   or
+                    std.mem.eql(u8, m.member, "row")))
+                {
+                    return g.genForInCsvRows(s);
+                }
+            }
+        }
 
         // Default: standard Zig for-loop over a slice / range.
         try g.writeIndent();
@@ -5361,6 +5822,39 @@ const Generator = struct {
             }
             try bg.genStmts(s.body);
         }
+        try g.writeIndent();
+        try g.w.writeAll("}\n");
+    }
+
+    /// `for row in csv.rows()` / `for col in csv.header()` etc.
+    /// The callee returns an ArrayList; we capture it first to avoid use-after-free on the temporary,
+    /// then iterate `.items`.
+    fn genForInCsvRows(g: Generator, s: *Ast.StmtForIn) anyerror!void {
+        const var_name = if (s.vars.len > 0) s.vars[0] else "_row";
+        const iter_var = try std.fmt.allocPrint(g.alloc, "_it_{s}", .{var_name});
+        defer g.alloc.free(iter_var);
+
+        // Wrap in a block so the `_it_*` const is scoped — prevents redeclaration
+        // errors when the same loop-variable name is used in multiple CSV for-in loops.
+        try g.writeIndent();
+        try g.w.writeAll("{\n");
+        const bg = g.indented();
+        try bg.writeIndent();
+        try bg.w.print("const {s} = ", .{iter_var});
+        try bg.genExpr(s.iter);
+        try bg.w.writeAll(";\n");
+        try bg.writeIndent();
+        try bg.w.print("for ({s}.items) |{s}| {{\n", .{iter_var, var_name});
+        const bg2 = bg.indented();
+        if (s.where) |w| {
+            try bg2.writeIndent();
+            try bg2.w.writeAll("if (!(");
+            try bg2.genExpr(w);
+            try bg2.w.writeAll(")) continue;\n");
+        }
+        try bg2.genStmts(s.body);
+        try bg.writeIndent();
+        try bg.w.writeAll("}\n");
         try g.writeIndent();
         try g.w.writeAll("}\n");
     }
@@ -6354,6 +6848,10 @@ const Generator = struct {
                 try g.w.writeAll("std.StringHashMap(i64).init(_allocator)");
                 return;
             }
+            if (std.mem.eql(u8, name, "CsvWriter")) {
+                try g.w.writeAll("_csv_writer_init()");
+                return;
+            }
         }
         // Constructor call: ClassName(args) → ClassName.init(args) if class has `cue init`,
         // else ClassName{} for zero-value construction.
@@ -6394,11 +6892,18 @@ const Generator = struct {
                 if (try g.genFileCall(mem.member, e.args)) return;
             }
         }
-        // Http static calls: Http.get(url), Http.post(url, body), Http.serve(port, handler).
+        // Http static calls: Http.get/post/json/postJson/serve.
         if (e.callee.* == .member) {
             const mem = e.callee.member;
             if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Http")) {
                 if (try g.genHttpCall(mem.member, e.args)) return;
+            }
+        }
+        // Csv static calls: Csv.parse(text), Csv.parseFile(path).
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Csv")) {
+                if (try g.genCsvCall(mem.member, e.args)) return;
             }
         }
         // DateTime static calls: DateTime.now(), DateTime.fromEpoch(ms), DateTime.of(y,m,d,...).
@@ -6406,6 +6911,13 @@ const Generator = struct {
             const mem = e.callee.member;
             if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "DateTime")) {
                 if (try g.genDateTimeCall(mem.member, e.args)) return;
+            }
+        }
+        // Reflect static calls: Reflect.className(obj), Reflect.fieldNames(obj), Reflect.fieldTypes(obj).
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Reflect")) {
+                if (try g.genReflectCall(mem.member, e.args)) return;
             }
         }
         // Json static calls: Json.parse(s), Json.stringify(v), Json.object(), Json.array().
@@ -6555,15 +7067,19 @@ const Generator = struct {
                 switch (tc_type) {
                     .string     => if (try g.genStringMethod(mem.object, mem.member, e.args)) return,
                     .char       => if (try g.genCharMethod(mem.object, mem.member, e.args)) return,
-                    .tcp_conn   => if (try g.genTcpMethod(mem.object, mem.member, e.args)) return,
-                    .udp_socket => if (try g.genUdpMethod(mem.object, mem.member, e.args)) return,
-                    .regex       => if (try g.genRegexMethod(mem.object, mem.member, e.args)) return,
-                    .gui_context => if (try g.genGuiWidgetMethod(mem.object, mem.member, e.args)) return,
-                    .str_slice  => if (try g.genStrSliceMethod(mem.object, mem.member)) return,
-                    .json_value  => if (try g.genJsonMethod(mem.object, mem.member, e.args)) return,
-                    .date_time   => if (try g.genDateTimeMethod(mem.object, mem.member, e.args)) return,
-                    .unknown     => if (try g.genListMethod(mem.object, mem.member, e.args)) return,
-                    else        => {},
+                    .tcp_conn      => if (try g.genTcpMethod(mem.object, mem.member, e.args)) return,
+                    .udp_socket    => if (try g.genUdpMethod(mem.object, mem.member, e.args)) return,
+                    .regex         => if (try g.genRegexMethod(mem.object, mem.member, e.args)) return,
+                    .gui_context   => if (try g.genGuiWidgetMethod(mem.object, mem.member, e.args)) return,
+                    .str_slice     => if (try g.genStrSliceMethod(mem.object, mem.member, e.args)) return,
+                    .json_value    => if (try g.genJsonMethod(mem.object, mem.member, e.args)) return,
+                    .date_time     => if (try g.genDateTimeMethod(mem.object, mem.member, e.args)) return,
+                    .http_response => if (try g.genHttpResponseMethod(mem.object, mem.member, e.args)) return,
+                    .csv_table     => if (try g.genCsvMethod(mem.object, mem.member, e.args)) return,
+                    .csv_writer    => if (try g.genCsvWriterMethod(mem.object, mem.member, e.args)) return,
+                    .csv_row       => if (try g.genListMethod(mem.object, mem.member, e.args)) return,
+                    .unknown       => if (try g.genListMethod(mem.object, mem.member, e.args)) return,
+                    else           => {},
                 }
             }
         }
@@ -6674,7 +7190,11 @@ const Generator = struct {
             .eq, .ne => {
                 // For string == / != use std.mem.eql rather than the raw == operator,
                 // which Zig does not support on slices.
+                // Exception: never use std.mem.eql when one side is nil (null) —
+                // that is always a raw null comparison (e.g., optional != nil).
+                const either_nil = (e.left.* == .nil or e.right.* == .nil);
                 const left_is_str = blk: {
+                    if (either_nil) break :blk false;
                     if (g.tc) |tc| {
                         const t = tc.expr_types.get(e.left) orelse .unknown;
                         break :blk t == .string;
@@ -6764,6 +7284,30 @@ const Generator = struct {
     fn genStringLit(g: Generator, e: Ast.ExprStringLit) anyerror!void {
         switch (e.kind) {
             .plain => {
+                // Triple-quoted doc string """...""" (single-line or multiline).
+                if (e.text.len >= 6 and e.text[0] == '"' and e.text[1] == '"' and e.text[2] == '"') {
+                    // Strip opening and closing """ delimiters.
+                    // For multiline, the content includes embedded newlines.
+                    const inner = e.text[3 .. e.text.len - 3];
+                    // Strip leading newline (the one right after opening """).
+                    const after_lead = if (inner.len > 0 and inner[0] == '\n') inner[1..] else inner;
+                    // Strip trailing whitespace-only tail (indentation of closing """).
+                    var trim_end = after_lead.len;
+                    while (trim_end > 0 and
+                           (after_lead[trim_end - 1] == ' ' or after_lead[trim_end - 1] == '\t'))
+                        : (trim_end -= 1) {}
+                    const content = after_lead[0..trim_end];
+                    try g.w.writeByte('"');
+                    for (content) |c| switch (c) {
+                        '"'  => try g.w.writeAll("\\\""),
+                        '\n' => try g.w.writeAll("\\n"),
+                        '\r' => try g.w.writeAll("\\r"),
+                        '\t' => try g.w.writeAll("\\t"),
+                        else => try g.w.writeByte(c),
+                    };
+                    try g.w.writeByte('"');
+                    return;
+                }
                 // If the Zebra source used single-quotes, re-emit as double-quoted Zig string.
                 // Zig only allows single-quotes for character literals (single codepoint).
                 if (e.text.len >= 2 and e.text[0] == '\'') {
@@ -6927,7 +7471,15 @@ const Generator = struct {
                 try fg.writeIndent();
                 try fg.w.writeAll(cv.name);
                 try fg.w.writeAll(": ");
-                if (cv.type_) |tr| try fg.genType(tr) else try fg.w.writeAll("anytype");
+                if (cv.type_) |tr| {
+                    try fg.genType(tr);
+                } else if (cv.init) |init| {
+                    try fg.w.writeAll("@TypeOf(");
+                    try fg.genExpr(init);
+                    try fg.w.writeAll(")");
+                } else {
+                    try fg.w.writeAll("anytype");
+                }
                 try fg.w.writeAll(",\n");
             }
             try g.writeIndent();
@@ -6978,7 +7530,11 @@ const Generator = struct {
             }
         }
         try g.w.writeAll(" {");
-        const lg = g.asMethod();
+        // Build capture_fields list so idents inside the body emit `self.name`
+        var cap_names = std.ArrayList([]const u8){};
+        defer cap_names.deinit(g.alloc);
+        for (e.capture) |cv| try cap_names.append(g.alloc, cv.name);
+        const lg = g.asMethod().withCaptureFields(cap_names.items);
         switch (e.body) {
             .expr  => |ex| {
                 try lg.w.writeAll(" return ");
@@ -6986,7 +7542,7 @@ const Generator = struct {
                 try lg.w.writeAll(";");
             },
             .stmts => |ss| {
-                var ret_set_lambda = try scanReturnedNames(ss, g.alloc);
+                var ret_set_lambda = try analyzeEscapes(ss, g.alloc);
                 defer ret_set_lambda.deinit();
                 try lg.w.writeAll("\n");
                 try lg.indented().withReturnedNames(&ret_set_lambda).genStmts(ss);
@@ -7092,6 +7648,57 @@ const Generator = struct {
         }
     }
 };
+
+// ── Type annotation helper ────────────────────────────────────────────────────
+
+/// Map a TypeChecker.Type to the Zig type annotation string that must appear
+/// when a `var` local is initialised with that type.  Returns null when Zig's
+/// own inference is correct (named types, stdlib opaques from constructor
+/// calls, etc.) so the caller can omit the annotation entirely.
+///
+/// All non-null results are heap-allocated via `alloc` and must be freed by
+/// the caller (typically with `defer alloc.free(ann)`).
+fn tcTypeAnnotation(t: TypeChecker.Type, alloc: Allocator) !?[]const u8 {
+    return switch (t) {
+        // Primitives where Zig's inference would produce comptime_int / comptime_float
+        // or a literal array type instead of a slice.
+        .int        => try alloc.dupe(u8, "i64"),
+        .uint       => try alloc.dupe(u8, "u64"),
+        .float      => try alloc.dupe(u8, "f64"),
+        .bool       => try alloc.dupe(u8, "bool"),
+        .char       => try alloc.dupe(u8, "u21"),
+        .string     => try alloc.dupe(u8, "[]const u8"),
+        .str_slice  => try alloc.dupe(u8, "[]const []const u8"),
+        .void_      => try alloc.dupe(u8, "void"),
+        // Sized numerics — bit-width is runtime data so we must allocPrint.
+        .int_n   => |w| try std.fmt.allocPrint(alloc, "i{d}", .{w}),
+        .uint_n  => |w| try std.fmt.allocPrint(alloc, "u{d}", .{w}),
+        .float_n => |w| try std.fmt.allocPrint(alloc, "f{d}", .{w}),
+        // Optional wrapper — recurse; propagate null if inner is unresolvable.
+        .optional => |inner| blk: {
+            const inner_s = try tcTypeAnnotation(inner.*, alloc) orelse break :blk null;
+            defer alloc.free(inner_s);
+            break :blk try std.fmt.allocPrint(alloc, "?{s}", .{inner_s});
+        },
+        // Named user types, stdlib opaques, tuples, unknown — Zig infers correctly
+        // from constructor calls, so no annotation is needed.
+        //
+        // GENERIC TYPES (List, HashMap, …): these also fall through here and
+        // return null.  That is safe today because every generic-typed local in
+        // Zebra requires an explicit `as List(T)` annotation in the source, so
+        // `genLocalVar` always takes the `if (n.type_) |tr|` branch and emits
+        // `genType(tr)` — it never reaches this function for those vars.
+        //
+        // If that assumption ever changes (e.g. we add type inference for
+        // generics so `var xs = List()` works without an annotation), the
+        // generic cases will silently fall through here and produce an
+        // unannotated `var xs = ...` — Zig will then reject it with a
+        // "variable of type 'std.ArrayList(…)' must be const or comptime"
+        // error.  At that point, add explicit `.list`, `.hash_map`, etc. arms
+        // to this switch that emit the correct Zig container type.
+        else => null,
+    };
+}
 
 // ── C header generation ───────────────────────────────────────────────────────
 
@@ -7242,6 +7849,9 @@ fn printFmt(tc: ?*const TypeChecker.TypeCheckResult, catch_var: []const u8, expr
         .json_array,
         .date_time,
         .calendar_view,
+        .csv_table,
+        .csv_writer,
+        .csv_row,
         .optional,
         .tuple                         => "{any}",
     };

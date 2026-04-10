@@ -31,6 +31,40 @@ fn _zebra_gt(a: anytype, b: anytype) bool {
 fn _zebra_ge(a: anytype, b: anytype) bool {
     if (comptime @TypeOf(a) == []const u8) return std.mem.order(u8, a, b) != .lt;
     return a >= b;
+}
+/// `item in container` — membership test for List, string (substring), HashMap.
+fn _zebra_in(item: anytype, container: anytype) bool {
+    const C = @TypeOf(container);
+    const I = @TypeOf(item);
+    // Struct types: ArrayList (has .items field) or HashMap (has .contains decl).
+    if (comptime @typeInfo(C) == .@"struct") {
+        if (comptime @hasField(C, "items")) {
+            for (container.items) |elem| {
+                if (comptime I == []const u8 or @typeInfo(I) == .pointer) {
+                    if (std.mem.eql(u8, elem, item)) return true;
+                } else {
+                    if (elem == item) return true;
+                }
+            }
+            return false;
+        }
+        if (comptime @hasDecl(C, "contains")) return container.contains(item);
+        return false;
+    }
+    // Pointer/array types: string substring check (coerce to []const u8).
+    return std.mem.indexOf(u8, @as([]const u8, container), @as([]const u8, item)) != null;
+}
+/// `s + t` — string concatenation.
+fn _str_concat(a: []const u8, b: []const u8, alloc: std.mem.Allocator) []const u8 {
+    return std.mem.concat(alloc, u8, &.{ a, b }) catch @panic("OOM");
+}
+/// `s * n` — repeat string s n times.
+fn _str_repeat(s: []const u8, n: anytype, alloc: std.mem.Allocator) []const u8 {
+    const count: usize = @intCast(n);
+    if (count == 0 or s.len == 0) return "";
+    const buf = alloc.alloc(u8, s.len * count) catch @panic("OOM");
+    for (0..count) |i| @memcpy(buf[i * s.len ..][0..s.len], s);
+    return buf;
 }fn _Result(comptime T: type, comptime E: type) type {
     return union(enum) {
         ok: T,
@@ -72,31 +106,34 @@ fn _zebra_ge(a: anytype, b: anytype) bool {
         }
     };
 }
-fn _pad_left(s: []const u8, width: usize, fill: u8, alloc: std.mem.Allocator) []const u8 {
+fn _pad_fill(fill: anytype) u8 {
+    if (comptime @typeInfo(@TypeOf(fill)) == .pointer) return fill[0];
+    return @as(u8, @intCast(fill));
+}
+fn _pad_left(s: []const u8, width: usize, fill: anytype, alloc: std.mem.Allocator) []const u8 {
     if (s.len >= width) return s;
     const buf = alloc.alloc(u8, width) catch @panic("OOM");
-    @memset(buf[0 .. width - s.len], fill);
+    @memset(buf[0 .. width - s.len], _pad_fill(fill));
     @memcpy(buf[width - s.len ..], s);
     return buf;
 }
-fn _pad_right(s: []const u8, width: usize, fill: u8, alloc: std.mem.Allocator) []const u8 {
+fn _pad_right(s: []const u8, width: usize, fill: anytype, alloc: std.mem.Allocator) []const u8 {
     if (s.len >= width) return s;
     const buf = alloc.alloc(u8, width) catch @panic("OOM");
     @memcpy(buf[0 .. s.len], s);
-    @memset(buf[s.len ..], fill);
+    @memset(buf[s.len ..], _pad_fill(fill));
     return buf;
 }
-fn _pad_center(s: []const u8, width: usize, fill: u8, alloc: std.mem.Allocator) []const u8 {
+fn _pad_center(s: []const u8, width: usize, fill: anytype, alloc: std.mem.Allocator) []const u8 {
     if (s.len >= width) return s;
     const pad = width - s.len;
     const lpad = pad / 2;
     const buf = alloc.alloc(u8, width) catch @panic("OOM");
-    @memset(buf[0 .. lpad], fill);
+    @memset(buf[0 .. lpad], _pad_fill(fill));
     @memcpy(buf[lpad .. lpad + s.len], s);
-    @memset(buf[lpad + s.len ..], fill);
+    @memset(buf[lpad + s.len ..], _pad_fill(fill));
     return buf;
 }
-
 fn _zebra_sort_natural(comptime T: type, items: []T) void {
     const _I = struct {
         fn less(_: void, a: T, b: T) bool {
@@ -127,6 +164,145 @@ fn _sys_run(argv: std.ArrayList([]const u8)) SysRunResult {
     };
     return .{ .exit_code = _ec, .stdout = _r.stdout, .stderr = _r.stderr };
 }
+const _DateTime = struct { epoch_ms: i64 };
+const _CalendarView = struct {
+    year: i64, month: i64, day: i64, weekday: i64,
+    monthName: []const u8, era: []const u8,
+};
+const _DtG = struct { year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64 };
+fn _dt_is_leap(year: i64) bool {
+    return @mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0);
+}
+fn _dt_days_in_month(year: i64, month: i64) i64 {
+    const _d = [12]i64{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (month == 2 and _dt_is_leap(year)) return 29;
+    return _d[@intCast(month - 1)];
+}
+fn _dt_to_gregorian(epoch_ms: i64) _DtG {
+    const epoch_s   = @divFloor(epoch_ms, 1000);
+    const epoch_days = @divFloor(epoch_s, 86400);
+    const time_rem  = @mod(epoch_s, 86400);
+    // Fliegel-Van Flandern: JDN → civil Gregorian date
+    const jd = epoch_days + 2440588;
+    var l  = jd + 68569;
+    const n  = @divFloor(4 * l, 146097);
+    l = l - @divFloor(146097 * n + 3, 4);
+    const ii = @divFloor(4000 * (l + 1), 1461001);
+    l = l - @divFloor(1461 * ii, 4) + 31;
+    const jj = @divFloor(80 * l, 2447);
+    const day   = l - @divFloor(2447 * jj, 80);
+    l = @divFloor(jj, 11);
+    const month = jj + 2 - 12 * l;
+    const year  = 100 * (n - 49) + ii + l;
+    return .{
+        .year = year, .month = month, .day = day,
+        .hour   = @divFloor(time_rem, 3600),
+        .minute = @divFloor(@mod(time_rem, 3600), 60),
+        .second = @mod(time_rem, 60),
+    };
+}
+fn _dt_from_gregorian(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) _DateTime {
+    // Richards algorithm: civil date → JDN
+    const a   = @divFloor(14 - month, 12);
+    const y   = year + 4800 - a;
+    const m   = month + 12 * a - 3;
+    const jdn = day + @divFloor(153 * m + 2, 5) + 365 * y
+              + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400) - 32045;
+    const epoch_days = jdn - 2440588;
+    const epoch_s    = epoch_days * 86400 + hour * 3600 + minute * 60 + second;
+    return .{ .epoch_ms = epoch_s * 1000 };
+}
+fn _dt_now() _DateTime { return .{ .epoch_ms = std.time.milliTimestamp() }; }
+fn _dt_weekday(dt: _DateTime) i64 {
+    // epoch_days=0 is Thursday (ISO 4); Monday=1 … Sunday=7
+    const epoch_days = @divFloor(dt.epoch_ms, 86400000);
+    return @mod(epoch_days + 3, 7) + 1;
+}
+fn _dt_add_days(dt: _DateTime, n: i64) _DateTime    { return .{ .epoch_ms = dt.epoch_ms + n * 86400000 }; }
+fn _dt_add_hours(dt: _DateTime, n: i64) _DateTime   { return .{ .epoch_ms = dt.epoch_ms + n * 3600000 }; }
+fn _dt_add_minutes(dt: _DateTime, n: i64) _DateTime { return .{ .epoch_ms = dt.epoch_ms + n * 60000 }; }
+fn _dt_add_seconds(dt: _DateTime, n: i64) _DateTime { return .{ .epoch_ms = dt.epoch_ms + n * 1000 }; }
+fn _dt_add_months(dt: _DateTime, months: i64) _DateTime {
+    const g      = _dt_to_gregorian(dt.epoch_ms);
+    const total  = (g.month - 1) + months;
+    const ny     = g.year + @divFloor(total, 12);
+    const nm     = @mod(total, 12) + 1;
+    const max_d  = _dt_days_in_month(ny, nm);
+    const nd     = if (g.day > max_d) max_d else g.day;
+    return _dt_from_gregorian(ny, nm, nd, g.hour, g.minute, g.second);
+}
+fn _dt_add_years(dt: _DateTime, years: i64) _DateTime {
+    const g     = _dt_to_gregorian(dt.epoch_ms);
+    const ny    = g.year + years;
+    const max_d = _dt_days_in_month(ny, g.month);
+    const nd    = if (g.day > max_d) max_d else g.day;
+    return _dt_from_gregorian(ny, g.month, nd, g.hour, g.minute, g.second);
+}
+fn _dt_to_iso8601(dt: _DateTime) []const u8 {
+    const g = _dt_to_gregorian(dt.epoch_ms);
+    return std.fmt.allocPrint(_allocator,
+        "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z",
+        .{ @as(u32, @intCast(g.year)), @as(u8, @intCast(g.month)), @as(u8, @intCast(g.day)),
+           @as(u8, @intCast(g.hour)),  @as(u8, @intCast(g.minute)), @as(u8, @intCast(g.second)) }) catch "";
+}
+fn _dt_format(dt: _DateTime, pattern: []const u8) []const u8 {
+    const g = _dt_to_gregorian(dt.epoch_ms);
+    const _sm = [_][]const u8{"","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+    const _lm = [_][]const u8{"","January","February","March","April","May","June","July","August","September","October","November","December"};
+    const _sw = [_][]const u8{"","Mon","Tue","Wed","Thu","Fri","Sat","Sun"};
+    const _lw = [_][]const u8{"","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"};
+    var out: std.ArrayListUnmanaged(u8) = .{};
+    var tmp: [32]u8 = undefined;
+    var i: usize = 0;
+    while (i < pattern.len) {
+        const c = pattern[i];
+        var cnt: usize = 1;
+        while (i + cnt < pattern.len and pattern[i + cnt] == c) cnt += 1;
+        const _uy = @as(u32, @intCast(g.year));
+        const _um = @as(u8,  @intCast(g.month));
+        const _ud = @as(u8,  @intCast(g.day));
+        const _uh = @as(u8,  @intCast(g.hour));
+        const _umin = @as(u8, @intCast(g.minute));
+        const _us = @as(u8,  @intCast(g.second));
+        switch (c) {
+            'y' => if (cnt >= 4) out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>4}", .{_uy}) catch "") catch {}
+                   else out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_uy % 100}) catch "") catch {},
+            'M' => if (cnt >= 4) out.appendSlice(_allocator, _lm[@intCast(g.month)]) catch {}
+                   else if (cnt >= 3) out.appendSlice(_allocator, _sm[@intCast(g.month)]) catch {}
+                   else if (cnt >= 2) out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_um}) catch "") catch {}
+                   else out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d}", .{_um}) catch "") catch {},
+            'd' => if (cnt >= 2) out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_ud}) catch "") catch {}
+                   else out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d}", .{_ud}) catch "") catch {},
+            'H' => out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_uh}) catch "") catch {},
+            'm' => out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_umin}) catch "") catch {},
+            's' => out.appendSlice(_allocator, std.fmt.bufPrint(&tmp, "{d:0>2}", .{_us}) catch "") catch {},
+            'E' => { const _wd: usize = @intCast(_dt_weekday(dt)); out.appendSlice(_allocator, if (cnt >= 4) _lw[_wd] else _sw[_wd]) catch {}; },
+            else => out.appendNTimes(_allocator, c, cnt) catch {},
+        }
+        i += cnt;
+    }
+    return out.toOwnedSlice(_allocator) catch "";
+}
+fn _dt_days_between(a: _DateTime, b: _DateTime) i64    { return @divFloor(b.epoch_ms - a.epoch_ms, 86400000); }
+fn _dt_seconds_between(a: _DateTime, b: _DateTime) i64 { return @divFloor(b.epoch_ms - a.epoch_ms, 1000); }
+fn _dt_in_calendar(dt: _DateTime, cal: []const u8) _CalendarView {
+    _ = cal; // only Gregorian implemented; future: dispatch on cal
+    const g  = _dt_to_gregorian(dt.epoch_ms);
+    const _lm2 = [_][]const u8{"","January","February","March","April","May","June","July","August","September","October","November","December"};
+    return .{
+        .year = g.year, .month = g.month, .day = g.day,
+        .weekday   = _dt_weekday(dt),
+        .monthName = _lm2[@intCast(g.month)],
+        .era       = "",
+    };
+}
+const Calendar = struct {
+    pub const Gregorian = "gregorian";
+    pub const Hebrew    = "hebrew";
+    pub const Islamic   = "islamic";
+    pub const Persian   = "persian";
+    pub const Julian    = "julian";
+};
 const JsonValue = std.json.Value;
 fn _json_parse(src: []const u8) ?JsonValue {
     // parseFromSliceLeaky uses allocator directly (no arena), intentionally leaked.
@@ -197,7 +373,7 @@ fn _json_arr_bool(v: *JsonValue, val: bool) void {
     if (v.* != .array) return;
     v.array.append(.{ .bool = val }) catch {};
 }
-const HttpResponse = struct { status: u16, text: []const u8 };
+const HttpResponse = struct { status: u16, text: []const u8, headers: []const [2][]const u8 = &.{} };
 fn _http_request(method: std.http.Method, url: []const u8, payload: ?[]const u8) ?HttpResponse {
     var _hc = std.http.Client{ .allocator = _allocator };
     defer _hc.deinit();
@@ -207,12 +383,29 @@ fn _http_request(method: std.http.Method, url: []const u8, payload: ?[]const u8)
 }
 fn _http_get(url: []const u8) ?HttpResponse { return _http_request(.GET, url, null); }
 fn _http_post(url: []const u8, payload: []const u8) ?HttpResponse { return _http_request(.POST, url, payload); }
+fn _http_json_get(url: []const u8) ?JsonValue { const _r = _http_request(.GET, url, null) orelse return null; return _json_parse(_r.text); }
+fn _http_json_post(url: []const u8, body: []const u8) ?JsonValue {
+    var _hc = std.http.Client{ .allocator = _allocator };
+    defer _hc.deinit();
+    var _hb = std.io.Writer.Allocating.init(std.heap.page_allocator);
+    _ = _hc.fetch(.{ .location = .{ .url = url }, .method = .POST, .payload = body,
+        .extra_headers = &.{ .{ .name = "Content-Type", .value = "application/json" } },
+        .response_writer = &_hb.writer }) catch return null;
+    return _json_parse(_hb.written());
+}
+fn _http_with_header(resp: HttpResponse, key: []const u8, val: []const u8) HttpResponse {
+    var _new = std.heap.page_allocator.alloc([2][]const u8, resp.headers.len + 1) catch return resp;
+    @memcpy(_new[0..resp.headers.len], resp.headers);
+    _new[resp.headers.len] = .{ key, val };
+    return .{ .status = resp.status, .text = resp.text, .headers = _new };
+}
 const HttpRequest = struct { method: []const u8, path: []const u8, content: []const u8 };
 fn _http_serve(port: u16, handler: anytype) void {
-    const Handler = @TypeOf(handler);
+    const _HFn = *const fn(HttpRequest) HttpResponse;
+    const _fn: _HFn = handler;
     const _Ctx = struct {
         conn: std.net.Server.Connection,
-        handler: Handler,
+        handler_fn: _HFn,
         fn run(ctx: *@This()) void {
             defer std.heap.page_allocator.destroy(ctx);
             defer ctx.conn.stream.close();
@@ -262,7 +455,7 @@ fn _http_serve(port: u16, handler: anytype) void {
                 _ = &_peeked;
             }
             const _req = HttpRequest{ .method = _method, .path = _path, .content = _body };
-            const _resp = if (comptime @typeInfo(@TypeOf(ctx.handler)) == .@"fn") ctx.handler(_req) else ctx.handler.call(_req);
+            const _resp = ctx.handler_fn(_req);
             const _st: []const u8 = switch (_resp.status) {
                 200 => "OK", 201 => "Created", 204 => "No Content",
                 301 => "Moved Permanently", 302 => "Found",
@@ -271,9 +464,11 @@ fn _http_serve(port: u16, handler: anytype) void {
                 500 => "Internal Server Error",
                 else => "Unknown",
             };
+            var _xh: std.ArrayList(u8) = .{};
+            for (_resp.headers) |_kv| { _xh.appendSlice(_alloc, _kv[0]) catch {}; _xh.appendSlice(_alloc, ": ") catch {}; _xh.appendSlice(_alloc, _kv[1]) catch {}; _xh.appendSlice(_alloc, "\r\n") catch {}; }
             const _out = std.fmt.allocPrint(_alloc,
-                "HTTP/1.1 {d} {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
-                .{ _resp.status, _st, _resp.text.len, _resp.text }) catch @panic("OOM");
+                "HTTP/1.1 {d} {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n{s}\r\n{s}",
+                .{ _resp.status, _st, _resp.text.len, _xh.items, _resp.text }) catch @panic("OOM");
             ctx.conn.stream.writeAll(_out) catch {};
         }
     };
@@ -283,7 +478,7 @@ fn _http_serve(port: u16, handler: anytype) void {
     while (true) {
         const _conn = _srv.accept() catch continue;
         const _ctx = _alloc.create(_Ctx) catch { _conn.stream.close(); continue; };
-        _ctx.* = .{ .conn = _conn, .handler = handler };
+        _ctx.* = .{ .conn = _conn, .handler_fn = _fn };
         _ = std.Thread.spawn(.{}, _Ctx.run, .{_ctx}) catch {
             _alloc.destroy(_ctx);
             _conn.stream.close();
@@ -291,6 +486,99 @@ fn _http_serve(port: u16, handler: anytype) void {
     }
 }
 
+const _CsvTable = struct { rows: []const []const []const u8 };
+fn _csv_parse(src: []const u8) _CsvTable {
+    const _pa = std.heap.page_allocator;
+    var _rows: std.ArrayList([]const []const u8) = .{};
+    var _row:  std.ArrayList([]const u8) = .{};
+    var _f:    std.ArrayList(u8) = .{};
+    const _St = enum { s, fld, q, aq };
+    var _st: _St = .s;
+    for (src) |c| {
+        switch (_st) {
+            .s => switch (c) {
+                '"'  => { _st = .q; },
+                ','  => { _row.append(_pa, "") catch {}; },
+                '\r' => {},
+                '\n' => { if (_row.items.len > 0) { _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {}; _row = .{}; } },
+                else => { _f.append(_pa, c) catch {}; _st = .fld; },
+            },
+            .fld => switch (c) {
+                ',' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _st = .s; },
+                '\r' => {},
+                '\n' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {}; _row = .{}; _st = .s; },
+                else => { _f.append(_pa, c) catch {}; },
+            },
+            .q  => switch (c) {
+                '"'  => { _st = .aq; },
+                else => { _f.append(_pa, c) catch {}; },
+            },
+            .aq => switch (c) {
+                '"' => { _f.append(_pa, '"') catch {}; _st = .q; },
+                ',' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _st = .s; },
+                '\r' => {},
+                '\n' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {}; _row = .{}; _st = .s; },
+                else => { _st = .s; },
+            },
+        }
+    }
+    if (_st == .fld or _st == .aq or _st == .q) {
+        _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {};
+    } else if (_st == .s and _row.items.len > 0) {
+        _row.append(_pa, "") catch {};
+    }
+    if (_row.items.len > 0) _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {};
+    return .{ .rows = _rows.toOwnedSlice(_pa) catch &.{} };
+}
+fn _csv_parse_file(path: []const u8) _CsvTable {
+    const src = std.fs.cwd().readFileAlloc(std.heap.page_allocator, path, std.math.maxInt(usize)) catch return .{ .rows = &.{} };
+    return _csv_parse(src);
+}
+fn _csv_row_count(t: _CsvTable) i64 { return @as(i64, @intCast(t.rows.len)); }
+fn _csv_col_count(t: _CsvTable) i64 { return if (t.rows.len > 0) @as(i64, @intCast(t.rows[0].len)) else 0; }
+fn _csv_header(t: _CsvTable) std.ArrayList([]const u8) {
+    var _r: std.ArrayList([]const u8) = .{};
+    if (t.rows.len > 0) for (t.rows[0]) |f| _r.append(std.heap.page_allocator, f) catch {};
+    return _r;
+}
+fn _csv_row(t: _CsvTable, n: i64) std.ArrayList([]const u8) {
+    var _r: std.ArrayList([]const u8) = .{};
+    const _i: usize = @intCast(@max(0, n));
+    if (_i < t.rows.len) for (t.rows[_i]) |f| _r.append(std.heap.page_allocator, f) catch {};
+    return _r;
+}
+fn _csv_rows(t: _CsvTable) std.ArrayList(std.ArrayList([]const u8)) {
+    var _out: std.ArrayList(std.ArrayList([]const u8)) = .{};
+    for (t.rows) |row| { var _r: std.ArrayList([]const u8) = .{}; for (row) |f| _r.append(std.heap.page_allocator, f) catch {}; _out.append(std.heap.page_allocator, _r) catch {}; }
+    return _out;
+}
+fn _csv_data_rows(t: _CsvTable) std.ArrayList(std.ArrayList([]const u8)) {
+    var _out: std.ArrayList(std.ArrayList([]const u8)) = .{};
+    const _s: usize = if (t.rows.len > 0) 1 else 0;
+    for (t.rows[_s..]) |row| { var _r: std.ArrayList([]const u8) = .{}; for (row) |f| _r.append(std.heap.page_allocator, f) catch {}; _out.append(std.heap.page_allocator, _r) catch {}; }
+    return _out;
+}
+fn _csv_get(t: _CsvTable, row: std.ArrayList([]const u8), col: []const u8) []const u8 {
+    if (t.rows.len == 0) return "";
+    for (t.rows[0], 0..) |h, i| { if (std.mem.eql(u8, h, col)) return if (i < row.items.len) row.items[i] else ""; }
+    return "";
+}
+const _CsvWriter = struct { buf: std.ArrayList(u8) };
+fn _csv_writer_init() _CsvWriter { return .{ .buf = .{} }; }
+fn _csv_write_row(w: *_CsvWriter, row: std.ArrayList([]const u8)) void {
+    const _pa = std.heap.page_allocator;
+    for (row.items, 0..) |field, i| {
+        if (i > 0) w.buf.append(_pa, ',') catch {};
+        const _nq = std.mem.indexOfAny(u8, field, ",\"\r\n") != null;
+        if (_nq) {
+            w.buf.append(_pa, '"') catch {};
+            for (field) |c| { if (c == '"') w.buf.append(_pa, '"') catch {}; w.buf.append(_pa, c) catch {}; }
+            w.buf.append(_pa, '"') catch {};
+        } else { w.buf.appendSlice(_pa, field) catch {}; }
+    }
+    w.buf.appendSlice(_pa, "\r\n") catch {};
+}
+fn _csv_build(w: *const _CsvWriter) []const u8 { return w.buf.items; }
 const TcpConn = struct { stream: std.net.Stream };
 fn _tcp_connect(host: []const u8, port: u16) ?TcpConn {
     const s = std.net.tcpConnectToHost(_allocator, host, port) catch return null;
@@ -908,7 +1196,9 @@ const _gui_stub_backend = _GuiBackend{
 const _gui_active_backend: _GuiBackend = _gui_stub_backend;
 pub const App = struct {
     pub fn risky(x: i64) anyerror!i64 {
+// zbr:test/throws_raise.zbr:4
         if (_zebra_lt(x, 0)) {
+// zbr:test/throws_raise.zbr:5
             { const _rdet_2088: []const u8 = std.fmt.allocPrint(_allocator, "{}", .{x}) catch @panic("OOM");
               const _rdet_ptr_2088 = _allocator.create([]const u8) catch @panic("OOM");
               _rdet_ptr_2088.* = _rdet_2088;
@@ -919,14 +1209,20 @@ pub const App = struct {
             }
             return error.ZebraError;
         }
+// zbr:test/throws_raise.zbr:6
         return (x * 2);
     }
 
     pub fn main() void {
+// zbr:test/throws_raise.zbr:9
         std.debug.print("{s}\n", .{"throws annotation compiles"});
     }
 
 };
+
+const _reflect_App_name: []const u8 = "App";
+const _reflect_App_fields: []const []const u8 = &.{};
+const _reflect_App_field_types: []const []const u8 = &.{};
 
 pub fn main() !void {
     defer _arena.deinit();

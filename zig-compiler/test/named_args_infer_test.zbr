@@ -1,0 +1,23 @@
+class Point
+    var x as int = 0
+    var y as int = 0
+
+    def move(dx as int, dy as int)
+        x = x + dx
+        y = y + dy
+
+    def describe as String
+        return "(" + x.toString() + ", " + y.toString() + ")"
+
+class Program
+    shared
+        def main
+            # Unannotated var — type inferred from constructor call
+            var p = Point()
+            p.move(dx: 5, dy: 3)
+            print(p.describe())
+
+            # Explicit annotation for comparison
+            var q as Point = Point()
+            q.move(dy: 10, dx: 2)
+            print(q.describe())

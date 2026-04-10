@@ -1,0 +1,5 @@
+# partial_test.math.zbr — generated numeric helpers (simulates codegen output)
+class PartialTest
+    shared
+        def score(a as int, b as int) as int
+            return a - b

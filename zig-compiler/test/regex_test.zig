@@ -31,6 +31,40 @@ fn _zebra_gt(a: anytype, b: anytype) bool {
 fn _zebra_ge(a: anytype, b: anytype) bool {
     if (comptime @TypeOf(a) == []const u8) return std.mem.order(u8, a, b) != .lt;
     return a >= b;
+}
+/// `item in container` — membership test for List, string (substring), HashMap.
+fn _zebra_in(item: anytype, container: anytype) bool {
+    const C = @TypeOf(container);
+    const I = @TypeOf(item);
+    // Struct types: ArrayList (has .items field) or HashMap (has .contains decl).
+    if (comptime @typeInfo(C) == .@"struct") {
+        if (comptime @hasField(C, "items")) {
+            for (container.items) |elem| {
+                if (comptime I == []const u8 or @typeInfo(I) == .pointer) {
+                    if (std.mem.eql(u8, elem, item)) return true;
+                } else {
+                    if (elem == item) return true;
+                }
+            }
+            return false;
+        }
+        if (comptime @hasDecl(C, "contains")) return container.contains(item);
+        return false;
+    }
+    // Pointer/array types: string substring check (coerce to []const u8).
+    return std.mem.indexOf(u8, @as([]const u8, container), @as([]const u8, item)) != null;
+}
+/// `s + t` — string concatenation.
+fn _str_concat(a: []const u8, b: []const u8, alloc: std.mem.Allocator) []const u8 {
+    return std.mem.concat(alloc, u8, &.{ a, b }) catch @panic("OOM");
+}
+/// `s * n` — repeat string s n times.
+fn _str_repeat(s: []const u8, n: anytype, alloc: std.mem.Allocator) []const u8 {
+    const count: usize = @intCast(n);
+    if (count == 0 or s.len == 0) return "";
+    const buf = alloc.alloc(u8, s.len * count) catch @panic("OOM");
+    for (0..count) |i| @memcpy(buf[i * s.len ..][0..s.len], s);
+    return buf;
 }fn _Result(comptime T: type, comptime E: type) type {
     return union(enum) {
         ok: T,
@@ -339,7 +373,7 @@ fn _json_arr_bool(v: *JsonValue, val: bool) void {
     if (v.* != .array) return;
     v.array.append(.{ .bool = val }) catch {};
 }
-const HttpResponse = struct { status: u16, text: []const u8 };
+const HttpResponse = struct { status: u16, text: []const u8, headers: []const [2][]const u8 = &.{} };
 fn _http_request(method: std.http.Method, url: []const u8, payload: ?[]const u8) ?HttpResponse {
     var _hc = std.http.Client{ .allocator = _allocator };
     defer _hc.deinit();
@@ -349,6 +383,22 @@ fn _http_request(method: std.http.Method, url: []const u8, payload: ?[]const u8)
 }
 fn _http_get(url: []const u8) ?HttpResponse { return _http_request(.GET, url, null); }
 fn _http_post(url: []const u8, payload: []const u8) ?HttpResponse { return _http_request(.POST, url, payload); }
+fn _http_json_get(url: []const u8) ?JsonValue { const _r = _http_request(.GET, url, null) orelse return null; return _json_parse(_r.text); }
+fn _http_json_post(url: []const u8, body: []const u8) ?JsonValue {
+    var _hc = std.http.Client{ .allocator = _allocator };
+    defer _hc.deinit();
+    var _hb = std.io.Writer.Allocating.init(std.heap.page_allocator);
+    _ = _hc.fetch(.{ .location = .{ .url = url }, .method = .POST, .payload = body,
+        .extra_headers = &.{ .{ .name = "Content-Type", .value = "application/json" } },
+        .response_writer = &_hb.writer }) catch return null;
+    return _json_parse(_hb.written());
+}
+fn _http_with_header(resp: HttpResponse, key: []const u8, val: []const u8) HttpResponse {
+    var _new = std.heap.page_allocator.alloc([2][]const u8, resp.headers.len + 1) catch return resp;
+    @memcpy(_new[0..resp.headers.len], resp.headers);
+    _new[resp.headers.len] = .{ key, val };
+    return .{ .status = resp.status, .text = resp.text, .headers = _new };
+}
 const HttpRequest = struct { method: []const u8, path: []const u8, content: []const u8 };
 fn _http_serve(port: u16, handler: anytype) void {
     const _HFn = *const fn(HttpRequest) HttpResponse;
@@ -414,9 +464,11 @@ fn _http_serve(port: u16, handler: anytype) void {
                 500 => "Internal Server Error",
                 else => "Unknown",
             };
+            var _xh: std.ArrayList(u8) = .{};
+            for (_resp.headers) |_kv| { _xh.appendSlice(_alloc, _kv[0]) catch {}; _xh.appendSlice(_alloc, ": ") catch {}; _xh.appendSlice(_alloc, _kv[1]) catch {}; _xh.appendSlice(_alloc, "\r\n") catch {}; }
             const _out = std.fmt.allocPrint(_alloc,
-                "HTTP/1.1 {d} {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
-                .{ _resp.status, _st, _resp.text.len, _resp.text }) catch @panic("OOM");
+                "HTTP/1.1 {d} {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n{s}\r\n{s}",
+                .{ _resp.status, _st, _resp.text.len, _xh.items, _resp.text }) catch @panic("OOM");
             ctx.conn.stream.writeAll(_out) catch {};
         }
     };
@@ -434,6 +486,99 @@ fn _http_serve(port: u16, handler: anytype) void {
     }
 }
 
+const _CsvTable = struct { rows: []const []const []const u8 };
+fn _csv_parse(src: []const u8) _CsvTable {
+    const _pa = std.heap.page_allocator;
+    var _rows: std.ArrayList([]const []const u8) = .{};
+    var _row:  std.ArrayList([]const u8) = .{};
+    var _f:    std.ArrayList(u8) = .{};
+    const _St = enum { s, fld, q, aq };
+    var _st: _St = .s;
+    for (src) |c| {
+        switch (_st) {
+            .s => switch (c) {
+                '"'  => { _st = .q; },
+                ','  => { _row.append(_pa, "") catch {}; },
+                '\r' => {},
+                '\n' => { if (_row.items.len > 0) { _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {}; _row = .{}; } },
+                else => { _f.append(_pa, c) catch {}; _st = .fld; },
+            },
+            .fld => switch (c) {
+                ',' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _st = .s; },
+                '\r' => {},
+                '\n' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {}; _row = .{}; _st = .s; },
+                else => { _f.append(_pa, c) catch {}; },
+            },
+            .q  => switch (c) {
+                '"'  => { _st = .aq; },
+                else => { _f.append(_pa, c) catch {}; },
+            },
+            .aq => switch (c) {
+                '"' => { _f.append(_pa, '"') catch {}; _st = .q; },
+                ',' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _st = .s; },
+                '\r' => {},
+                '\n' => { _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {}; _f = .{}; _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {}; _row = .{}; _st = .s; },
+                else => { _st = .s; },
+            },
+        }
+    }
+    if (_st == .fld or _st == .aq or _st == .q) {
+        _row.append(_pa, _f.toOwnedSlice(_pa) catch "") catch {};
+    } else if (_st == .s and _row.items.len > 0) {
+        _row.append(_pa, "") catch {};
+    }
+    if (_row.items.len > 0) _rows.append(_pa, _row.toOwnedSlice(_pa) catch &.{}) catch {};
+    return .{ .rows = _rows.toOwnedSlice(_pa) catch &.{} };
+}
+fn _csv_parse_file(path: []const u8) _CsvTable {
+    const src = std.fs.cwd().readFileAlloc(std.heap.page_allocator, path, std.math.maxInt(usize)) catch return .{ .rows = &.{} };
+    return _csv_parse(src);
+}
+fn _csv_row_count(t: _CsvTable) i64 { return @as(i64, @intCast(t.rows.len)); }
+fn _csv_col_count(t: _CsvTable) i64 { return if (t.rows.len > 0) @as(i64, @intCast(t.rows[0].len)) else 0; }
+fn _csv_header(t: _CsvTable) std.ArrayList([]const u8) {
+    var _r: std.ArrayList([]const u8) = .{};
+    if (t.rows.len > 0) for (t.rows[0]) |f| _r.append(std.heap.page_allocator, f) catch {};
+    return _r;
+}
+fn _csv_row(t: _CsvTable, n: i64) std.ArrayList([]const u8) {
+    var _r: std.ArrayList([]const u8) = .{};
+    const _i: usize = @intCast(@max(0, n));
+    if (_i < t.rows.len) for (t.rows[_i]) |f| _r.append(std.heap.page_allocator, f) catch {};
+    return _r;
+}
+fn _csv_rows(t: _CsvTable) std.ArrayList(std.ArrayList([]const u8)) {
+    var _out: std.ArrayList(std.ArrayList([]const u8)) = .{};
+    for (t.rows) |row| { var _r: std.ArrayList([]const u8) = .{}; for (row) |f| _r.append(std.heap.page_allocator, f) catch {}; _out.append(std.heap.page_allocator, _r) catch {}; }
+    return _out;
+}
+fn _csv_data_rows(t: _CsvTable) std.ArrayList(std.ArrayList([]const u8)) {
+    var _out: std.ArrayList(std.ArrayList([]const u8)) = .{};
+    const _s: usize = if (t.rows.len > 0) 1 else 0;
+    for (t.rows[_s..]) |row| { var _r: std.ArrayList([]const u8) = .{}; for (row) |f| _r.append(std.heap.page_allocator, f) catch {}; _out.append(std.heap.page_allocator, _r) catch {}; }
+    return _out;
+}
+fn _csv_get(t: _CsvTable, row: std.ArrayList([]const u8), col: []const u8) []const u8 {
+    if (t.rows.len == 0) return "";
+    for (t.rows[0], 0..) |h, i| { if (std.mem.eql(u8, h, col)) return if (i < row.items.len) row.items[i] else ""; }
+    return "";
+}
+const _CsvWriter = struct { buf: std.ArrayList(u8) };
+fn _csv_writer_init() _CsvWriter { return .{ .buf = .{} }; }
+fn _csv_write_row(w: *_CsvWriter, row: std.ArrayList([]const u8)) void {
+    const _pa = std.heap.page_allocator;
+    for (row.items, 0..) |field, i| {
+        if (i > 0) w.buf.append(_pa, ',') catch {};
+        const _nq = std.mem.indexOfAny(u8, field, ",\"\r\n") != null;
+        if (_nq) {
+            w.buf.append(_pa, '"') catch {};
+            for (field) |c| { if (c == '"') w.buf.append(_pa, '"') catch {}; w.buf.append(_pa, c) catch {}; }
+            w.buf.append(_pa, '"') catch {};
+        } else { w.buf.appendSlice(_pa, field) catch {}; }
+    }
+    w.buf.appendSlice(_pa, "\r\n") catch {};
+}
+fn _csv_build(w: *const _CsvWriter) []const u8 { return w.buf.items; }
 const TcpConn = struct { stream: std.net.Stream };
 fn _tcp_connect(host: []const u8, port: u16) ?TcpConn {
     const s = std.net.tcpConnectToHost(_allocator, host, port) catch return null;
@@ -1051,36 +1196,66 @@ const _gui_stub_backend = _GuiBackend{
 const _gui_active_backend: _GuiBackend = _gui_stub_backend;
 pub const Main = struct {
     pub fn main() void {
+// zbr:test/regex_test.zbr:5
         const re1: Regex = _regex_compile("hello", "");
+// zbr:test/regex_test.zbr:6
         std.debug.print("{}\n", .{_regex_match(re1, "hello")});
+// zbr:test/regex_test.zbr:7
         std.debug.print("{}\n", .{_regex_match(re1, "world")});
+// zbr:test/regex_test.zbr:10
         const re2: Regex = _regex_compile("h.*o", "");
+// zbr:test/regex_test.zbr:11
         std.debug.print("{}\n", .{_regex_match(re2, "hello")});
+// zbr:test/regex_test.zbr:12
         std.debug.print("{}\n", .{_regex_match(re2, "ho")});
+// zbr:test/regex_test.zbr:13
         std.debug.print("{}\n", .{_regex_match(re2, "hi")});
+// zbr:test/regex_test.zbr:16
         const re3: Regex = _regex_compile("\\d+", "");
+// zbr:test/regex_test.zbr:17
         std.debug.print("{}\n", .{_regex_match(re3, "42")});
+// zbr:test/regex_test.zbr:18
         std.debug.print("{}\n", .{_regex_match(re3, "abc")});
+// zbr:test/regex_test.zbr:21
         const re4: Regex = _regex_compile("cat|dog", "");
+// zbr:test/regex_test.zbr:22
         std.debug.print("{}\n", .{_regex_match(re4, "cat")});
+// zbr:test/regex_test.zbr:23
         std.debug.print("{}\n", .{_regex_match(re4, "dog")});
+// zbr:test/regex_test.zbr:24
         std.debug.print("{}\n", .{_regex_match(re4, "fish")});
+// zbr:test/regex_test.zbr:27
         const re5: Regex = _regex_compile("\\d+", "");
+// zbr:test/regex_test.zbr:28
         std.debug.print("{s}\n", .{_regex_find(re5, "abc 42 def")});
+// zbr:test/regex_test.zbr:29
         std.debug.print("{s}\n", .{_regex_find(re5, "no digits")});
+// zbr:test/regex_test.zbr:32
         const re6: Regex = _regex_compile("\\d+\\.\\d+", "");
+// zbr:test/regex_test.zbr:33
         std.debug.print("{}\n", .{_regex_match(re6, "3.14")});
+// zbr:test/regex_test.zbr:34
         std.debug.print("{}\n", .{_regex_match(re6, "3")});
+// zbr:test/regex_test.zbr:37
         const re7: Regex = _regex_compile("\\d+", "");
+// zbr:test/regex_test.zbr:38
         for (_regex_find_all(re7, "one 1 two 22 three 333")) |m| {
+// zbr:test/regex_test.zbr:39
             std.debug.print("{s}\n", .{m});
         }
+// zbr:test/regex_test.zbr:42
         const re8: Regex = _regex_compile("\\d+", "");
+// zbr:test/regex_test.zbr:43
         std.debug.print("{s}\n", .{_regex_replace(re8, "abc 42 def 99", "NUM")});
+// zbr:test/regex_test.zbr:44
         std.debug.print("{s}\n", .{_regex_replace(re8, "no digits here", "X")});
     }
 
 };
+
+const _reflect_Main_name: []const u8 = "Main";
+const _reflect_Main_fields: []const []const u8 = &.{};
+const _reflect_Main_field_types: []const []const u8 = &.{};
 
 pub fn main() !void {
     defer _arena.deinit();
