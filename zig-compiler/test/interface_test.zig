@@ -5,7 +5,8 @@ const std     = @import("std");
 const builtin = @import("builtin");
 
 var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-const _allocator = _arena.allocator();
+var _allocator: std.mem.Allocator = undefined;
+pub fn _initAllocator(a: std.mem.Allocator) void { _allocator = a; }
 
 const _Stringable = struct {
     ptr:         *anyopaque,
@@ -65,6 +66,15 @@ fn _str_repeat(s: []const u8, n: anytype, alloc: std.mem.Allocator) []const u8 {
     const buf = alloc.alloc(u8, s.len * count) catch @panic("OOM");
     for (0..count) |i| @memcpy(buf[i * s.len ..][0..s.len], s);
     return buf;
+}
+/// FNV-1a 32-bit hash — used as the type-arg component of _type_tag.
+/// Low 32 bits of _ttag_ClassName hold the class hash; high 32 bits
+/// hold the combined type-arg hash for generic instantiations (Phase 3).
+/// Also usable as Symbol.hash for fast string identity comparison.
+fn _zbr_hash(comptime s: []const u8) u32 {
+    comptime var h: u32 = 2166136261;
+    comptime for (s) |c| { h ^= c; h *%= 16777619; };
+    return h;
 }fn _Result(comptime T: type, comptime E: type) type {
     return union(enum) {
         ok: T,
@@ -1202,6 +1212,7 @@ pub fn Greetable(comptime T: type) void {
 }
 
 pub const English = struct {
+    _type_tag: u64 = _ttag_English,
     pub fn greet(self: *English) []const u8 {
         _ = self;
 // zbr:test/interface_test.zbr:7
@@ -1214,17 +1225,25 @@ pub const English = struct {
         return (std.mem.concat(_allocator, u8, &.{ "Hello, ", name }) catch unreachable);
     }
 
+    pub fn init() English {
+        var self: English = undefined;
+        self._type_tag = _ttag_English;
+        return self;
+    }
+
 
     comptime {
         Greetable(@This());
     }
 };
 
+const _ttag_English: u64 = 463134907;
 const _reflect_English_name: []const u8 = "English";
 const _reflect_English_fields: []const []const u8 = &.{};
 const _reflect_English_field_types: []const []const u8 = &.{};
 
 pub const Spanish = struct {
+    _type_tag: u64 = _ttag_Spanish,
     pub fn greet(self: *Spanish) []const u8 {
         _ = self;
 // zbr:test/interface_test.zbr:14
@@ -1237,20 +1256,29 @@ pub const Spanish = struct {
         return (std.mem.concat(_allocator, u8, &.{ "Hola, ", name }) catch unreachable);
     }
 
+    pub fn init() Spanish {
+        var self: Spanish = undefined;
+        self._type_tag = _ttag_Spanish;
+        return self;
+    }
+
 
     comptime {
         Greetable(@This());
     }
 };
 
+const _ttag_Spanish: u64 = 3088679515;
 const _reflect_Spanish_name: []const u8 = "Spanish";
 const _reflect_Spanish_fields: []const []const u8 = &.{};
 const _reflect_Spanish_field_types: []const []const u8 = &.{};
 
 pub const Counter = struct {
+    _type_tag: u64 = _ttag_Counter,
     count: i64 = undefined,
     pub fn init() Counter {
         var self: Counter = undefined;
+        self._type_tag = _ttag_Counter;
 // zbr:test/interface_test.zbr:23
         self.count = 0;
         return self;
@@ -1268,16 +1296,18 @@ pub const Counter = struct {
 
 };
 
+const _ttag_Counter: u64 = 4228854723;
 const _reflect_Counter_name: []const u8 = "Counter";
 const _reflect_Counter_fields: []const []const u8 = &.{"count"};
 const _reflect_Counter_field_types: []const []const u8 = &.{"int"};
 
 pub const Main = struct {
+    _type_tag: u64 = _ttag_Main,
     pub fn main() void {
 // zbr:test/interface_test.zbr:34
-        var e = English{};
+        var e = English.init();
 // zbr:test/interface_test.zbr:35
-        var s = Spanish{};
+        var s = Spanish.init();
 // zbr:test/interface_test.zbr:36
         std.debug.print("{s}\n", .{e.greet()});
 // zbr:test/interface_test.zbr:37
@@ -1298,13 +1328,21 @@ pub const Main = struct {
         std.debug.print("{}\n", .{c.value()});
     }
 
+    pub fn init() Main {
+        var self: Main = undefined;
+        self._type_tag = _ttag_Main;
+        return self;
+    }
+
 };
 
+const _ttag_Main: u64 = 1366325544;
 const _reflect_Main_name: []const u8 = "Main";
 const _reflect_Main_fields: []const []const u8 = &.{};
 const _reflect_Main_field_types: []const []const u8 = &.{};
 
 pub fn main() void {
+    _allocator = _arena.allocator();
     defer _arena.deinit();
     Main.main();
 }

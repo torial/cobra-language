@@ -28,9 +28,9 @@ Test: `test/hash_test.zbr`
 **Zig backing:** `std.Random.DefaultPrng` (Xoshiro256), `std.crypto.random`
 
 ```zebra
-var n = Random.int(1, 100)                 # i64 in [min, max]
-var f = Random.float()                     # f64 in [0.0, 1.0)
-var b = Random.bool()
+var n = Random.randInt(1, 100)             # i64 in [min, max]  (int/float/bool are keywords)
+var f = Random.randFloat()                 # f64 in [0.0, 1.0)
+var b = Random.randBool()
 var s = Random.choice(["a", "b", "c"])    # random element
 Random.shuffle(list)                       # in-place shuffle
 var bytes = Random.bytes(16)               # secure random bytes (hex)
@@ -52,7 +52,7 @@ var verbose = args.flag("--verbose", "-v")         # bool
 var output = args.option("--output", default: "a.out")   # str
 var input = args.positional(0)                     # str?
 var count = args.optionInt("--count", default: 1)  # int
-if args.has("--help")
+if args.contains("--help")
     print args.usage()
 ```
 
@@ -67,10 +67,10 @@ Test: `test/arg_test.zbr`
 **Zig backing:** `std.io.tty`, ANSI escape sequences
 
 ```zebra
-Terminal.print("Success!", .green)
-Terminal.print("Warning!", .yellow, .bold)
-Terminal.print("Error!", .red, .bold)
-Terminal.println("dim text", .dim)
+Terminal.write("Success!", "green")    # print/println are Zebra keywords → write/writeln
+Terminal.write("Warning!", "yellow")
+Terminal.write("Error!", "red")
+Terminal.writeln("dim text", "dim")
 
 var w = Terminal.width()                   # int (columns)
 var h = Terminal.height()                  # int (rows)

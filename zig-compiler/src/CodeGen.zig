@@ -2713,6 +2713,179 @@ const Generator = struct {
             ),
         }
 
+        // ── Hash stdlib ─────────────────────────────────────────────────────────
+        // All hash functions return a hex-encoded string.
+        try g.w.writeAll(
+            \\fn _hex_encode(bytes: []const u8) []const u8 {
+            \\    const _hx = "0123456789abcdef";
+            \\    var out = _allocator.alloc(u8, bytes.len * 2) catch return "";
+            \\    for (bytes, 0..) |b, i| { out[i*2] = _hx[b >> 4]; out[i*2+1] = _hx[b & 0xf]; }
+            \\    return out;
+            \\}
+            \\fn _hash_sha256(data: []const u8) []const u8 {
+            \\    var out: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+            \\    std.crypto.hash.sha2.Sha256.hash(data, &out, .{});
+            \\    return _hex_encode(&out);
+            \\}
+            \\fn _hash_sha512(data: []const u8) []const u8 {
+            \\    var out: [std.crypto.hash.sha2.Sha512.digest_length]u8 = undefined;
+            \\    std.crypto.hash.sha2.Sha512.hash(data, &out, .{});
+            \\    return _hex_encode(&out);
+            \\}
+            \\fn _hash_md5(data: []const u8) []const u8 {
+            \\    var out: [std.crypto.hash.Md5.digest_length]u8 = undefined;
+            \\    std.crypto.hash.Md5.hash(data, &out, .{});
+            \\    return _hex_encode(&out);
+            \\}
+            \\fn _hash_blake3(data: []const u8) []const u8 {
+            \\    var out: [std.crypto.hash.Blake3.digest_length]u8 = undefined;
+            \\    std.crypto.hash.Blake3.hash(data, &out, .{});
+            \\    return _hex_encode(&out);
+            \\}
+            \\fn _hash_hmac256(key: []const u8, data: []const u8) []const u8 {
+            \\    var out: [std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 = undefined;
+            \\    std.crypto.auth.hmac.sha2.HmacSha256.create(&out, data, key);
+            \\    return _hex_encode(&out);
+            \\}
+            \\
+        );
+        // ── Random stdlib ───────────────────────────────────────────────────────
+        // Xoshiro256 PRNG seeded from std.crypto.random on first use.
+        try g.w.writeAll(
+            \\var _rng_inst: std.Random.DefaultPrng = undefined;
+            \\var _rng_ready: bool = false;
+            \\fn _rng() std.Random {
+            \\    if (!_rng_ready) {
+            \\        var seed: u64 = 0;
+            \\        std.crypto.random.bytes(std.mem.asBytes(&seed));
+            \\        _rng_inst = std.Random.DefaultPrng.init(seed);
+            \\        _rng_ready = true;
+            \\    }
+            \\    return _rng_inst.random();
+            \\}
+            \\fn _random_int(mn: i64, mx: i64) i64 { return _rng().intRangeAtMost(i64, mn, mx); }
+            \\fn _random_float() f64               { return _rng().float(f64); }
+            \\fn _random_bool() bool               { return _rng().boolean(); }
+            \\fn _random_bytes(n: i64) []const u8 {
+            \\    const len: usize = @intCast(if (n < 0) 0 else n);
+            \\    const buf = _allocator.alloc(u8, len) catch return "";
+            \\    _rng().bytes(buf);
+            \\    return _hex_encode(buf);
+            \\}
+            \\fn _random_seed(s: i64) void {
+            \\    _rng_inst = std.Random.DefaultPrng.init(@bitCast(s));
+            \\    _rng_ready = true;
+            \\}
+            \\
+        );
+        // ── Arg stdlib ──────────────────────────────────────────────────────────
+        // Parses argv into a simple flag/option/positional structure.
+        try g.w.writeAll(
+            \\const ArgResult = struct {
+            \\    _raw: []const []const u8,
+            \\    pub fn flag(self: ArgResult, long: []const u8, short: []const u8) bool {
+            \\        for (self._raw) |a| { if (std.mem.eql(u8, a, long)) return true; if (std.mem.eql(u8, a, short)) return true; }
+            \\        return false;
+            \\    }
+            \\    pub fn contains(self: ArgResult, name_: []const u8) bool {
+            \\        for (self._raw) |a| { if (std.mem.eql(u8, a, name_)) return true; }
+            \\        return false;
+            \\    }
+            \\    pub fn option(self: ArgResult, name_: []const u8, default_val: []const u8) []const u8 {
+            \\        var i: usize = 0;
+            \\        while (i + 1 < self._raw.len) : (i += 1) {
+            \\            if (std.mem.eql(u8, self._raw[i], name_)) return self._raw[i + 1];
+            \\        }
+            \\        return default_val;
+            \\    }
+            \\    pub fn optionInt(self: ArgResult, name_: []const u8, default_val: i64) i64 {
+            \\        const s = self.option(name_, "");
+            \\        if (s.len == 0) return default_val;
+            \\        return std.fmt.parseInt(i64, s, 10) catch default_val;
+            \\    }
+            \\    pub fn positional(self: ArgResult, idx: i64) ?[]const u8 {
+            \\        var pos: usize = 0;
+            \\        for (self._raw) |a| {
+            \\            if (!std.mem.startsWith(u8, a, "-")) {
+            \\                if (pos == @as(usize, @intCast(idx))) return a;
+            \\                pos += 1;
+            \\            }
+            \\        }
+            \\        return null;
+            \\    }
+            \\    pub fn usage(_: ArgResult) []const u8 { return "Usage: program [options]"; }
+            \\};
+            \\fn _arg_parse() ArgResult {
+            \\    const _argv = std.process.argsAlloc(_allocator) catch return ArgResult{ ._raw = &.{} };
+            \\    const _raw_slice = if (_argv.len > 1) _argv[1..] else _argv[0..0];
+            \\    var _out = _allocator.alloc([]const u8, _raw_slice.len) catch return ArgResult{ ._raw = &.{} };
+            \\    for (_raw_slice, 0..) |a, i| _out[i] = a;
+            \\    return ArgResult{ ._raw = _out };
+            \\}
+            \\
+        );
+        // ── Terminal stdlib ─────────────────────────────────────────────────────
+        // ANSI color output; falls back to plain print when not a TTY.
+        try g.w.writeAll(
+            \\fn _term_is_tty() bool {
+            \\    const cfg = std.io.tty.detectConfig(std.fs.File.stdout());
+            \\    return cfg != .no_color;
+            \\}
+            \\fn _term_width() i64 { return 80; }
+            \\fn _term_height() i64 { return 24; }
+            \\fn _term_ansi(color: []const u8) []const u8 {
+            \\    if (std.mem.eql(u8, color, "red"))     return "\x1b[31m";
+            \\    if (std.mem.eql(u8, color, "green"))   return "\x1b[32m";
+            \\    if (std.mem.eql(u8, color, "yellow"))  return "\x1b[33m";
+            \\    if (std.mem.eql(u8, color, "blue"))    return "\x1b[34m";
+            \\    if (std.mem.eql(u8, color, "magenta")) return "\x1b[35m";
+            \\    if (std.mem.eql(u8, color, "cyan"))    return "\x1b[36m";
+            \\    if (std.mem.eql(u8, color, "white"))   return "\x1b[37m";
+            \\    if (std.mem.eql(u8, color, "dim"))     return "\x1b[2m";
+            \\    if (std.mem.eql(u8, color, "bold"))    return "\x1b[1m";
+            \\    return "";
+            \\}
+            \\fn _term_print(msg: []const u8, color: []const u8, newline: bool) void {
+            \\    const _f = std.fs.File.stdout();
+            \\    if (_term_is_tty() and color.len > 0) {
+            \\        _f.deprecatedWriter().print("{s}{s}\x1b[0m", .{ _term_ansi(color), msg }) catch {};
+            \\    } else {
+            \\        _f.deprecatedWriter().writeAll(msg) catch {};
+            \\    }
+            \\    if (newline) _f.deprecatedWriter().writeByte('\n') catch {};
+            \\}
+            \\
+        );
+        // ── Log stdlib ──────────────────────────────────────────────────────────
+        // Leveled logging: debug(0) < info(1) < warn(2) < err(3).
+        try g.w.writeAll(
+            \\var _log_level: u8 = 1;        // default: info
+            \\var _log_timestamps: bool = true;
+            \\var _log_to_stderr: bool = true;
+            \\fn _log_ts() []const u8 {
+            \\    const sec = @divFloor(std.time.milliTimestamp(), 1000);
+            \\    const s = sec - 62135596800; // offset from Unix epoch to .NET epoch (unused here)
+            \\    _ = s;
+            \\    return std.fmt.allocPrint(_allocator, "{d}", .{sec}) catch "?";
+            \\}
+            \\fn _log_emit(level_str: []const u8, level_num: u8, msg: []const u8) void {
+            \\    if (level_num < _log_level) return;
+            \\    const _lw = if (_log_to_stderr) std.fs.File.stderr().deprecatedWriter() else std.fs.File.stdout().deprecatedWriter();
+            \\    if (_log_timestamps) {
+            \\        _lw.print("[{s:<5} {s}] {s}\n", .{ level_str, _log_ts(), msg }) catch {};
+            \\    } else {
+            \\        _lw.print("[{s:<5}] {s}\n", .{ level_str, msg }) catch {};
+            \\    }
+            \\}
+            \\fn _log_debug(msg: []const u8) void { _log_emit("DEBUG", 0, msg); }
+            \\fn _log_info(msg: []const u8) void  { _log_emit("INFO",  1, msg); }
+            \\fn _log_warn(msg: []const u8) void  { _log_emit("WARN",  2, msg); }
+            \\fn _log_err(msg: []const u8) void   { _log_emit("ERR",   3, msg); }
+            \\fn _log_set_level(l: u8) void { _log_level = l; }
+            \\fn _log_set_output_stderr(v: bool) void { _log_to_stderr = v; }
+            \\fn _log_timestamp(v: bool) void { _log_timestamps = v; }
+            \\
+        );
         for (module.decls) |decl| try g.genTopDecl(decl);
 
         // Emit a top-level `pub fn main()` thunk if any class has a
@@ -4775,6 +4948,188 @@ const Generator = struct {
         }
         if (std.mem.eql(u8, method, "array")) {
             try g.w.writeAll("_json_array()");
+            return true;
+        }
+        return false;
+    }
+
+    // ── Hash static calls ────────────────────────────────────────────────────
+    fn genHashCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        const fn_map = std.StaticStringMap([]const u8).initComptime(&.{
+            .{ "sha256",  "_hash_sha256"  },
+            .{ "sha512",  "_hash_sha512"  },
+            .{ "md5",     "_hash_md5"     },
+            .{ "blake3",  "_hash_blake3"  },
+        });
+        if (fn_map.get(method)) |fn_name| {
+            try g.w.writeAll(fn_name);
+            try g.w.writeAll("(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "hmac256")) {
+            try g.w.writeAll("_hash_hmac256(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(", ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    // ── Random static calls ──────────────────────────────────────────────────
+    fn genRandomCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "randInt")) {
+            try g.w.writeAll("_random_int(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeAll(", ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("100");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "randFloat")) { try g.w.writeAll("_random_float()");  return true; }
+        if (std.mem.eql(u8, method, "randBool"))  { try g.w.writeAll("_random_bool()");   return true; }
+        if (std.mem.eql(u8, method, "bytes")) {
+            try g.w.writeAll("_random_bytes(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("16");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "seed")) {
+            try g.w.writeAll("_random_seed(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("0");
+            try g.w.writeAll(")");
+            return true;
+        }
+        // choice(list) — emit inline index expression
+        if (std.mem.eql(u8, method, "choice")) {
+            if (args.len >= 1) {
+                try g.genExpr(args[0].value);
+                try g.w.writeAll(".items[_rng().uintLessThan(usize, ");
+                try g.genExpr(args[0].value);
+                try g.w.writeAll(".items.len)]");
+            }
+            return true;
+        }
+        // shuffle(list) — emit inline call
+        if (std.mem.eql(u8, method, "shuffle")) {
+            if (args.len >= 1) {
+                try g.w.writeAll("(if (");
+                try g.genExpr(args[0].value);
+                try g.w.writeAll(".items.len > 0) _rng().shuffle(@TypeOf(");
+                try g.genExpr(args[0].value);
+                try g.w.writeAll(".items[0]), ");
+                try g.genExpr(args[0].value);
+                try g.w.writeAll(".items))");
+            }
+            return true;
+        }
+        return false;
+    }
+
+    // ── Arg static calls ─────────────────────────────────────────────────────
+    fn genArgCall(g: Generator, method: []const u8, _: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "parse")) {
+            try g.w.writeAll("_arg_parse()");
+            return true;
+        }
+        return false;
+    }
+
+    // ── ArgResult instance method calls ─────────────────────────────────────
+    fn genArgResultMethod(g: Generator, obj: *const Ast.Expr, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        const pass_methods = std.StaticStringMap(void).initComptime(&.{
+            .{ "flag", {} }, .{ "contains", {} }, .{ "option", {} },
+            .{ "optionInt", {} }, .{ "positional", {} }, .{ "usage", {} },
+        });
+        if (pass_methods.get(method) != null) {
+            // Emit obj.method(args) — these are struct pub fns, so pass-through works directly.
+            try g.genExpr(obj);
+            try g.w.print(".{s}(", .{method});
+            for (args, 0..) |a, i| {
+                if (i > 0) try g.w.writeAll(", ");
+                try g.genExpr(a.value);
+            }
+            try g.w.writeAll(")");
+            return true;
+        }
+        return false;
+    }
+
+    // ── Terminal static calls ─────────────────────────────────────────────────
+    fn genTerminalCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "isTty"))  { try g.w.writeAll("_term_is_tty()");  return true; }
+        if (std.mem.eql(u8, method, "width"))  { try g.w.writeAll("_term_width()");   return true; }
+        if (std.mem.eql(u8, method, "height")) { try g.w.writeAll("_term_height()");  return true; }
+        // write(msg, color) and writeln(msg, color) → _term_print(msg, color, newline)
+        const is_println = std.mem.eql(u8, method, "writeln");
+        if (is_println or std.mem.eql(u8, method, "write")) {
+            try g.w.writeAll("_term_print(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(", ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(if (is_println) ", true)" else ", false)");
+            return true;
+        }
+        return false;
+    }
+
+    // ── Log static calls ─────────────────────────────────────────────────────
+    fn genLogCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        const level_map = std.StaticStringMap([]const u8).initComptime(&.{
+            .{ "debug", "_log_debug" },
+            .{ "info",  "_log_info"  },
+            .{ "warn",  "_log_warn"  },
+            .{ "err",   "_log_err"   },
+        });
+        if (level_map.get(method)) |fn_name| {
+            try g.w.writeAll(fn_name);
+            try g.w.writeAll("(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "setLevel")) {
+            // Accepts a string: "debug"/"info"/"warn"/"err"
+            try g.w.writeAll("_log_set_level(");
+            if (args.len >= 1) {
+                // Inline the level number from the string literal if possible
+                const arg = args[0].value;
+                if (arg.* == .string_lit) {
+                    // Strip surrounding quotes from the raw text.
+                    const raw = arg.string_lit.text;
+                    const lv = if (raw.len >= 2) raw[1 .. raw.len - 1] else raw;
+                    if (std.mem.eql(u8, lv, "debug"))      try g.w.writeAll("0")
+                    else if (std.mem.eql(u8, lv, "info"))  try g.w.writeAll("1")
+                    else if (std.mem.eql(u8, lv, "warn"))  try g.w.writeAll("2")
+                    else if (std.mem.eql(u8, lv, "err"))   try g.w.writeAll("3")
+                    else try g.genExpr(arg);
+                } else try g.genExpr(arg);
+            } else try g.w.writeAll("1");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "setOutput")) {
+            // Accepts "stderr" or "stdout"
+            try g.w.writeAll("_log_set_output_stderr(");
+            if (args.len >= 1) {
+                const arg = args[0].value;
+                const raw2 = if (arg.* == .string_lit) arg.string_lit.text else "";
+                const lv2  = if (raw2.len >= 2) raw2[1 .. raw2.len - 1] else raw2;
+                if (arg.* == .string_lit and std.mem.eql(u8, lv2, "stdout"))
+                    try g.w.writeAll("false")
+                else
+                    try g.w.writeAll("true");
+            } else try g.w.writeAll("true");
+            try g.w.writeAll(")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "timestamp")) {
+            try g.w.writeAll("_log_timestamp(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("true");
+            try g.w.writeAll(")");
             return true;
         }
         return false;
@@ -7223,6 +7578,25 @@ const Generator = struct {
                 if (g.getExprDeclaredType(e.object)) |tr| {
                     if (try g.genStdlibProp(e.object, tr, e.member)) break :sw;
                 }
+                // TC-type fallback for List/HashMap len/count on unannotated vars.
+                if (g.tc) |tc| {
+                    const obj_tc = tc.expr_types.get(e.object) orelse .unknown;
+                    if (obj_tc == .generic_named) {
+                        const gn = obj_tc.generic_named;
+                        if (std.mem.eql(u8, gn.sym.name, "List") and
+                            (std.mem.eql(u8, e.member, "len") or std.mem.eql(u8, e.member, "count"))) {
+                            try g.genExpr(e.object);
+                            try g.w.writeAll(".items.len");
+                            break :sw;
+                        }
+                        if (std.mem.eql(u8, gn.sym.name, "HashMap") and
+                            (std.mem.eql(u8, e.member, "len") or std.mem.eql(u8, e.member, "count"))) {
+                            try g.genExpr(e.object);
+                            try g.w.writeAll(".count()");
+                            break :sw;
+                        }
+                    }
+                }
                 // TC-type fallback for DateTime field access (unannotated vars).
                 if (g.tc) |tc| {
                     const obj_tc = tc.expr_types.get(e.object) orelse .unknown;
@@ -7775,6 +8149,41 @@ const Generator = struct {
                 if (try g.genReflectCall(mem.member, e.args)) return;
             }
         }
+        // Hash static calls: Hash.sha256(data), Hash.sha512(data), etc.
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Hash")) {
+                if (try g.genHashCall(mem.member, e.args)) return;
+            }
+        }
+        // Random static calls: Random.int(min, max), Random.float(), etc.
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Random")) {
+                if (try g.genRandomCall(mem.member, e.args)) return;
+            }
+        }
+        // Arg static calls: Arg.parse().
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Arg")) {
+                if (try g.genArgCall(mem.member, e.args)) return;
+            }
+        }
+        // Terminal static calls: Terminal.print(msg, color), Terminal.width(), etc.
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Terminal")) {
+                if (try g.genTerminalCall(mem.member, e.args)) return;
+            }
+        }
+        // Log static calls: Log.info(msg), Log.warn(msg), Log.setLevel("warn"), etc.
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Log")) {
+                if (try g.genLogCall(mem.member, e.args)) return;
+            }
+        }
         // Json static calls: Json.parse(s), Json.stringify(v), Json.object(), Json.array().
         if (e.callee.* == .member) {
             const mem = e.callee.member;
@@ -7933,6 +8342,7 @@ const Generator = struct {
                     .csv_table     => if (try g.genCsvMethod(mem.object, mem.member, e.args)) return,
                     .csv_writer    => if (try g.genCsvWriterMethod(mem.object, mem.member, e.args)) return,
                     .csv_row       => if (try g.genListMethod(mem.object, mem.member, e.args)) return,
+                    .arg_result    => if (try g.genArgResultMethod(mem.object, mem.member, e.args)) return,
                     .unknown       => if (try g.genListMethod(mem.object, mem.member, e.args)) return,
                     else           => {},
                 }
@@ -8757,6 +9167,7 @@ fn printFmt(tc: ?*const TypeChecker.TypeCheckResult, catch_var: []const u8, expr
         .csv_table,
         .csv_writer,
         .csv_row,
+        .arg_result,
         .optional,
         .tuple,
         .generic_named,

@@ -5,7 +5,8 @@ const std     = @import("std");
 const builtin = @import("builtin");
 
 var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-const _allocator = _arena.allocator();
+var _allocator: std.mem.Allocator = undefined;
+pub fn _initAllocator(a: std.mem.Allocator) void { _allocator = a; }
 
 const _Stringable = struct {
     ptr:         *anyopaque,
@@ -65,6 +66,15 @@ fn _str_repeat(s: []const u8, n: anytype, alloc: std.mem.Allocator) []const u8 {
     const buf = alloc.alloc(u8, s.len * count) catch @panic("OOM");
     for (0..count) |i| @memcpy(buf[i * s.len ..][0..s.len], s);
     return buf;
+}
+/// FNV-1a 32-bit hash — used as the type-arg component of _type_tag.
+/// Low 32 bits of _ttag_ClassName hold the class hash; high 32 bits
+/// hold the combined type-arg hash for generic instantiations (Phase 3).
+/// Also usable as Symbol.hash for fast string identity comparison.
+fn _zbr_hash(comptime s: []const u8) u32 {
+    comptime var h: u32 = 2166136261;
+    comptime for (s) |c| { h ^= c; h *%= 16777619; };
+    return h;
 }fn _Result(comptime T: type, comptime E: type) type {
     return union(enum) {
         ok: T,
@@ -1194,7 +1204,156 @@ const _gui_stub_backend = _GuiBackend{
     .endWindowFn   = _stub_end_window,
 };
 const _gui_active_backend: _GuiBackend = _gui_stub_backend;
+fn _hex_encode(bytes: []const u8) []const u8 {
+    const _hx = "0123456789abcdef";
+    var out = _allocator.alloc(u8, bytes.len * 2) catch return "";
+    for (bytes, 0..) |b, i| { out[i*2] = _hx[b >> 4]; out[i*2+1] = _hx[b & 0xf]; }
+    return out;
+}
+fn _hash_sha256(data: []const u8) []const u8 {
+    var out: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(data, &out, .{});
+    return _hex_encode(&out);
+}
+fn _hash_sha512(data: []const u8) []const u8 {
+    var out: [std.crypto.hash.sha2.Sha512.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha512.hash(data, &out, .{});
+    return _hex_encode(&out);
+}
+fn _hash_md5(data: []const u8) []const u8 {
+    var out: [std.crypto.hash.Md5.digest_length]u8 = undefined;
+    std.crypto.hash.Md5.hash(data, &out, .{});
+    return _hex_encode(&out);
+}
+fn _hash_blake3(data: []const u8) []const u8 {
+    var out: [std.crypto.hash.Blake3.digest_length]u8 = undefined;
+    std.crypto.hash.Blake3.hash(data, &out, .{});
+    return _hex_encode(&out);
+}
+fn _hash_hmac256(key: []const u8, data: []const u8) []const u8 {
+    var out: [std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 = undefined;
+    std.crypto.auth.hmac.sha2.HmacSha256.create(&out, data, key);
+    return _hex_encode(&out);
+}
+var _rng_inst: std.Random.DefaultPrng = undefined;
+var _rng_ready: bool = false;
+fn _rng() std.Random {
+    if (!_rng_ready) {
+        var seed: u64 = 0;
+        std.crypto.random.bytes(std.mem.asBytes(&seed));
+        _rng_inst = std.Random.DefaultPrng.init(seed);
+        _rng_ready = true;
+    }
+    return _rng_inst.random();
+}
+fn _random_int(mn: i64, mx: i64) i64 { return _rng().intRangeAtMost(i64, mn, mx); }
+fn _random_float() f64               { return _rng().float(f64); }
+fn _random_bool() bool               { return _rng().boolean(); }
+fn _random_bytes(n: i64) []const u8 {
+    const len: usize = @intCast(if (n < 0) 0 else n);
+    const buf = _allocator.alloc(u8, len) catch return "";
+    _rng().bytes(buf);
+    return _hex_encode(buf);
+}
+fn _random_seed(s: i64) void {
+    _rng_inst = std.Random.DefaultPrng.init(@bitCast(s));
+    _rng_ready = true;
+}
+const ArgResult = struct {
+    _raw: []const []const u8,
+    pub fn flag(self: ArgResult, long: []const u8, short: []const u8) bool {
+        for (self._raw) |a| { if (std.mem.eql(u8, a, long)) return true; if (std.mem.eql(u8, a, short)) return true; }
+        return false;
+    }
+    pub fn contains(self: ArgResult, name_: []const u8) bool {
+        for (self._raw) |a| { if (std.mem.eql(u8, a, name_)) return true; }
+        return false;
+    }
+    pub fn option(self: ArgResult, name_: []const u8, default_val: []const u8) []const u8 {
+        var i: usize = 0;
+        while (i + 1 < self._raw.len) : (i += 1) {
+            if (std.mem.eql(u8, self._raw[i], name_)) return self._raw[i + 1];
+        }
+        return default_val;
+    }
+    pub fn optionInt(self: ArgResult, name_: []const u8, default_val: i64) i64 {
+        const s = self.option(name_, "");
+        if (s.len == 0) return default_val;
+        return std.fmt.parseInt(i64, s, 10) catch default_val;
+    }
+    pub fn positional(self: ArgResult, idx: i64) ?[]const u8 {
+        var pos: usize = 0;
+        for (self._raw) |a| {
+            if (!std.mem.startsWith(u8, a, "-")) {
+                if (pos == @as(usize, @intCast(idx))) return a;
+                pos += 1;
+            }
+        }
+        return null;
+    }
+    pub fn usage(_: ArgResult) []const u8 { return "Usage: program [options]"; }
+};
+fn _arg_parse() ArgResult {
+    const _argv = std.process.argsAlloc(_allocator) catch return ArgResult{ ._raw = &.{} };
+    const _raw_slice = if (_argv.len > 1) _argv[1..] else _argv[0..0];
+    var _out = _allocator.alloc([]const u8, _raw_slice.len) catch return ArgResult{ ._raw = &.{} };
+    for (_raw_slice, 0..) |a, i| _out[i] = a;
+    return ArgResult{ ._raw = _out };
+}
+fn _term_is_tty() bool {
+    const cfg = std.io.tty.detectConfig(std.fs.File.stdout());
+    return cfg != .no_color;
+}
+fn _term_width() i64 { return 80; }
+fn _term_height() i64 { return 24; }
+fn _term_ansi(color: []const u8) []const u8 {
+    if (std.mem.eql(u8, color, "red"))     return "\x1b[31m";
+    if (std.mem.eql(u8, color, "green"))   return "\x1b[32m";
+    if (std.mem.eql(u8, color, "yellow"))  return "\x1b[33m";
+    if (std.mem.eql(u8, color, "blue"))    return "\x1b[34m";
+    if (std.mem.eql(u8, color, "magenta")) return "\x1b[35m";
+    if (std.mem.eql(u8, color, "cyan"))    return "\x1b[36m";
+    if (std.mem.eql(u8, color, "white"))   return "\x1b[37m";
+    if (std.mem.eql(u8, color, "dim"))     return "\x1b[2m";
+    if (std.mem.eql(u8, color, "bold"))    return "\x1b[1m";
+    return "";
+}
+fn _term_print(msg: []const u8, color: []const u8, newline: bool) void {
+    const _f = std.fs.File.stdout();
+    if (_term_is_tty() and color.len > 0) {
+        _f.deprecatedWriter().print("{s}{s}\x1b[0m", .{ _term_ansi(color), msg }) catch {};
+    } else {
+        _f.deprecatedWriter().writeAll(msg) catch {};
+    }
+    if (newline) _f.deprecatedWriter().writeByte('\n') catch {};
+}
+var _log_level: u8 = 1;        // default: info
+var _log_timestamps: bool = true;
+var _log_to_stderr: bool = true;
+fn _log_ts() []const u8 {
+    const sec = @divFloor(std.time.milliTimestamp(), 1000);
+    const s = sec - 62135596800; // offset from Unix epoch to .NET epoch (unused here)
+    _ = s;
+    return std.fmt.allocPrint(_allocator, "{d}", .{sec}) catch "?";
+}
+fn _log_emit(level_str: []const u8, level_num: u8, msg: []const u8) void {
+    if (level_num < _log_level) return;
+    const _lw = if (_log_to_stderr) std.fs.File.stderr().deprecatedWriter() else std.fs.File.stdout().deprecatedWriter();
+    if (_log_timestamps) {
+        _lw.print("[{s:<5} {s}] {s}\n", .{ level_str, _log_ts(), msg }) catch {};
+    } else {
+        _lw.print("[{s:<5}] {s}\n", .{ level_str, msg }) catch {};
+    }
+}
+fn _log_debug(msg: []const u8) void { _log_emit("DEBUG", 0, msg); }
+fn _log_info(msg: []const u8) void  { _log_emit("INFO",  1, msg); }
+fn _log_warn(msg: []const u8) void  { _log_emit("WARN",  2, msg); }
+fn _log_err(msg: []const u8) void   { _log_emit("ERR",   3, msg); }
+fn _log_set_level(l: u8) void { _log_level = l; }
+fn _log_set_output_stderr(v: bool) void { _log_to_stderr = v; }
+fn _log_timestamp(v: bool) void { _log_timestamps = v; }
 pub const Main = struct {
+    _type_tag: u64 = _ttag_Main,
     pub fn main() void {
 // zbr:test/csv_test.zbr:5
         const simple = "name,score,city\nAlice,95,Boston\nBob,87,Austin\nCarla,100,Denver";
@@ -1514,13 +1673,21 @@ pub const Main = struct {
         std.debug.print("{s}\n", .{"csv_test: all assertions passed"});
     }
 
+    pub fn init() Main {
+        var self: Main = undefined;
+        self._type_tag = _ttag_Main;
+        return self;
+    }
+
 };
 
+const _ttag_Main: u64 = 1366325544;
 const _reflect_Main_name: []const u8 = "Main";
 const _reflect_Main_fields: []const []const u8 = &.{};
 const _reflect_Main_field_types: []const []const u8 = &.{};
 
 pub fn main() void {
+    _allocator = _arena.allocator();
     defer _arena.deinit();
     Main.main();
 }

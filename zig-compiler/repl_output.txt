@@ -1,0 +1,9 @@
+Zebra REPL v0.1 (Phase 0: expressions + var definitions)
+Type :help for commands, :quit to exit.
+
+zebra> C:\Users\Sean\AppData\Local\Temp\.repl_tmp.zig:623:15: error: unused local constant
+        const greeting = "World";
+              ^~~~~~~~
+zebra> C:\Users\Sean\AppData\Local\Temp\.repl_tmp.zbr:4:19: error: 'greeting' is not defined
+zebra> 
+Goodbye!

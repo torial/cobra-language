@@ -5,7 +5,7 @@ const std     = @import("std");
 const builtin = @import("builtin");
 
 var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-const _allocator = _arena.allocator();
+var _allocator: std.mem.Allocator = undefined;
 
 const _Stringable = struct {
     ptr:         *anyopaque,
@@ -65,6 +65,15 @@ fn _str_repeat(s: []const u8, n: anytype, alloc: std.mem.Allocator) []const u8 {
     const buf = alloc.alloc(u8, s.len * count) catch @panic("OOM");
     for (0..count) |i| @memcpy(buf[i * s.len ..][0..s.len], s);
     return buf;
+}
+/// FNV-1a 32-bit hash — used as the type-arg component of _type_tag.
+/// Low 32 bits of _ttag_ClassName hold the class hash; high 32 bits
+/// hold the combined type-arg hash for generic instantiations (Phase 3).
+/// Also usable as Symbol.hash for fast string identity comparison.
+fn _zbr_hash(comptime s: []const u8) u32 {
+    comptime var h: u32 = 2166136261;
+    comptime for (s) |c| { h ^= c; h *%= 16777619; };
+    return h;
 }fn _Result(comptime T: type, comptime E: type) type {
     return union(enum) {
         ok: T,
@@ -1195,6 +1204,7 @@ const _gui_stub_backend = _GuiBackend{
 };
 const _gui_active_backend: _GuiBackend = _gui_stub_backend;
 pub const Program = struct {
+    _type_tag: u64 = _ttag_Program,
     pub fn main() void {
 // zbr:test/sort_test.zbr:5
         var nums = std.ArrayList(i64){};
@@ -1253,19 +1263,19 @@ pub const Program = struct {
             std.debug.print("{}\n", .{n});
         }
 // zbr:test/sort_test.zbr:36
-        var alice = Person{};
+        var alice = Person.init();
 // zbr:test/sort_test.zbr:37
         alice.name = "Alice";
 // zbr:test/sort_test.zbr:38
         alice.score = 85;
 // zbr:test/sort_test.zbr:39
-        var bob = Person{};
+        var bob = Person.init();
 // zbr:test/sort_test.zbr:40
         bob.name = "Bob";
 // zbr:test/sort_test.zbr:41
         bob.score = 92;
 // zbr:test/sort_test.zbr:42
-        var carol = Person{};
+        var carol = Person.init();
 // zbr:test/sort_test.zbr:43
         carol.name = "Carol";
 // zbr:test/sort_test.zbr:44
@@ -1423,7 +1433,7 @@ pub const Program = struct {
         var people2 = std.ArrayList(Person){};
         defer people2.deinit(_allocator);
 // zbr:test/sort_test.zbr:132
-        var p1 = Person{};
+        var p1 = Person.init();
 // zbr:test/sort_test.zbr:133
         p1.name = "Alice";
 // zbr:test/sort_test.zbr:134
@@ -1431,7 +1441,7 @@ pub const Program = struct {
 // zbr:test/sort_test.zbr:135
         people2.append(_allocator, p1) catch unreachable;
 // zbr:test/sort_test.zbr:136
-        var p2 = Person{};
+        var p2 = Person.init();
 // zbr:test/sort_test.zbr:137
         p2.name = "Bob";
 // zbr:test/sort_test.zbr:138
@@ -1439,7 +1449,7 @@ pub const Program = struct {
 // zbr:test/sort_test.zbr:139
         people2.append(_allocator, p2) catch unreachable;
 // zbr:test/sort_test.zbr:140
-        var p3 = Person{};
+        var p3 = Person.init();
 // zbr:test/sort_test.zbr:141
         p3.name = "Charlie";
 // zbr:test/sort_test.zbr:142
@@ -1467,22 +1477,38 @@ pub const Program = struct {
         }
     }
 
+    pub fn init() Program {
+        var self: Program = undefined;
+        self._type_tag = _ttag_Program;
+        return self;
+    }
+
 };
 
+const _ttag_Program: u64 = 3290774379;
 const _reflect_Program_name: []const u8 = "Program";
 const _reflect_Program_fields: []const []const u8 = &.{};
 const _reflect_Program_field_types: []const []const u8 = &.{};
 
 pub const Person = struct {
+    _type_tag: u64 = _ttag_Person,
     name: []const u8 = "",
     score: i64 = 0,
+    pub fn init() Person {
+        var self: Person = undefined;
+        self._type_tag = _ttag_Person;
+        return self;
+    }
+
 };
 
+const _ttag_Person: u64 = 3278826400;
 const _reflect_Person_name: []const u8 = "Person";
 const _reflect_Person_fields: []const []const u8 = &.{"name", "score"};
 const _reflect_Person_field_types: []const []const u8 = &.{"str", "int"};
 
 pub fn main() void {
+    _allocator = _arena.allocator();
     defer _arena.deinit();
     Program.main();
 }

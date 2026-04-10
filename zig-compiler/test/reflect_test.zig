@@ -5,7 +5,8 @@ const std     = @import("std");
 const builtin = @import("builtin");
 
 var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-const _allocator = _arena.allocator();
+var _allocator: std.mem.Allocator = undefined;
+pub fn _initAllocator(a: std.mem.Allocator) void { _allocator = a; }
 
 const _Stringable = struct {
     ptr:         *anyopaque,
@@ -65,6 +66,15 @@ fn _str_repeat(s: []const u8, n: anytype, alloc: std.mem.Allocator) []const u8 {
     const buf = alloc.alloc(u8, s.len * count) catch @panic("OOM");
     for (0..count) |i| @memcpy(buf[i * s.len ..][0..s.len], s);
     return buf;
+}
+/// FNV-1a 32-bit hash — used as the type-arg component of _type_tag.
+/// Low 32 bits of _ttag_ClassName hold the class hash; high 32 bits
+/// hold the combined type-arg hash for generic instantiations (Phase 3).
+/// Also usable as Symbol.hash for fast string identity comparison.
+fn _zbr_hash(comptime s: []const u8) u32 {
+    comptime var h: u32 = 2166136261;
+    comptime for (s) |c| { h ^= c; h *%= 16777619; };
+    return h;
 }fn _Result(comptime T: type, comptime E: type) type {
     return union(enum) {
         ok: T,
@@ -1195,19 +1205,28 @@ const _gui_stub_backend = _GuiBackend{
 };
 const _gui_active_backend: _GuiBackend = _gui_stub_backend;
 pub const Product = struct {
+    _type_tag: u64 = _ttag_Product,
     name: []const u8 = undefined,
     price: f64 = undefined,
     qty: i64 = undefined,
+    pub fn init() Product {
+        var self: Product = undefined;
+        self._type_tag = _ttag_Product;
+        return self;
+    }
+
 };
 
+const _ttag_Product: u64 = 1385980108;
 const _reflect_Product_name: []const u8 = "Product";
 const _reflect_Product_fields: []const []const u8 = &.{"name", "price", "qty"};
 const _reflect_Product_field_types: []const []const u8 = &.{"str", "float", "int"};
 
 pub const Main = struct {
+    _type_tag: u64 = _ttag_Main,
     pub fn main() void {
 // zbr:test/reflect_test.zbr:9
-        var p = Product{};
+        var p = Product.init();
 // zbr:test/reflect_test.zbr:10
         p.name = "Widget";
 // zbr:test/reflect_test.zbr:11
@@ -1276,13 +1295,21 @@ pub const Main = struct {
         std.debug.print("{s}\n", .{"reflect_test: all assertions passed"});
     }
 
+    pub fn init() Main {
+        var self: Main = undefined;
+        self._type_tag = _ttag_Main;
+        return self;
+    }
+
 };
 
+const _ttag_Main: u64 = 1366325544;
 const _reflect_Main_name: []const u8 = "Main";
 const _reflect_Main_fields: []const []const u8 = &.{};
 const _reflect_Main_field_types: []const []const u8 = &.{};
 
 pub fn main() void {
+    _allocator = _arena.allocator();
     defer _arena.deinit();
     Main.main();
 }

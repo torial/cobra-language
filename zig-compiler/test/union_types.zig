@@ -65,6 +65,13 @@ fn _str_repeat(s: []const u8, n: anytype, alloc: std.mem.Allocator) []const u8 {
     const buf = alloc.alloc(u8, s.len * count) catch @panic("OOM");
     for (0..count) |i| @memcpy(buf[i * s.len ..][0..s.len], s);
     return buf;
+}
+/// FNV-1a 32-bit hash — deterministic type-ID primitive.
+/// Also used as Symbol.hash for fast string identity comparison.
+fn _zbr_hash(comptime s: []const u8) u32 {
+    comptime var h: u32 = 2166136261;
+    comptime for (s) |c| { h ^= c; h *%= 16777619; };
+    return h;
 }fn _Result(comptime T: type, comptime E: type) type {
     return union(enum) {
         ok: T,
@@ -1201,6 +1208,7 @@ const Shape = union(enum) {
 };
 
 pub const App = struct {
+    _type_id: u32 = _tid_App,
     pub fn main() void {
 // zbr:test/union_types.zbr:9
         const s: Shape = Shape{ .circle = 3.14 };
@@ -1221,8 +1229,15 @@ pub const App = struct {
         }
     }
 
+    pub fn init() App {
+        var self: App = undefined;
+        self._type_id = _tid_App;
+        return self;
+    }
+
 };
 
+const _tid_App: u32 = 2180324044;
 const _reflect_App_name: []const u8 = "App";
 const _reflect_App_fields: []const []const u8 = &.{};
 const _reflect_App_field_types: []const []const u8 = &.{};

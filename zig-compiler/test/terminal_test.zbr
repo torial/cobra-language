@@ -1,0 +1,23 @@
+class TerminalTest
+    shared def main
+        # isTty — false when output is piped (as in tests); true in interactive shell
+        print Terminal.isTty()
+        print "isTty: OK"
+
+        # width and height — return positive ints
+        var w = Terminal.width()
+        assert w > 0
+        print "width: OK"
+
+        var h = Terminal.height()
+        assert h > 0
+        print "height: OK"
+
+        # write(msg, color) — no color when not TTY, but doesn't crash
+        Terminal.write("hello", "green")
+        Terminal.writeln(" world", "red")
+        Terminal.write("bold text", "bold")
+        Terminal.writeln("", "")
+        print "Terminal.write: OK"
+
+        print "All terminal tests passed."

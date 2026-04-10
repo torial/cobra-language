@@ -1,0 +1,29 @@
+class LogTest
+    shared def main
+        # Default level is info — debug messages are suppressed
+        Log.timestamp(false)   # disable timestamps for predictable test output
+
+        Log.info("starting test")
+        Log.warn("this is a warning")
+        Log.err("this is an error")
+
+        # debug is suppressed at default info level
+        Log.debug("this should NOT appear")
+
+        # Lower the level to debug
+        Log.setLevel("debug")
+        Log.debug("debug now visible")
+
+        # Raise it to err — only errors show
+        Log.setLevel("err")
+        Log.info("this info should NOT appear")
+        Log.warn("this warn should NOT appear")
+        Log.err("only error visible")
+
+        # setOutput — switch to stdout (no crash test)
+        Log.setOutput("stdout")
+        Log.setLevel("info")
+        Log.info("writing to stdout now")
+        Log.setOutput("stderr")
+
+        print "All log tests passed."

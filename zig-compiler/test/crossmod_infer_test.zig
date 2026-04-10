@@ -5,7 +5,8 @@ const std     = @import("std");
 const builtin = @import("builtin");
 
 var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-const _allocator = _arena.allocator();
+var _allocator: std.mem.Allocator = undefined;
+pub fn _initAllocator(a: std.mem.Allocator) void { _allocator = a; }
 
 const _Stringable = struct {
     ptr:         *anyopaque,
@@ -65,6 +66,15 @@ fn _str_repeat(s: []const u8, n: anytype, alloc: std.mem.Allocator) []const u8 {
     const buf = alloc.alloc(u8, s.len * count) catch @panic("OOM");
     for (0..count) |i| @memcpy(buf[i * s.len ..][0..s.len], s);
     return buf;
+}
+/// FNV-1a 32-bit hash — used as the type-arg component of _type_tag.
+/// Low 32 bits of _ttag_ClassName hold the class hash; high 32 bits
+/// hold the combined type-arg hash for generic instantiations (Phase 3).
+/// Also usable as Symbol.hash for fast string identity comparison.
+fn _zbr_hash(comptime s: []const u8) u32 {
+    comptime var h: u32 = 2166136261;
+    comptime for (s) |c| { h ^= c; h *%= 16777619; };
+    return h;
 }fn _Result(comptime T: type, comptime E: type) type {
     return union(enum) {
         ok: T,
@@ -1196,6 +1206,7 @@ const _gui_stub_backend = _GuiBackend{
 const _gui_active_backend: _GuiBackend = _gui_stub_backend;
 const MathUtils = @import("MathUtils.zig").MathUtils;
 pub const App = struct {
+    _type_tag: u64 = _ttag_App,
     pub fn testTypeInference() void {
 // zbr:test/crossmod_infer_test.zbr:9
         const d = MathUtils.double(7);
@@ -1234,13 +1245,22 @@ pub const App = struct {
         App.testChainedInference();
     }
 
+    pub fn init() App {
+        var self: App = undefined;
+        self._type_tag = _ttag_App;
+        return self;
+    }
+
 };
 
+const _ttag_App: u64 = 2180324044;
 const _reflect_App_name: []const u8 = "App";
 const _reflect_App_fields: []const []const u8 = &.{};
 const _reflect_App_field_types: []const []const u8 = &.{};
 
 pub fn main() void {
+    _allocator = _arena.allocator();
     defer _arena.deinit();
+    @import("MathUtils.zig")._initAllocator(_allocator);
     App.main();
 }

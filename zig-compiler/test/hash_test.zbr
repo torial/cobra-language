@@ -1,0 +1,33 @@
+class HashTest
+    shared def main
+        # sha256 of empty string is well-known
+        var h0 = Hash.sha256("")
+        assert h0 == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        print "sha256 empty: OK"
+
+        # sha256 of "hello" — well-known value
+        var h1 = Hash.sha256("hello")
+        assert h1 == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        print "sha256 hello: OK"
+
+        # sha512 returns 128 hex chars
+        var h2 = Hash.sha512("hello")
+        assert h2.len == 128
+        print "sha512 length: OK"
+
+        # md5 — well-known value for "hello"
+        var h3 = Hash.md5("hello")
+        assert h3 == "5d41402abc4b2a76b9719d911017c592"
+        print "md5 hello: OK"
+
+        # blake3 returns 64 hex chars
+        var h4 = Hash.blake3("hello")
+        assert h4.len == 64
+        print "blake3 length: OK"
+
+        # hmac256 returns 64 hex chars
+        var h5 = Hash.hmac256("secret-key", "hello world")
+        assert h5.len == 64
+        print "hmac256 length: OK"
+
+        print "All hash tests passed."

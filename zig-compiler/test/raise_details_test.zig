@@ -5,7 +5,8 @@ const std     = @import("std");
 const builtin = @import("builtin");
 
 var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-const _allocator = _arena.allocator();
+var _allocator: std.mem.Allocator = undefined;
+pub fn _initAllocator(a: std.mem.Allocator) void { _allocator = a; }
 
 const _Stringable = struct {
     ptr:         *anyopaque,
@@ -65,6 +66,15 @@ fn _str_repeat(s: []const u8, n: anytype, alloc: std.mem.Allocator) []const u8 {
     const buf = alloc.alloc(u8, s.len * count) catch @panic("OOM");
     for (0..count) |i| @memcpy(buf[i * s.len ..][0..s.len], s);
     return buf;
+}
+/// FNV-1a 32-bit hash — used as the type-arg component of _type_tag.
+/// Low 32 bits of _ttag_ClassName hold the class hash; high 32 bits
+/// hold the combined type-arg hash for generic instantiations (Phase 3).
+/// Also usable as Symbol.hash for fast string identity comparison.
+fn _zbr_hash(comptime s: []const u8) u32 {
+    comptime var h: u32 = 2166136261;
+    comptime for (s) |c| { h ^= c; h *%= 16777619; };
+    return h;
 }fn _Result(comptime T: type, comptime E: type) type {
     return union(enum) {
         ok: T,
@@ -1195,10 +1205,12 @@ const _gui_stub_backend = _GuiBackend{
 };
 const _gui_active_backend: _GuiBackend = _gui_stub_backend;
 pub const FileInfo = struct {
+    _type_tag: u64 = _ttag_FileInfo,
     path: []const u8 = undefined,
     code: i64 = undefined,
     pub fn init(p: []const u8, c: i64) FileInfo {
         var self: FileInfo = undefined;
+        self._type_tag = _ttag_FileInfo;
 // zbr:test/raise_details_test.zbr:6
         self.path = p;
 // zbr:test/raise_details_test.zbr:7
@@ -1217,32 +1229,34 @@ pub const FileInfo = struct {
 
 };
 
+const _ttag_FileInfo: u64 = 4123891351;
 const _reflect_FileInfo_name: []const u8 = "FileInfo";
 const _reflect_FileInfo_fields: []const []const u8 = &.{"path", "code"};
 const _reflect_FileInfo_field_types: []const []const u8 = &.{"str", "int"};
 
 pub const Main = struct {
+    _type_tag: u64 = _ttag_Main,
     pub fn tryRead(path: []const u8) anyerror!void {
 // zbr:test/raise_details_test.zbr:15
-        { const _rdet_530 = _allocator.create(FileInfo) catch @panic("OOM");
-          _rdet_530.* = FileInfo.init(path, 404);
-          const _rshim_530 = struct { fn call(p: *anyopaque) []const u8 {
+        { const _rdet_540 = _allocator.create(FileInfo) catch @panic("OOM");
+          _rdet_540.* = FileInfo.init(path, 404);
+          const _rshim_540 = struct { fn call(p: *anyopaque) []const u8 {
               return @as(*FileInfo, @alignCast(@ptrCast(p))).toString();
           } };
-          _error_ctx = .{ .message = "file not found", .details = .{ .ptr = @ptrCast(_rdet_530), .toString_fn = _rshim_530.call } };
+          _error_ctx = .{ .message = "file not found", .details = .{ .ptr = @ptrCast(_rdet_540), .toString_fn = _rshim_540.call } };
         }
         return error.ZebraError;
     }
 
     pub fn main() void {
 // zbr:test/raise_details_test.zbr:18
-        var _try_err_52b8: ?anyerror = null;
-        _try_blk_52b8: {
+        var _try_err_52e0: ?anyerror = null;
+        _try_blk_52e0: {
 // zbr:test/raise_details_test.zbr:19
-            Main.tryRead("data.txt") catch |_e| { _try_err_52b8 = _e; break :_try_blk_52b8; };
-            break :_try_blk_52b8;
+            Main.tryRead("data.txt") catch |_e| { _try_err_52e0 = _e; break :_try_blk_52e0; };
+            break :_try_blk_52e0;
         }
-        if (_try_err_52b8 != null) {
+        if (_try_err_52e0 != null) {
 // zbr:test/raise_details_test.zbr:21
             std.debug.print("{s}\n", .{_error_ctx.message});
 // zbr:test/raise_details_test.zbr:22
@@ -1253,26 +1267,34 @@ pub const Main = struct {
             }
         }
 // zbr:test/raise_details_test.zbr:25
-        var _try_err_54e0: ?anyerror = null;
-        _try_blk_54e0: {
+        var _try_err_5508: ?anyerror = null;
+        _try_blk_5508: {
 // zbr:test/raise_details_test.zbr:26
             _error_ctx = .{ .message = "simple error", .details = null };
-            _try_err_54e0 = error.ZebraError;
-            break :_try_blk_54e0;
+            _try_err_5508 = error.ZebraError;
+            break :_try_blk_5508;
         }
-        if (_try_err_54e0 != null) {
+        if (_try_err_5508 != null) {
 // zbr:test/raise_details_test.zbr:28
             std.debug.print("{s}\n", .{_error_ctx.message});
         }
     }
 
+    pub fn init() Main {
+        var self: Main = undefined;
+        self._type_tag = _ttag_Main;
+        return self;
+    }
+
 };
 
+const _ttag_Main: u64 = 1366325544;
 const _reflect_Main_name: []const u8 = "Main";
 const _reflect_Main_fields: []const []const u8 = &.{};
 const _reflect_Main_field_types: []const []const u8 = &.{};
 
 pub fn main() void {
+    _allocator = _arena.allocator();
     defer _arena.deinit();
     Main.main();
 }

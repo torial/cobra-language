@@ -104,6 +104,8 @@ pub const Type = union(enum) {
     csv_writer,
     /// A single CSV row (behaves like `List(str)`; each element is a field string).
     csv_row,
+    /// `ArgResult` — parsed command-line arguments from `Arg.parse()`.
+    arg_result,
 
     // ── Optional ──────────────────────────────────────────────────────────────
     /// `?T` — nilable wrapper around another type.
@@ -166,6 +168,7 @@ pub const Type = union(enum) {
             .csv_table      => b == .csv_table,
             .csv_writer     => b == .csv_writer,
             .csv_row        => b == .csv_row,
+            .arg_result     => b == .arg_result,
             .json_array     => b == .json_array,
             .tuple => |ea| switch (b) {
                 .tuple => |eb| blk: {
@@ -245,6 +248,7 @@ pub const Type = union(enum) {
             .csv_table      => "CsvTable",
             .csv_writer     => "CsvWriter",
             .csv_row        => "CsvRow",
+            .arg_result     => "ArgResult",
             .optional       => "?T",
             .tuple          => "tuple",
             .cross_module   => |cm| cm.type_name,
@@ -1664,6 +1668,59 @@ const TypeChecker = struct {
                     if (std.mem.eql(u8, mem.member, "fieldNames") or
                         std.mem.eql(u8, mem.member, "fieldTypes")) return .str_slice;
                     return .unknown;
+                }
+                // Hash.* static methods — all return a hex string.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Hash")) {
+                    _ = try tc.inferExpr(mem.object);
+                    for (e.args) |a| _ = try tc.inferExpr(a.value);
+                    return .string;
+                }
+                // Random.* static methods.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Random")) {
+                    _ = try tc.inferExpr(mem.object);
+                    for (e.args) |a| _ = try tc.inferExpr(a.value);
+                    if (std.mem.eql(u8, mem.member, "randInt"))  return .int;
+                    if (std.mem.eql(u8, mem.member, "randFloat")) return .float;
+                    if (std.mem.eql(u8, mem.member, "randBool"))  return .bool;
+                    if (std.mem.eql(u8, mem.member, "bytes"))     return .string;
+                    return .void_; // shuffle, seed; choice returns unknown element type
+                }
+                // Arg.* static methods.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Arg")) {
+                    _ = try tc.inferExpr(mem.object);
+                    for (e.args) |a| _ = try tc.inferExpr(a.value);
+                    if (std.mem.eql(u8, mem.member, "parse")) return .arg_result;
+                    return .void_;
+                }
+                // ArgResult instance method calls — flag/has/option/optionInt/positional/usage.
+                if (try tc.inferExpr(mem.object) == .arg_result) {
+                    for (e.args) |a| _ = try tc.inferExpr(a.value);
+                    if (std.mem.eql(u8, mem.member, "flag"))        return .bool;
+                    if (std.mem.eql(u8, mem.member, "contains"))   return .bool;
+                    if (std.mem.eql(u8, mem.member, "option"))     return .string;
+                    if (std.mem.eql(u8, mem.member, "optionInt"))  return .int;
+                    if (std.mem.eql(u8, mem.member, "usage"))      return .string;
+                    if (std.mem.eql(u8, mem.member, "positional")) {
+                        const boxed = tc.map_alloc.create(Type) catch return .string;
+                        boxed.* = .string;
+                        return .{ .optional = boxed };
+                    }
+                    return .unknown;
+                }
+                // Terminal.* static methods.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Terminal")) {
+                    _ = try tc.inferExpr(mem.object);
+                    for (e.args) |a| _ = try tc.inferExpr(a.value);
+                    if (std.mem.eql(u8, mem.member, "width"))  return .int;
+                    if (std.mem.eql(u8, mem.member, "height")) return .int;
+                    if (std.mem.eql(u8, mem.member, "isTty"))  return .bool;
+                    return .void_; // write, writeln
+                }
+                // Log.* static methods — all return void.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Log")) {
+                    _ = try tc.inferExpr(mem.object);
+                    for (e.args) |a| _ = try tc.inferExpr(a.value);
+                    return .void_;
                 }
                 // Json.* static methods.
                 if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Json")) {

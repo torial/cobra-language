@@ -93,6 +93,13 @@ pub const NAMES = std.StaticStringMap(void).initComptime(&.{
     .{ "CsvWriter",     {} },
     // Stdlib reflection
     .{ "Reflect",       {} },
+    // Stdlib batteries-included (0.10)
+    .{ "Hash",          {} },
+    .{ "Random",        {} },
+    .{ "Arg",           {} },
+    .{ "ArgResult",     {} },
+    .{ "Terminal",      {} },
+    .{ "Log",           {} },
 });
 
 /// Returns true iff `name` is a built-in type name.

@@ -65,6 +65,15 @@ fn _str_repeat(s: []const u8, n: anytype, alloc: std.mem.Allocator) []const u8 {
     const buf = alloc.alloc(u8, s.len * count) catch @panic("OOM");
     for (0..count) |i| @memcpy(buf[i * s.len ..][0..s.len], s);
     return buf;
+}
+/// FNV-1a 32-bit hash — used as the type-arg component of _type_tag.
+/// Low 32 bits of _ttag_ClassName hold the class hash; high 32 bits
+/// hold the combined type-arg hash for generic instantiations (Phase 3).
+/// Also usable as Symbol.hash for fast string identity comparison.
+fn _zbr_hash(comptime s: []const u8) u32 {
+    comptime var h: u32 = 2166136261;
+    comptime for (s) |c| { h ^= c; h *%= 16777619; };
+    return h;
 }fn _Result(comptime T: type, comptime E: type) type {
     return union(enum) {
         ok: T,
@@ -1195,14 +1204,23 @@ const _gui_stub_backend = _GuiBackend{
 };
 const _gui_active_backend: _GuiBackend = _gui_stub_backend;
 pub const Counter = struct {
+    _type_tag: u64 = _ttag_Counter,
     pub var count: i64 = 0;
+    pub fn init() Counter {
+        var self: Counter = undefined;
+        self._type_tag = _ttag_Counter;
+        return self;
+    }
+
 };
 
+const _ttag_Counter: u64 = 4228854723;
 const _reflect_Counter_name: []const u8 = "Counter";
 const _reflect_Counter_fields: []const []const u8 = &.{};
 const _reflect_Counter_field_types: []const []const u8 = &.{};
 
 pub const Program = struct {
+    _type_tag: u64 = _ttag_Program,
     pub fn main() void {
 // zbr:test/shared_field.zbr:7
         Counter.count = (Counter.count + 1);
@@ -1212,8 +1230,15 @@ pub const Program = struct {
         std.debug.print("{}\n", .{Counter.count});
     }
 
+    pub fn init() Program {
+        var self: Program = undefined;
+        self._type_tag = _ttag_Program;
+        return self;
+    }
+
 };
 
+const _ttag_Program: u64 = 3290774379;
 const _reflect_Program_name: []const u8 = "Program";
 const _reflect_Program_fields: []const []const u8 = &.{};
 const _reflect_Program_field_types: []const []const u8 = &.{};

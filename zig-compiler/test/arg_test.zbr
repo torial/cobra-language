@@ -1,0 +1,35 @@
+class ArgTest
+    shared def main
+        # Arg.parse() with no real CLI args (program has no extra args when run via zebra test)
+        var args = Arg.parse()
+
+        # flag — not present → false
+        var verbose = args.flag("--verbose", "-v")
+        assert not verbose
+        print "flag absent: OK"
+
+        # contains — not present → false
+        assert not args.contains("--debug")
+        print "contains absent: OK"
+
+        # option with default — not present → returns default
+        var out = args.option("--output", "a.out")
+        assert out == "a.out"
+        print "option default: OK"
+
+        # optionInt with default — not present → returns default
+        var count = args.optionInt("--count", 5)
+        assert count == 5
+        print "optionInt default: OK"
+
+        # positional(0) — no positional args → nil
+        var pos0 = args.positional(0)
+        assert pos0 == nil
+        print "positional absent: OK"
+
+        # usage() — returns a non-empty string
+        var u = args.usage()
+        assert u.len > 0
+        print "usage: OK"
+
+        print "All arg tests passed."
