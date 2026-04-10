@@ -306,8 +306,13 @@ const Printer = struct {
                 for (g.args) |arg| { try p.w(" ", .{}); try p.printTypeRef(arg); }
                 try p.w(">", .{});
             },
-            .void_ => try p.w("void", .{}),
-            .same  => try p.w("same", .{}),
+            .void_  => try p.w("void", .{}),
+            .same   => try p.w("same", .{}),
+            .tuple  => |tup| {
+                try p.w("(tuple", .{});
+                for (tup.elems) |el| { try p.w(" ", .{}); try p.printTypeRef(el); }
+                try p.w(")", .{});
+            },
         }
     }
 
@@ -334,6 +339,8 @@ const Printer = struct {
             .assign_except => |_| { try p.w("(assign-except)", .{}); },
             .raise         => |_| { try p.w("(raise)", .{}); },
             .try_catch     => |_| { try p.w("(try-catch)", .{}); },
+            .guard    => |_| { try p.w("(guard)", .{}); },
+            .destruct => |_| { try p.w("(destruct)", .{}); },
             .pass     => try p.w("(pass)", .{}),
             .break_   => try p.w("(break)", .{}),
             .continue_=> try p.w("(continue)", .{}),

@@ -62,6 +62,10 @@ pub const Type = union(enum) {
     // ── User-defined ──────────────────────────────────────────────────────────
     /// A class / interface / struct / mixin / enum.
     named: *const Symbol,
+    /// A generic class instantiated with concrete type arguments.
+    /// E.g. `Stack(int)` → `{ sym: Stack_sym, args: [.int] }`.
+    /// Enables member lookups that substitute type params with actual types.
+    generic_named: struct { sym: *const Symbol, args: []const Type },
 
     // ── Stdlib types ─────────────────────────────────────────────────────────
     /// `StringBuilder` — wraps `std.ArrayList(u8)`.
@@ -128,6 +132,15 @@ pub const Type = union(enum) {
             .uint_n  => |wa| switch (b) { .uint_n  => |wb| wa == wb, else => false },
             .float_n => |wa| switch (b) { .float_n => |wb| wa == wb, else => false },
             .named          => |sa| switch (b) { .named   => |sb| sa == sb, else => false },
+            .generic_named  => |ga| switch (b) {
+                .generic_named => |gb| blk: {
+                    if (ga.sym != gb.sym) break :blk false;
+                    if (ga.args.len != gb.args.len) break :blk false;
+                    for (ga.args, gb.args) |ta, tb| if (!ta.eql(tb)) break :blk false;
+                    break :blk true;
+                },
+                else => false,
+            },
             .optional       => |ia| switch (b) { .optional => |ib| ia.eql(ib.*), else => false },
             .string_builder => b == .string_builder,
             .http_request   => b == .http_request,
@@ -201,6 +214,7 @@ pub const Type = union(enum) {
             .uint_n  => "uint<N>",
             .float_n => "float<N>",
             .named          => |s| s.name,
+            .generic_named  => |g| g.sym.name,
             .string_builder => "StringBuilder",
             .http_request   => "HttpRequest",
             .http_response  => "HttpResponse",
@@ -1005,6 +1019,7 @@ const TypeChecker = struct {
                                     "raise details must implement 'toString as str': type '{s}' has no toString method",
                                     .{sym.name});
                         },
+                        .generic_named => {}, // generic type details — can't check toString statically
                         else => |t| try tc.emitError(s.span,
                             "raise details must implement 'toString as str': got '{s}'",
                             .{t.name()}),
@@ -1287,6 +1302,26 @@ const TypeChecker = struct {
                 }
             }
         }
+        // Generic instance member lookup with type-param substitution.
+        // e.g. `p.first` on `Pair(str,int)` → look up `first`, substitute A→str.
+        if (obj_type == .generic_named) {
+            const gn = obj_type.generic_named;
+            if (gn.sym.decl != .class) return .unknown;
+            const cls = gn.sym.decl.class;
+            if (gn.sym.own_scope) |scope| {
+                if (scope.lookupLocal(e.member)) |member_sym| {
+                    // For fields/params: substitute type params in declared type.
+                    switch (member_sym.decl) {
+                        .var_   => |v| if (v.type_) |*t| return tc.substituteTypeParam(t, cls, gn.args),
+                        .param  => |p| if (p.type_) |*t| return tc.substituteTypeParam(t, cls, gn.args),
+                        // Methods: return symbolType (method return types handled in inferCall).
+                        .method => return .unknown, // resolved later in inferCall
+                        else    => {},
+                    }
+                    return tc.symbolType(member_sym);
+                }
+            }
+        }
         return .unknown;
     }
 
@@ -1386,10 +1421,15 @@ const TypeChecker = struct {
 
         // Generic construction: Stack(int)(42) — callee ident resolves to a generic class.
         // type_args.len > 0 is the discriminator set by AstBuilder.buildGenericConstruct.
+        // Return generic_named so downstream member lookups can substitute type params.
         if (e.type_args.len > 0) {
             if (e.callee.* == .ident) {
                 if (tc.resolve.exprs.get(&e.callee.ident)) |sym| {
-                    if (sym.kind == .class) return Type{ .named = sym };
+                    if (sym.kind == .class) {
+                        const arg_types = try tc.map_alloc.alloc(Type, e.type_args.len);
+                        for (e.type_args, arg_types) |ta, *at| at.* = tc.typeFromRef(&ta);
+                        return Type{ .generic_named = .{ .sym = sym, .args = arg_types } };
+                    }
                 }
             }
             return .unknown;
@@ -1590,6 +1630,31 @@ const TypeChecker = struct {
                 }
                 // Stdlib method call: infer return type from receiver type + method name.
                 const obj_type = try tc.inferExpr(mem.object);
+                // Generic instance method call: substitute type params in return type.
+                // e.g. `s.pop()` on `Stack(int)` where pop returns `?T` → `?int`.
+                if (obj_type == .generic_named) {
+                    const gn = obj_type.generic_named;
+                    if (gn.sym.decl == .class) {
+                        const cls = gn.sym.decl.class;
+                        if (gn.sym.own_scope) |scope| {
+                            if (scope.lookupLocal(mem.member)) |member_sym| {
+                                if (member_sym.kind == .method) {
+                                    const decl = member_sym.decl.method;
+                                    if (decl.return_type) |*rt|
+                                        return tc.substituteTypeParam(rt, cls, gn.args);
+                                    return .void_;
+                                }
+                                // Field access on generic instance.
+                                switch (member_sym.decl) {
+                                    .var_  => |v| if (v.type_) |*t| return tc.substituteTypeParam(t, cls, gn.args),
+                                    .param => |p| if (p.type_) |*t| return tc.substituteTypeParam(t, cls, gn.args),
+                                    else   => {},
+                                }
+                                return tc.symbolType(member_sym);
+                            }
+                        }
+                    }
+                }
                 // User-defined class/struct methods: look up declared return type.
                 if (obj_type == .named) {
                     const class_sym = obj_type.named;
@@ -2046,6 +2111,51 @@ const TypeChecker = struct {
                 break :blk Type{ .tuple = elems };
             },
         };
+    }
+
+    // ── Generic type-param substitution ──────────────────────────────────────
+
+    /// Resolve a TypeRef to a concrete Type, substituting generic type params
+    /// from `cls.type_params` with the concrete `args` from a `generic_named`.
+    ///
+    /// Example: Stack(int) has args=[.int], type_params=["T"].
+    /// substituteTypeParam(TypeRef.named("T"), Stack, [.int]) → .int
+    /// substituteTypeParam(TypeRef.nilable("T"), Stack, [.int]) → .optional(.int)
+    fn substituteTypeParam(
+        tc:     TypeChecker,
+        tr:     *const Ast.TypeRef,
+        cls:    *const Ast.DeclClass,
+        args:   []const Type,
+    ) Type {
+        switch (tr.*) {
+            .named => |*n| {
+                const resolved = tc.resolve.types.get(n) orelse return .unknown;
+                switch (resolved) {
+                    .builtin => return builtinType(n.name),
+                    .symbol  => |s| {
+                        if (s.kind == .type_param) {
+                            // Match param name to index, return concrete arg type.
+                            for (cls.type_params, 0..) |pname, i| {
+                                if (std.mem.eql(u8, pname, n.name))
+                                    return if (i < args.len) args[i] else .unknown;
+                            }
+                            return .unknown;
+                        }
+                        return .{ .named = s };
+                    },
+                }
+            },
+            .nilable => |inner| {
+                const inner_t = tc.substituteTypeParam(inner, cls, args);
+                const boxed = tc.map_alloc.create(Type) catch return .unknown;
+                boxed.* = inner_t;
+                return Type{ .optional = boxed };
+            },
+            .generic => return .unknown,  // nested generics (e.g., List(T)) — not yet substituted
+            .void_   => return .void_,
+            .same    => return if (tc.owner_sym) |s| Type{ .named = s } else .unknown,
+            else     => return .unknown,
+        }
     }
 
     // ── Diagnostics ───────────────────────────────────────────────────────────

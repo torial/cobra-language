@@ -884,7 +884,7 @@ fn scanMutationsInExpr(
                                 const obj_type = tc.expr_types.get(obj) orelse .unknown;
                                 // User-defined class: conservative — methods take *self,
                                 // so ANY call may mutate the receiver.
-                                if (obj_type == .named) break :blk true;
+                                if (obj_type == .named or obj_type == .generic_named) break :blk true;
                                 // Strings are immutable values in Zebra — no method
                                 // mutates a string in-place.  `reverse` is in the
                                 // allow-list for List (which is in-place), but
@@ -1070,17 +1070,57 @@ const Generator = struct {
     /// function `pub fn Name(comptime T: type) type { return struct { … }; }`).
     /// Enables `@This()` instead of `owner` for self-type references in init/methods.
     is_generic: bool = false,
+    /// When `is_generic`, points to the class declaration so that `genAssign` can
+    /// resolve field types for explicit `std.ArrayList(T){}` emission.
+    owner_class: ?*const Ast.DeclClass = null,
+    /// Resolved Zig element-type string for an imminent `List()` call.
+    /// Set by `genAssign` when the LHS field type is known; cleared after use.
+    lhs_list_elem: ?[]const u8 = null,
 
     // ── Context-adjustment helpers ────────────────────────────────────────────
 
     fn withOwner(g: Generator, new_owner: []const u8) Generator {
         var c = g; c.owner = new_owner; return c;
     }
-    fn withGeneric(g: Generator) Generator {
-        var c = g; c.is_generic = true; return c;
+    fn withGeneric(g: Generator, cls: *const Ast.DeclClass) Generator {
+        var c = g; c.is_generic = true; c.owner_class = cls; return c;
     }
     fn withExtSelf(g: Generator, t: TypeChecker.Type) Generator {
         var c = g; c.ext_self_type = t; return c;
+    }
+
+    /// When inside a generic class body, resolve the Zig element-type string for a
+    /// `List(X)` field named `field_name`.  Returns null if the field isn't a List.
+    ///
+    /// Examples:
+    ///   `items as List(T)` with type_params=["T"] → "T"   (comptime param name)
+    ///   `items as List(str)`                       → "[]const u8"
+    fn resolveListElemType(g: Generator, field_name: []const u8) ?[]const u8 {
+        const cls = g.owner_class orelse return null;
+        for (cls.members) |m| {
+            const vd: *const Ast.DeclVar = switch (m) {
+                .var_ => |v| v,
+                else  => continue,
+            };
+            if (!std.mem.eql(u8, vd.name, field_name)) continue;
+            const tr = vd.type_ orelse return null;
+            // Must be `List(X)` — TypeRef.generic with name "List" and one arg.
+            if (tr != .generic) return null;
+            const gen = tr.generic;
+            if (!std.mem.eql(u8, gen.name, "List")) return null;
+            if (gen.args.len != 1) return null;
+            const arg = gen.args[0];
+            // Check if the arg is a type parameter of the class.
+            if (arg == .named) {
+                for (cls.type_params) |tp| {
+                    if (std.mem.eql(u8, tp, arg.named.name)) return tp; // use param name directly
+                }
+                // Not a type param — treat as a concrete type.
+                return Builtins.zigTypeName(arg.named.name);
+            }
+            return null;
+        }
+        return null;
     }
     fn asMethod(g: Generator) Generator {
         var c = g; c.in_method = true; return c;
@@ -2824,7 +2864,7 @@ const Generator = struct {
         try fg.w.writeAll("return struct {\n");
 
         // Inner generator: owner = class name, is_generic = true
-        const ig = fg.indented().withOwner(n.name).withGeneric();
+        const ig = fg.indented().withOwner(n.name).withGeneric(n);
 
         // ① Type-tag field (references module-scope _ttag_ClassName constant).
         try ig.writeIndent();
@@ -5856,7 +5896,33 @@ const Generator = struct {
                     try g.w.writeAll(" ");
                     try g.w.writeAll(assignOpStr(s.op));
                     try g.w.writeAll(" ");
-                    try g.genExpr(s.value);
+                    // In generic class bodies, resolve List() element type from the LHS
+                    // field so we emit `std.ArrayList(T){}` instead of relying on `.{}`.
+                    const generic_list_emitted: bool = emit: {
+                        if (!g.is_generic or s.op != .assign) break :emit false;
+                        if (s.value.* != .call) break :emit false;
+                        const rhs_call = s.value.call;
+                        if (rhs_call.callee.* != .ident) break :emit false;
+                        if (!std.mem.eql(u8, rhs_call.callee.ident.name, "List")) break :emit false;
+                        if (rhs_call.args.len != 0) break :emit false;
+                        // Resolve field name from target: bare ident (in method body) or
+                        // explicit `self.field` member access (rare in Zebra, but supported).
+                        const field_name: []const u8 = switch (s.target.*) {
+                            .ident  => |id| id.name,
+                            .member => |mem| blk: {
+                                if (mem.object.* != .ident) break :emit false;
+                                if (!std.mem.eql(u8, mem.object.ident.name, "self")) break :emit false;
+                                break :blk mem.member;
+                            },
+                            else => break :emit false,
+                        };
+                        const elem = g.resolveListElemType(field_name) orelse break :emit false;
+                        var gg = g;
+                        gg.lhs_list_elem = elem;
+                        try gg.genExpr(s.value);
+                        break :emit true;
+                    };
+                    if (!generic_list_emitted) try g.genExpr(s.value);
                 }
             },
         }
@@ -7384,11 +7450,14 @@ const Generator = struct {
         if (e.callee.* == .ident and e.args.len == 0) {
             const name = e.callee.ident.name;
             if (std.mem.eql(u8, name, "List")) {
-                // Inside a generic class, emit `.{}` so Zig infers the element type
-                // from the assignment target (e.g., `self.items: std.ArrayList(T)`).
-                // Outside generic context, default to string-element list.
                 if (g.is_generic) {
-                    try g.w.writeAll(".{}");
+                    // Explicit element type if caller resolved it from the LHS field.
+                    if (g.lhs_list_elem) |elem| {
+                        try g.w.print("std.ArrayList({s}){{}}", .{elem});
+                    } else {
+                        // Fallback: rely on Zig's type inference from the assignment target.
+                        try g.w.writeAll(".{}");
+                    }
                 } else {
                     try g.w.writeAll("std.ArrayList([]const u8){}");
                 }
@@ -8428,7 +8497,8 @@ fn printFmt(tc: ?*const TypeChecker.TypeCheckResult, catch_var: []const u8, expr
         .csv_writer,
         .csv_row,
         .optional,
-        .tuple                         => "{any}",
+        .tuple,
+        .generic_named                 => "{any}",
     };
 }
 
@@ -8693,7 +8763,7 @@ fn generateSnippet(src: []const u8, alloc: Allocator) anyerror![]u8 {
     var out = std.ArrayList(u8){};
     errdefer out.deinit(alloc);
 
-    _ = try generate(module, &resolve, null, alloc, out.writer(alloc).any(), .stub);
+    _ = try generate(module, &resolve, null, alloc, out.writer(alloc).any(), .stub, null, false);
     return out.toOwnedSlice(alloc);
 }
 
@@ -8799,5 +8869,7 @@ test "codegen: nilable type maps to ?T" {
     const out = try generateSnippet(src, testing.allocator);
     defer testing.allocator.free(out);
 
-    try testing.expect(std.mem.indexOf(u8, out, "next: ?Node") != null);
+    // Self-referential `Node?` must be a pointer-nilable `?*Node` to avoid
+    // infinite-size struct in Zig.
+    try testing.expect(std.mem.indexOf(u8, out, "next: ?*Node") != null);
 }
