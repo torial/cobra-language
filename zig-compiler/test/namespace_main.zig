@@ -1209,7 +1209,7 @@ const _reflect_Runner_field_types: []const []const u8 = &.{};
 
 };
 
-pub fn main() !void {
+pub fn main() void {
     defer _arena.deinit();
     App.Runner.main();
 }

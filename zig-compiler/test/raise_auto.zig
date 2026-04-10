@@ -1220,7 +1220,7 @@ pub const App = struct {
         var _try_err_29a8: ?anyerror = null;
         _try_blk_29a8: {
 // zbr:test/raise_auto.zbr:11
-            result = App.risky(5) catch |_tc_222fcaa2938| { _try_err_29a8 = _tc_222fcaa2938; break :_try_blk_29a8; };
+            result = App.risky(5) catch |_tc_1f8901b2938| { _try_err_29a8 = _tc_1f8901b2938; break :_try_blk_29a8; };
             break :_try_blk_29a8;
         }
         if (_try_err_29a8 != null) {
@@ -1237,7 +1237,7 @@ const _reflect_App_name: []const u8 = "App";
 const _reflect_App_fields: []const []const u8 = &.{};
 const _reflect_App_field_types: []const []const u8 = &.{};
 
-pub fn main() !void {
+pub fn main() void {
     defer _arena.deinit();
     App.main();
 }

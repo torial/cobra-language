@@ -1224,7 +1224,7 @@ const _reflect_App_name: []const u8 = "App";
 const _reflect_App_fields: []const []const u8 = &.{};
 const _reflect_App_field_types: []const []const u8 = &.{};
 
-pub fn main() !void {
+pub fn main() void {
     defer _arena.deinit();
     App.main();
 }

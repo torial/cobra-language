@@ -1230,7 +1230,14 @@ const _reflect_Main_name: []const u8 = "Main";
 const _reflect_Main_fields: []const []const u8 = &.{};
 const _reflect_Main_field_types: []const []const u8 = &.{};
 
-pub fn main() !void {
+pub fn main() void {
     defer _arena.deinit();
-    try Main.main();
+    Main.main() catch |_err| {
+        if (_err == error.ZebraError) {
+            std.debug.print("Error: {s}\n", .{_error_ctx.message});
+        } else {
+            std.debug.print("Error: {}\n", .{_err});
+        }
+        std.process.exit(1);
+    };
 }

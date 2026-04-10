@@ -558,18 +558,19 @@ const Tokenizer = struct {
 
     // ── Doc strings ───────────────────────────────────────────────────────
 
-    /// Scan `"""..."""` or `"""` (block open).  Called when `"""` is detected.
+    /// Scan `"""..."""` (single-line or multiline).  Called when `"""` is detected.
+    /// Always emits a single `doc_string_line` token whose text is the full
+    /// `"""..."""` source slice so the AstBuilder/CodeGen can strip the delimiters.
     fn scanDocString(self: *Tokenizer, ln: u32, cl: u16) !void {
         const start = self.pos;
-        self.pos += 3;  // consume """
+        self.pos += 3;  // consume opening """
 
-        // Skip optional trailing whitespace on same line
+        // Skip optional trailing whitespace on the opening line
         while (self.pos < self.src.len and
                (self.src[self.pos] == ' ' or self.src[self.pos] == '\t')) : (self.pos += 1) {}
 
-        // DOC_STRING_LINE: """....""" all on one line
+        // Single-line: """content"""
         if (self.pos < self.src.len and self.src[self.pos] != '\n') {
-            // There is content after the opening """; scan to closing """
             while (self.pos + 2 < self.src.len) {
                 if (self.src[self.pos] == '"' and
                     self.src[self.pos + 1] == '"' and
@@ -584,11 +585,27 @@ const Tokenizer = struct {
             return error.UnterminatedString;
         }
 
-        // DOC_STRING_START: """ followed by newline
+        // Multiline: """ followed by newline — consume lines until closing """
+        // The emitted token text is the full `"""\n...\n"""` slice.
         if (self.pos < self.src.len and self.src[self.pos] == '\n') {
             self.advanceNewline();
         }
-        try self.emit(.doc_string_start, self.src[start..self.pos], ln, cl);
+        while (self.pos < self.src.len) {
+            // Check for closing """ (may be indented)
+            var p = self.pos;
+            while (p < self.src.len and (self.src[p] == ' ' or self.src[p] == '\t')) : (p += 1) {}
+            if (p + 2 < self.src.len and
+                self.src[p] == '"' and self.src[p + 1] == '"' and self.src[p + 2] == '"')
+            {
+                self.pos = p + 3;
+                try self.emit(.doc_string_line, self.src[start..self.pos], ln, cl);
+                return;
+            }
+            // Consume this content line
+            while (self.pos < self.src.len and self.src[self.pos] != '\n') : (self.pos += 1) {}
+            if (self.pos < self.src.len) self.advanceNewline();
+        }
+        return error.UnterminatedString;
     }
 
     // ── Numeric literals ──────────────────────────────────────────────────

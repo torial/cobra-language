@@ -1237,7 +1237,7 @@ pub const Main = struct {
             unreachable;
         }
 // zbr:test/escape_field_test.zbr:25
-        std.debug.print("{any}\n", .{c.items.items[@as(usize, @intCast(0))]});
+        std.debug.print("{s}\n", .{c.items.items[@as(usize, @intCast(0))]});
 // zbr:test/escape_field_test.zbr:26
         std.debug.print("{s}\n", .{c.label});
 // zbr:test/escape_field_test.zbr:27
@@ -1250,7 +1250,7 @@ const _reflect_Main_name: []const u8 = "Main";
 const _reflect_Main_fields: []const []const u8 = &.{};
 const _reflect_Main_field_types: []const []const u8 = &.{};
 
-pub fn main() !void {
+pub fn main() void {
     defer _arena.deinit();
     Main.main();
 }

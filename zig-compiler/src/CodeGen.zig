@@ -2584,16 +2584,34 @@ const Generator = struct {
         // `shared def main`.  Zig's startup code looks for `root.main`.
         if (try findMainClass(module.decls, g.alloc, "")) |class_name| {
             defer g.alloc.free(class_name);
-            // If the main method throws, call it with `try`.
+            // If the main method throws, wrap in a catch block so ZebraError
+            // is displayed as a clean user-facing message rather than Zig's
+            // "error: ZebraError" with a backtrace.
             const main_throws = findMainMethod(module.decls) != null and blk: {
                 const m = findMainMethod(module.decls).?;
                 break :blk m.throws or (m.body != null and bodyHasRaise(m.body.?));
             };
-            const call_prefix: []const u8 = if (main_throws) "try " else "";
-            try g.w.print(
-                "pub fn main() !void {{\n    defer _arena.deinit();\n    {s}{s}.main();\n}}\n",
-                .{ call_prefix, class_name },
-            );
+            if (main_throws) {
+                try g.w.print(
+                    "pub fn main() void {{\n" ++
+                    "    defer _arena.deinit();\n" ++
+                    "    {s}.main() catch |_err| {{\n" ++
+                    "        if (_err == error.ZebraError) {{\n" ++
+                    "            std.debug.print(\"Error: {{s}}\\n\", .{{_error_ctx.message}});\n" ++
+                    "        }} else {{\n" ++
+                    "            std.debug.print(\"Error: {{}}\\n\", .{{_err}});\n" ++
+                    "        }}\n" ++
+                    "        std.process.exit(1);\n" ++
+                    "    }};\n" ++
+                    "}}\n",
+                    .{class_name},
+                );
+            } else {
+                try g.w.print(
+                    "pub fn main() void {{\n    defer _arena.deinit();\n    {s}.main();\n}}\n",
+                    .{class_name},
+                );
+            }
         }
     }
 

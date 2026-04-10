@@ -1222,7 +1222,7 @@ pub const App = struct {
         var _try_err_3b0: ?anyerror = null;
         _try_blk_3b0: {
 // zbr:test/try_outer_vars.zbr:12
-            const result: i64 = App.risky(base) catch |_tc_183f29c0138| { _try_err_3b0 = _tc_183f29c0138; break :_try_blk_3b0; };
+            const result: i64 = App.risky(base) catch |_tc_20b34200138| { _try_err_3b0 = _tc_20b34200138; break :_try_blk_3b0; };
 // zbr:test/try_outer_vars.zbr:13
             const total: i64 = (result * multiplier);
 // zbr:test/try_outer_vars.zbr:14
@@ -1243,7 +1243,7 @@ const _reflect_App_name: []const u8 = "App";
 const _reflect_App_fields: []const []const u8 = &.{};
 const _reflect_App_field_types: []const []const u8 = &.{};
 
-pub fn main() !void {
+pub fn main() void {
     defer _arena.deinit();
     App.main();
 }

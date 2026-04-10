@@ -1224,7 +1224,7 @@ const _reflect_Math_name: []const u8 = "Math";
 const _reflect_Math_fields: []const []const u8 = &.{};
 const _reflect_Math_field_types: []const []const u8 = &.{};
 
-pub fn main() !void {
+pub fn main() void {
     defer _arena.deinit();
     Math.main();
 }

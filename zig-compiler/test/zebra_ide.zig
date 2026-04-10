@@ -1334,7 +1334,7 @@ const _reflect_IDE_name: []const u8 = "IDE";
 const _reflect_IDE_fields: []const []const u8 = &.{};
 const _reflect_IDE_field_types: []const []const u8 = &.{};
 
-pub fn main() !void {
+pub fn main() void {
     defer _arena.deinit();
     IDE.main();
 }

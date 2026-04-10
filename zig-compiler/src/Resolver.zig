@@ -415,6 +415,48 @@ const Resolver = struct {
     /// Declare a local variable, then resolve its type and initialiser.
     /// The variable is visible to all subsequent statements in `scope`.
     fn walkLocalVar(r: Resolver, n: *Ast.DeclVar, scope: *Scope) anyerror!void {
+        // Sugar: `var x = List(int)` or `var x = HashMap(str, int)` — no `as` annotation.
+        // Recognise the pattern and inject the type + replace the init with a zero-arg call.
+        if (n.type_ == null) {
+            if (n.init) |init| {
+                if (init.* == .call and init.call.callee.* == .ident and init.call.args.len > 0) {
+                    const cname = init.call.callee.ident.name;
+                    if (std.mem.eql(u8, cname, "List") or std.mem.eql(u8, cname, "HashMap")) {
+                        // Build TypeRef args from the call's arg idents.
+                        var type_args = try r.table.arena.alloc(Ast.TypeRef, init.call.args.len);
+                        for (init.call.args, 0..) |arg, i| {
+                            if (arg.value.* == .ident) {
+                                type_args[i] = .{ .named = .{ .name = arg.value.ident.name, .span = arg.value.ident.span } };
+                            } else {
+                                // Not a plain type name — bail out of sugar processing.
+                                type_args = &.{};
+                                break;
+                            }
+                        }
+                        if (type_args.len == init.call.args.len) {
+                            n.type_ = .{ .generic = .{
+                                .span = init.call.span,
+                                .name = cname,
+                                .args = type_args,
+                            } };
+                            // Replace init with a zero-arg call so CodeGen sees `List()`.
+                            const new_callee = try r.table.arena.create(Ast.Expr);
+                            new_callee.* = .{ .ident = init.call.callee.ident };
+                            const new_call = try r.table.arena.create(Ast.ExprCall);
+                            new_call.* = .{
+                                .span      = init.call.span,
+                                .callee    = new_callee,
+                                .type_args = &.{},
+                                .args      = &.{},
+                            };
+                            const new_init = try r.table.arena.create(Ast.Expr);
+                            new_init.* = .{ .call = new_call };
+                            n.init = new_init;
+                        }
+                    }
+                }
+            }
+        }
         if (n.type_) |*tr| try r.resolveTypeRef(tr, scope);
         if (n.init)  |e|   try r.walkExpr(e, scope);
         const sym = try r.table.newSymbol(n.name, .local, .{ .var_ = n });
@@ -537,13 +579,191 @@ const Resolver = struct {
             .stmts => |ss| try r.walkStmts(ss, lambda_scope),
         }
 
+        // --- Implicit capture injection ---
+        // Scan the body for references to outer-scope locals/params that are not
+        // already in lambda_local (explicit captures or params).  For each one,
+        // synthesise a DeclVar and extend e.capture so CodeGen emits the struct
+        // field and initialiser automatically — no `capture` block needed in source.
+        {
+            var free_names = std.ArrayList([]const u8){};
+            defer free_names.deinit(r.diag_alloc);
+            var free_seen = std.StringHashMap(void).init(r.diag_alloc);
+            defer free_seen.deinit();
+            // Walk body with a CLONE of lambda_local so var decls inside stmt bodies
+            // are tracked correctly without polluting the outer lambda_local.
+            var scan_local = try lambda_local.clone();
+            defer scan_local.deinit();
+            switch (e.body) {
+                .expr  => |ex| try r.collectFreeVars(ex, &scan_local, &free_names, &free_seen),
+                .stmts => |ss| for (ss) |stmt| try r.collectFreeVarsStmt(stmt, &scan_local, &free_names, &free_seen),
+            }
+            if (free_names.items.len > 0) {
+                const new_caps = try r.table.arena.alloc(*Ast.DeclVar, e.capture.len + free_names.items.len);
+                for (e.capture, 0..) |cv, i| new_caps[i] = cv;
+                for (free_names.items, e.capture.len..) |fname, i| {
+                    // Synthesise an init ExprIdent that references the outer variable.
+                    const init_expr = try r.table.arena.create(Ast.Expr);
+                    init_expr.* = .{ .ident = .{ .name = fname, .span = e.span } };
+                    const dv = try r.table.arena.create(Ast.DeclVar);
+                    dv.* = .{
+                        .span     = e.span,
+                        .mods     = .{},
+                        .name     = fname,
+                        .type_    = null,
+                        .init     = init_expr,
+                        .is_const = true,
+                    };
+                    new_caps[i] = dv;
+                    // Register in lambda_scope so the body can see it (already walked,
+                    // but needed so checkCaptureBoundary below finds it in lambda_local).
+                    try lambda_local.put(fname, {});
+                }
+                e.capture = new_caps;
+            }
+        }
+
         // --- Capture enforcement ---
-        // Any ExprIdent in the body that resolved to a .local or .param symbol
-        // AND whose name is NOT in lambda_local (params + capture vars) is an
-        // illegal implicit capture.  Emit an error.
+        // After auto-injection above, only genuinely illegal cross-boundary refs remain.
         switch (e.body) {
             .expr  => |ex| try r.checkCaptureBoundary(ex, &lambda_local),
             .stmts => |ss| for (ss) |stmt| try r.checkCaptureBoundaryStmt(stmt, &lambda_local),
+        }
+    }
+
+    /// Collect all ExprIdent references in `expr` that resolve to outer-scope
+    /// locals or params not yet in `local`.  Results are appended to `out`
+    /// (deduplicated via `seen`).
+    fn collectFreeVars(
+        r: Resolver,
+        expr: *const Ast.Expr,
+        local: *const std.StringHashMap(void),
+        out:   *std.ArrayList([]const u8),
+        seen:  *std.StringHashMap(void),
+    ) anyerror!void {
+        switch (expr.*) {
+            .ident => |*e| {
+                if (r.exprs.get(e)) |sym| {
+                    if ((sym.kind == .local or sym.kind == .param) and
+                        !local.contains(e.name) and
+                        !seen.contains(e.name))
+                    {
+                        try seen.put(e.name, {});
+                        try out.append(r.diag_alloc, e.name);
+                    }
+                }
+            },
+            .member        => |e| try r.collectFreeVars(e.object, local, out, seen),
+            .call          => |e| {
+                try r.collectFreeVars(e.callee, local, out, seen);
+                for (e.args) |a| try r.collectFreeVars(a.value, local, out, seen);
+            },
+            .index         => |e| {
+                try r.collectFreeVars(e.object, local, out, seen);
+                try r.collectFreeVars(e.index, local, out, seen);
+            },
+            .binary        => |e| {
+                try r.collectFreeVars(e.left, local, out, seen);
+                try r.collectFreeVars(e.right, local, out, seen);
+            },
+            .unary         => |e| try r.collectFreeVars(e.operand, local, out, seen),
+            .cast          => |e| try r.collectFreeVars(e.expr, local, out, seen),
+            .to_nilable    => |e| try r.collectFreeVars(e.expr, local, out, seen),
+            .to_non_nil    => |e| try r.collectFreeVars(e.expr, local, out, seen),
+            .is_nil        => |e| try r.collectFreeVars(e.expr, local, out, seen),
+            .orelse_       => |e| {
+                try r.collectFreeVars(e.expr, local, out, seen);
+                try r.collectFreeVars(e.fallback, local, out, seen);
+            },
+            .catch_        => |e| {
+                try r.collectFreeVars(e.expr, local, out, seen);
+                try r.collectFreeVars(e.fallback, local, out, seen);
+            },
+            .if_expr       => |e| {
+                try r.collectFreeVars(e.cond, local, out, seen);
+                try r.collectFreeVars(e.then_expr, local, out, seen);
+                try r.collectFreeVars(e.else_expr, local, out, seen);
+            },
+            .all_any       => |e| {
+                try r.collectFreeVars(e.iter, local, out, seen);
+                try r.collectFreeVars(e.cond, local, out, seen);
+            },
+            .list_lit      => |e| { for (e.elems) |el| try r.collectFreeVars(el, local, out, seen); },
+            .array_lit     => |e| { for (e.elems) |el| try r.collectFreeVars(el, local, out, seen); },
+            .dict_lit      => |e| {
+                for (e.entries) |en| {
+                    try r.collectFreeVars(en.key, local, out, seen);
+                    try r.collectFreeVars(en.value, local, out, seen);
+                }
+            },
+            // Nested lambdas have their own boundary — don't recurse into them.
+            .lambda => {},
+            .try_          => |e| try r.collectFreeVars(e.expr, local, out, seen),
+            .tuple_lit     => |e| { for (e.elems) |el| try r.collectFreeVars(el, local, out, seen); },
+            // Atomics: nothing to collect.
+            .int_lit, .float_lit, .bool_lit, .char_lit,
+            .string_lit, .zig_lit, .nil, .this,
+            .old, .string_interp, .slice => {},
+        }
+    }
+
+    /// Statement-level free-variable collector.  Tracks var decls progressively
+    /// so inner-lambda-body locals don't get flagged as free variables.
+    fn collectFreeVarsStmt(
+        r: Resolver,
+        stmt: Ast.Stmt,
+        local: *std.StringHashMap(void),
+        out:   *std.ArrayList([]const u8),
+        seen:  *std.StringHashMap(void),
+    ) anyerror!void {
+        switch (stmt) {
+            .var_    => |n| {
+                if (n.init) |e| try r.collectFreeVars(e, local, out, seen);
+                try local.put(n.name, {});
+            },
+            .assign  => |s| {
+                try r.collectFreeVars(s.target, local, out, seen);
+                try r.collectFreeVars(s.value, local, out, seen);
+            },
+            .return_ => |s| { if (s.value) |v| try r.collectFreeVars(v, local, out, seen); },
+            .print   => |s| { for (s.args) |a| try r.collectFreeVars(a, local, out, seen); },
+            .expr    => |e| try r.collectFreeVars(e, local, out, seen),
+            .if_     => |s| {
+                try r.collectFreeVars(s.cond, local, out, seen);
+                for (s.then_body) |st| try r.collectFreeVarsStmt(st, local, out, seen);
+                for (s.else_ifs)  |ei| {
+                    try r.collectFreeVars(ei.cond, local, out, seen);
+                    for (ei.body) |st| try r.collectFreeVarsStmt(st, local, out, seen);
+                }
+                if (s.else_body) |eb| for (eb) |st| try r.collectFreeVarsStmt(st, local, out, seen);
+            },
+            .while_  => |s| {
+                try r.collectFreeVars(s.cond, local, out, seen);
+                for (s.body) |st| try r.collectFreeVarsStmt(st, local, out, seen);
+            },
+            .for_in  => |s| {
+                try r.collectFreeVars(s.iter, local, out, seen);
+                for (s.body) |st| try r.collectFreeVarsStmt(st, local, out, seen);
+            },
+            .for_num => |s| {
+                try r.collectFreeVars(s.start, local, out, seen);
+                try r.collectFreeVars(s.stop, local, out, seen);
+                for (s.body) |st| try r.collectFreeVarsStmt(st, local, out, seen);
+            },
+            .branch  => |s| {
+                try r.collectFreeVars(s.expr, local, out, seen);
+                for (s.on) |on| {
+                    for (on.values) |v| try r.collectFreeVars(v, local, out, seen);
+                    for (on.body)   |st| try r.collectFreeVarsStmt(st, local, out, seen);
+                }
+                if (s.else_) |eb| for (eb) |st| try r.collectFreeVarsStmt(st, local, out, seen);
+            },
+            .assert  => |s| {
+                try r.collectFreeVars(s.cond, local, out, seen);
+                if (s.message) |m| try r.collectFreeVars(m, local, out, seen);
+            },
+            // raise / try_catch / guard have sub-expressions we skip for now;
+            // they're unusual inside lambdas and can be revisited when needed.
+            else => {},
         }
     }
 

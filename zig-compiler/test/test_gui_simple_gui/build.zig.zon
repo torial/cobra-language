@@ -1,0 +1,21 @@
+.{
+    .name = .app,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.15.0",
+    .fingerprint = 0xc96e70cfa59200d7,
+    .dependencies = .{
+        .zglfw = .{
+            .url = "https://github.com/zig-gamedev/zglfw/archive/0dd29d8073487c9fe1e45e6b729b3aac271d5a71.tar.gz",
+            .hash = "zglfw-0.10.0-dev-zgVDNIG4IQBWN_sfMD-xfC9bJS2hbBN2W7jNlDLovcdC",
+        },
+        .zopengl = .{
+            .url = "https://github.com/zig-gamedev/zopengl/archive/db9d615c742086b39954eef064f957e92dafc7e2.tar.gz",
+            .hash = "zopengl-0.6.0-dev-5-tnz36mDgBuU9pDfag6_B-qCWOJQc5GXiXuZ6z41zQM",
+        },
+        .zgui = .{
+            .url = "https://github.com/zig-gamedev/zgui/archive/d6c4f53c2fbd54673790dc2a5208160a3586ef29.tar.gz",
+            .hash = "zgui-0.6.0-dev--L6sZCJKbgBZGCzVMcwD0bNGmpK6yO-UoIESHX5JiRet",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

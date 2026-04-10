@@ -1218,7 +1218,7 @@ pub const App = struct {
         var _try_err_2948: ?anyerror = null;
         _try_blk_2948: {
 // zbr:test/try_catch_err.zbr:10
-            const result: i64 = App.risky((-3)) catch |_tc_2378b6303b8| { _try_err_2948 = _tc_2378b6303b8; break :_try_blk_2948; };
+            const result: i64 = App.risky((-3)) catch |_tc_263694a03b8| { _try_err_2948 = _tc_263694a03b8; break :_try_blk_2948; };
 // zbr:test/try_catch_err.zbr:11
             std.debug.print("{}\n", .{result});
             break :_try_blk_2948;
@@ -1237,7 +1237,7 @@ const _reflect_App_name: []const u8 = "App";
 const _reflect_App_fields: []const []const u8 = &.{};
 const _reflect_App_field_types: []const []const u8 = &.{};
 
-pub fn main() !void {
+pub fn main() void {
     defer _arena.deinit();
     App.main();
 }

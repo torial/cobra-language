@@ -1254,7 +1254,7 @@ const _reflect_Program_name: []const u8 = "Program";
 const _reflect_Program_fields: []const []const u8 = &.{};
 const _reflect_Program_field_types: []const []const u8 = &.{};
 
-pub fn main() !void {
+pub fn main() void {
     defer _arena.deinit();
     Program.main();
 }

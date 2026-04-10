@@ -1482,7 +1482,7 @@ const _reflect_Person_name: []const u8 = "Person";
 const _reflect_Person_fields: []const []const u8 = &.{"name", "score"};
 const _reflect_Person_field_types: []const []const u8 = &.{"str", "int"};
 
-pub fn main() !void {
+pub fn main() void {
     defer _arena.deinit();
     Program.main();
 }

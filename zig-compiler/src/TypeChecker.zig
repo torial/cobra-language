@@ -1537,47 +1537,69 @@ const TypeChecker = struct {
                         return tc.typeFromOptRef(if (ext_meth.return_type) |*rt| rt else null);
                     }
                 }
-                // Result(T, E) method inference: look up the receiver's declared type.
-                if (mem.object.* == .ident) {
-                    if (tc.resolve.exprs.get(&mem.object.ident)) |sym| {
-                        const declared_tr: ?Ast.TypeRef = switch (sym.decl) {
-                            .var_   => |v| v.type_,
-                            .param  => |p| p.type_,
-                            else    => null,
-                        };
-                        if (declared_tr) |dtr| {
-                            // List(T).at(i) → T
-                            if (dtr == .generic and std.mem.eql(u8, dtr.generic.name, "List") and
-                                std.mem.eql(u8, mem.member, "at") and dtr.generic.args.len >= 1)
-                            {
-                                return tc.typeFromRef(&dtr.generic.args[0]);
-                            }
-                            // HashMap(K,V).fetch(k) → V
-                            if (dtr == .generic and std.mem.eql(u8, dtr.generic.name, "HashMap") and
-                                std.mem.eql(u8, mem.member, "fetch") and dtr.generic.args.len >= 2)
-                            {
-                                return tc.typeFromRef(&dtr.generic.args[1]);
-                            }
-                            if (dtr == .generic and std.mem.eql(u8, dtr.generic.name, "Result")) {
-                                const gtr = dtr.generic;
-                                if (std.mem.eql(u8, mem.member, "okValue") and gtr.args.len >= 1) {
-                                    const inner = tc.typeFromRef(&gtr.args[0]);
-                                    const boxed = tc.map_alloc.create(Type) catch return .unknown;
-                                    boxed.* = inner;
-                                    return Type{ .optional = boxed };
+                // Generic method inference (List.at, HashMap.fetch, Result.*):
+                // Extract the declared TypeRef of the receiver — handles both direct idents
+                // (x.at(0)) and field-access chains (c.items.at(0)).
+                const maybe_dtr: ?Ast.TypeRef = blk: {
+                    if (mem.object.* == .ident) {
+                        if (tc.resolve.exprs.get(&mem.object.ident)) |sym| {
+                            break :blk switch (sym.decl) {
+                                .var_   => |v| v.type_,
+                                .param  => |p| p.type_,
+                                else    => null,
+                            };
+                        }
+                    } else if (mem.object.* == .member) {
+                        // Field-access chain: c.items — look up `items` in the class that `c` belongs to.
+                        // By the time we arrive here, inferExpr(mem.object) at line 1514 has already
+                        // populated expr_types for the inner object (e.g., the `c` ident).
+                        const inner = mem.object.member;
+                        if (tc.expr_types.get(inner.object)) |owner_type| {
+                            if (owner_type == .named) {
+                                const class_sym = owner_type.named;
+                                if (class_sym.own_scope) |scope| {
+                                    if (scope.lookupLocal(inner.member)) |field_sym| {
+                                        if (field_sym.decl == .var_) {
+                                            break :blk field_sym.decl.var_.type_;
+                                        }
+                                    }
                                 }
-                                if (std.mem.eql(u8, mem.member, "errValue") and gtr.args.len >= 2) {
-                                    const inner = tc.typeFromRef(&gtr.args[1]);
-                                    const boxed = tc.map_alloc.create(Type) catch return .unknown;
-                                    boxed.* = inner;
-                                    return Type{ .optional = boxed };
-                                }
-                                if (std.mem.eql(u8, mem.member, "unwrap") and gtr.args.len >= 1)
-                                    return tc.typeFromRef(&gtr.args[0]);
-                                if (std.mem.eql(u8, mem.member, "unwrapOr") and gtr.args.len >= 1)
-                                    return tc.typeFromRef(&gtr.args[0]);
                             }
                         }
+                    }
+                    break :blk null;
+                };
+                if (maybe_dtr) |dtr| {
+                    // List(T).at(i) → T
+                    if (dtr == .generic and std.mem.eql(u8, dtr.generic.name, "List") and
+                        std.mem.eql(u8, mem.member, "at") and dtr.generic.args.len >= 1)
+                    {
+                        return tc.typeFromRef(&dtr.generic.args[0]);
+                    }
+                    // HashMap(K,V).fetch(k) → V
+                    if (dtr == .generic and std.mem.eql(u8, dtr.generic.name, "HashMap") and
+                        std.mem.eql(u8, mem.member, "fetch") and dtr.generic.args.len >= 2)
+                    {
+                        return tc.typeFromRef(&dtr.generic.args[1]);
+                    }
+                    if (dtr == .generic and std.mem.eql(u8, dtr.generic.name, "Result")) {
+                        const gtr = dtr.generic;
+                        if (std.mem.eql(u8, mem.member, "okValue") and gtr.args.len >= 1) {
+                            const inner_t = tc.typeFromRef(&gtr.args[0]);
+                            const boxed = tc.map_alloc.create(Type) catch return .unknown;
+                            boxed.* = inner_t;
+                            return Type{ .optional = boxed };
+                        }
+                        if (std.mem.eql(u8, mem.member, "errValue") and gtr.args.len >= 2) {
+                            const inner_t = tc.typeFromRef(&gtr.args[1]);
+                            const boxed = tc.map_alloc.create(Type) catch return .unknown;
+                            boxed.* = inner_t;
+                            return Type{ .optional = boxed };
+                        }
+                        if (std.mem.eql(u8, mem.member, "unwrap") and gtr.args.len >= 1)
+                            return tc.typeFromRef(&gtr.args[0]);
+                        if (std.mem.eql(u8, mem.member, "unwrapOr") and gtr.args.len >= 1)
+                            return tc.typeFromRef(&gtr.args[0]);
                     }
                 }
                 return tc.inferStdlibMethodType(obj_type, mem.member);
