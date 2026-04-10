@@ -117,3 +117,12 @@ These fail WITH A COMPILER ERROR — that IS the test passing:
 ---
 
 *Last updated: 2026-04-09*
+
+---
+
+### BUG-009: `opt?.field` emits `try opt.?.field` inside `if opt != nil` guard — FIXED
+- **Status:** Fixed 2026-04-09
+- **Was:** `opt?.x` inside an `if opt != nil` block generated `try opt.?.x` instead of `opt.?.x`. Root cause was two-layered:
+  1. `exprHasTry`/`bodyHasRaise` treated all `.try_` nodes as error propagation, causing `Main.main()` to get `anyerror!void` return type even when `opt` was a plain optional.
+  2. `genExpr` for `.try_` used `tc.expr_types.get(inner_ident)` to detect optional unwraps, but inside a nil-guard the ident's TC type is already narrowed to the non-optional inner type — so the optional check always missed.
+- **Fix:** TypeChecker now populates `optional_unwraps: AutoHashMap(*const Ast.Expr, void)` in TypeCheckResult. When inferring a `.try_` node, it checks the inner ident's **declared** type (via `symbolType`, which bypasses nil-narrowing) rather than the inferred type. `exprHasTry` and `genExpr` both consult `optional_unwraps` instead of `expr_types`. The nil-narrowed `genIdent` path (which already emits `name.?`) is detected and the extra `.?` suppressed to prevent double-unwrap.
