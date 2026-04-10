@@ -385,6 +385,10 @@ pub const TypeCheckResult = struct {
     getter_methods: std.StringHashMap(void),
     /// "TypeName.methodName" → DeclMethod* — extension methods from `extend` blocks.
     ext_methods: std.StringHashMap(*const Ast.DeclMethod),
+    /// Set of `.try_` Expr nodes that represent optional-unwraps (`opt?.x`), NOT error
+    /// propagation.  Populated during type-checking by looking at the inner ident's
+    /// DECLARED type (pre nil-narrowing) to distinguish `Foo? → .?` from `Result → try`.
+    optional_unwraps: std.AutoHashMap(*const Ast.Expr, void),
 
     pub fn hasErrors(self: TypeCheckResult) bool {
         for (self.diags) |d| if (d.kind == .err) return true;
@@ -397,6 +401,7 @@ pub const TypeCheckResult = struct {
         self.expr_types.deinit();
         self.getter_methods.deinit();
         self.ext_methods.deinit();
+        self.optional_unwraps.deinit();
     }
 };
 
@@ -529,6 +534,7 @@ pub fn typeCheckPass3(
     imported_modules: ?*const std.StringHashMap(ModuleInterface),
 ) anyerror!TypeCheckResult {
     var expr_types      = std.AutoHashMap(*const Ast.Expr, Type).init(map_alloc);
+    var optional_unwraps = std.AutoHashMap(*const Ast.Expr, void).init(map_alloc);
     var loop_var_types  = std.StringHashMap(Type).init(map_alloc);
     defer loop_var_types.deinit();
     var list_elem_types = std.StringHashMap(Type).init(map_alloc);
@@ -558,16 +564,18 @@ pub fn typeCheckPass3(
         .narrowed_types   = &narrowed_types,
         .ext_methods      = &ext_methods,
         .imported_modules = imported_modules,
+        .optional_unwraps = &optional_unwraps,
     };
 
     try tc.checkModule(module);
 
     return .{
-        .expr_types     = expr_types,
-        .diags          = try diags.toOwnedSlice(diag_alloc),
-        .diag_alloc     = diag_alloc,
-        .getter_methods = getter_methods,
-        .ext_methods    = ext_methods,
+        .expr_types       = expr_types,
+        .diags            = try diags.toOwnedSlice(diag_alloc),
+        .diag_alloc       = diag_alloc,
+        .getter_methods   = getter_methods,
+        .ext_methods      = ext_methods,
+        .optional_unwraps = optional_unwraps,
     };
 }
 
@@ -608,6 +616,9 @@ const TypeChecker = struct {
     /// Type surfaces of `use`d modules, keyed by Zebra dotted path (e.g. `"Math"`).
     /// Null when no module interfaces were provided (deps not compiled with type extraction).
     imported_modules: ?*const std.StringHashMap(ModuleInterface) = null,
+    /// `.try_` nodes confirmed to be optional-unwraps (inner declared type is nilable).
+    /// Shared across TypeChecker copies; written by inferExprInner for `.try_`.
+    optional_unwraps: *std.AutoHashMap(*const Ast.Expr, void),
 
     fn withReturn(tc: TypeChecker, ret: Type) TypeChecker {
         var c = tc; c.return_type = ret; return c;
@@ -897,6 +908,26 @@ const TypeChecker = struct {
                                 if (result_ok_type) |t| try tc.narrowed_types.put(bname, t);
                             } else if (std.mem.eql(u8, variant, "err")) {
                                 if (result_err_type) |t| try tc.narrowed_types.put(bname, t);
+                            } else {
+                                // Union variant payload: on Shape.circle as r → r has the payload type.
+                                // Look up the variant symbol in the subject union's scope.
+                                if (subj_type == .named) {
+                                    const union_sym = subj_type.named;
+                                    if (union_sym.kind == .union_) {
+                                        if (union_sym.own_scope) |scope| {
+                                            if (scope.lookupLocal(variant)) |vsym| {
+                                                if (vsym.decl == .union_variant) {
+                                                    const uv = vsym.decl.union_variant;
+                                                    if (uv.payload) |*payload_ref| {
+                                                        const pt = tc.typeFromRef(payload_ref);
+                                                        if (pt != .unknown)
+                                                            try tc.narrowed_types.put(bname, pt);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1137,8 +1168,18 @@ const TypeChecker = struct {
             .array_lit      => |e| blk: { for (e.elems) |el| _ = try tc.inferExpr(el);  break :blk .unknown; },
             .all_any        => |e| blk: { _ = try tc.inferExpr(e.iter); _ = try tc.inferExpr(e.cond); break :blk .bool; },
             .old            => |e| try tc.inferExpr(e.expr),
-            // try expr — propagates error; result type is the unwrapped value type
-            .try_           => |e| try tc.inferExpr(e.expr),
+            // try expr — may be error propagation OR optional-unwrap (`opt?.x`).
+            // Detect optional-unwrap by checking the inner ident's DECLARED type
+            // (bypassing nil-narrowing which would make ?Foo look like Foo here).
+            .try_ => |e| blk: {
+                const inner_t = try tc.inferExpr(e.expr);
+                const is_opt_unwrap = if (e.expr.* == .ident) opt: {
+                    const sym = tc.resolve.exprs.get(&e.expr.ident) orelse break :opt false;
+                    break :opt tc.symbolType(sym) == .optional;
+                } else inner_t == .optional;
+                if (is_opt_unwrap) try tc.optional_unwraps.put(expr, {});
+                break :blk inner_t;
+            },
             // Tuple literal: infer each element type and build a tuple Type.
             .tuple_lit      => |e| blk: {
                 const elems = try tc.map_alloc.alloc(Type, e.elems.len);
@@ -1358,6 +1399,24 @@ const TypeChecker = struct {
                     if (std.mem.eql(u8, mem.member, "readLines")) return .unknown; // List(str)
                     if (std.mem.eql(u8, mem.member, "listDir"))   return .unknown; // List(str)
                     if (std.mem.eql(u8, mem.member, "exists"))    return .bool;
+                    return .void_;
+                }
+                // Dir.* static methods.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Dir")) {
+                    _ = try tc.inferExpr(mem.object);
+                    if (std.mem.eql(u8, mem.member, "exists")) return .bool;
+                    if (std.mem.eql(u8, mem.member, "list"))   return .unknown; // List(str)
+                    return .void_;
+                }
+                // Path.* static methods.
+                if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Path")) {
+                    _ = try tc.inferExpr(mem.object);
+                    if (std.mem.eql(u8, mem.member, "isAbsolute")) return .bool;
+                    if (std.mem.eql(u8, mem.member, "join") or
+                        std.mem.eql(u8, mem.member, "basename") or
+                        std.mem.eql(u8, mem.member, "dirname") or
+                        std.mem.eql(u8, mem.member, "ext") or
+                        std.mem.eql(u8, mem.member, "stem")) return .string;
                     return .void_;
                 }
                 // Math.* static methods.

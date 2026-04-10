@@ -138,7 +138,7 @@ const Resolver = struct {
             .property  => |n| try r.walkProperty(n, scope),
             .var_      => |n| try r.walkVarDecl(n, scope),
             .init      => |n| try r.walkInit(n, scope),
-            .union_    => {},  // no body to resolve (variants have no statements)
+            .union_    => |n| try r.walkUnion(n, scope),
         }
     }
 
@@ -180,6 +180,13 @@ const Resolver = struct {
         const sym   = scope.lookupLocal(n.name) orelse return;
         const inner = sym.own_scope orelse return;
         for (n.members) |m| try r.walkMember(m, inner);
+    }
+
+    fn walkUnion(r: Resolver, n: *Ast.DeclUnion, scope: *Scope) anyerror!void {
+        // Resolve each variant's payload TypeRef so TypeChecker can infer branch binding types.
+        for (n.variants) |*v| {
+            if (v.payload) |*payload| try r.resolveTypeRef(payload, scope);
+        }
     }
 
     fn walkEnum(r: Resolver, n: *Ast.DeclEnum, scope: *Scope) anyerror!void {

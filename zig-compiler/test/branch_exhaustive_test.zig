@@ -1208,11 +1208,11 @@ pub const Main = struct {
         switch (s) {
             .circle => |r| {
 // zbr:test/branch_exhaustive_test.zbr:13
-                std.debug.print("{any}\n", .{r});
+                std.debug.print("{d}\n", .{r});
             },
             .rect => |n| {
 // zbr:test/branch_exhaustive_test.zbr:15
-                std.debug.print("{any}\n", .{n});
+                std.debug.print("{}\n", .{n});
             },
             .point => {
 // zbr:test/branch_exhaustive_test.zbr:17
@@ -1223,7 +1223,7 @@ pub const Main = struct {
         switch (s) {
             .circle => |r| {
 // zbr:test/branch_exhaustive_test.zbr:22
-                std.debug.print("{any}\n", .{r});
+                std.debug.print("{d}\n", .{r});
             },
             else => {
 // zbr:test/branch_exhaustive_test.zbr:24
@@ -1236,7 +1236,7 @@ pub const Main = struct {
         switch (s2) {
             .rect => |n| {
 // zbr:test/branch_exhaustive_test.zbr:30
-                std.debug.print("{any}\n", .{n});
+                std.debug.print("{}\n", .{n});
             },
             else => {
 // zbr:test/branch_exhaustive_test.zbr:31

@@ -1,10 +1,45 @@
+# Test File, Dir, and Path stdlib APIs
+
 class Main
-    shared
-        def main
-            File.write("test/_tmp_file.txt", "hello from zebra\n")
-            var content = File.read("test/_tmp_file.txt")
-            print content
-            var exists = File.exists("test/_tmp_file.txt")
-            print exists
-            var missing = File.exists("test/_no_such_file.txt")
-            print missing
+    shared def main()
+        # ── File basics ──────────────────────────────────────────────────────────
+        var path = "/tmp/zebra_file_test.txt"
+        var copy_path = "/tmp/zebra_file_copy.txt"
+        var renamed_path = "/tmp/zebra_file_renamed.txt"
+
+        File.write(path, "line1")
+        File.append(path, "\nline2")
+        File.append(path, "\nline3")
+
+        var content = File.read(path)
+        print content
+
+        var exists = File.exists(path)
+        print exists
+
+        File.copy(path, copy_path)
+        print File.exists(copy_path)
+
+        File.rename(copy_path, renamed_path)
+        print File.exists(renamed_path)
+        print File.exists(copy_path)
+
+        File.delete(path)
+        File.delete(renamed_path)
+        print File.exists(path)
+
+        # ── Dir basics ───────────────────────────────────────────────────────────
+        var dir_path = "/tmp/zebra_dir_test"
+        Dir.create(dir_path)
+        print Dir.exists(dir_path)
+        Dir.delete(dir_path)
+        print Dir.exists(dir_path)
+
+        # ── Path basics ──────────────────────────────────────────────────────────
+        var full_path = "/home/user/documents/report.txt"
+        print Path.basename(full_path)
+        print Path.dirname(full_path)
+        print Path.ext(full_path)
+        print Path.stem(full_path)
+        print Path.isAbsolute(full_path)
+        print Path.isAbsolute("relative/path")

@@ -1220,11 +1220,11 @@ pub const Main = struct {
         switch (e) {
             .num => |n| {
 // zbr:test/branch_edge_test.zbr:18
-                std.debug.print("{any}\n", .{n});
+                std.debug.print("{}\n", .{n});
             },
             .add => |n| {
 // zbr:test/branch_edge_test.zbr:20
-                std.debug.print("{any}\n", .{n});
+                std.debug.print("{}\n", .{n});
             },
             .neg => {
 // zbr:test/branch_edge_test.zbr:22
@@ -1237,11 +1237,11 @@ pub const Main = struct {
         switch (e2) {
             .num => |n| {
 // zbr:test/branch_edge_test.zbr:28
-                std.debug.print("{any}\n", .{n});
+                std.debug.print("{}\n", .{n});
             },
             .add => |n| {
 // zbr:test/branch_edge_test.zbr:30
-                std.debug.print("{any}\n", .{n});
+                std.debug.print("{}\n", .{n});
             },
             .neg => {
 // zbr:test/branch_edge_test.zbr:32

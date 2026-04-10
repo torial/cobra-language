@@ -1196,21 +1196,91 @@ const _gui_stub_backend = _GuiBackend{
 const _gui_active_backend: _GuiBackend = _gui_stub_backend;
 pub const Main = struct {
     pub fn main() void {
-// zbr:test/file_io_test.zbr:4
-        (std.fs.cwd().writeFile(.{ .sub_path = "test/_tmp_file.txt", .data = "hello from zebra\n" }) catch @panic("File.write error"));
-// zbr:test/file_io_test.zbr:5
-        const content = (std.fs.cwd().readFileAlloc(_allocator, "test/_tmp_file.txt", std.math.maxInt(usize)) catch @panic("File.read error"));
-        defer _allocator.free(content);
 // zbr:test/file_io_test.zbr:6
-        std.debug.print("{s}\n", .{content});
+        const path = "/tmp/zebra_file_test.txt";
 // zbr:test/file_io_test.zbr:7
-        const exists = (blk: { std.fs.cwd().access("test/_tmp_file.txt", .{}) catch break :blk false; break :blk true; });
+        const copy_path = "/tmp/zebra_file_copy.txt";
 // zbr:test/file_io_test.zbr:8
-        std.debug.print("{}\n", .{exists});
-// zbr:test/file_io_test.zbr:9
-        const missing = (blk: { std.fs.cwd().access("test/_no_such_file.txt", .{}) catch break :blk false; break :blk true; });
+        const renamed_path = "/tmp/zebra_file_renamed.txt";
 // zbr:test/file_io_test.zbr:10
-        std.debug.print("{}\n", .{missing});
+        (std.fs.cwd().writeFile(.{ .sub_path = path, .data = "line1" }) catch @panic("File.write error"));
+// zbr:test/file_io_test.zbr:11
+        (blk: {
+            const _fa_path = path;
+            const _fa_file = std.fs.cwd().openFile(_fa_path, .{ .mode = .read_write })
+                catch std.fs.cwd().createFile(_fa_path, .{}) catch @panic("File.append error");
+            defer _fa_file.close();
+            _ = _fa_file.seekFromEnd(0) catch @panic("File.append seek error");
+            _fa_file.writeAll("\nline2") catch @panic("File.append write error");
+            break :blk {};
+        });
+// zbr:test/file_io_test.zbr:12
+        (blk: {
+            const _fa_path = path;
+            const _fa_file = std.fs.cwd().openFile(_fa_path, .{ .mode = .read_write })
+                catch std.fs.cwd().createFile(_fa_path, .{}) catch @panic("File.append error");
+            defer _fa_file.close();
+            _ = _fa_file.seekFromEnd(0) catch @panic("File.append seek error");
+            _fa_file.writeAll("\nline3") catch @panic("File.append write error");
+            break :blk {};
+        });
+// zbr:test/file_io_test.zbr:14
+        const content = (std.fs.cwd().readFileAlloc(_allocator, path, std.math.maxInt(usize)) catch @panic("File.read error"));
+        defer _allocator.free(content);
+// zbr:test/file_io_test.zbr:15
+        std.debug.print("{s}\n", .{content});
+// zbr:test/file_io_test.zbr:17
+        const exists = (blk: { std.fs.cwd().access(path, .{}) catch break :blk false; break :blk true; });
+// zbr:test/file_io_test.zbr:18
+        std.debug.print("{}\n", .{exists});
+// zbr:test/file_io_test.zbr:20
+        (blk: {
+            const _fc_data = std.fs.cwd().readFileAlloc(_allocator, path, std.math.maxInt(usize)) catch @panic("File.copy read error");
+            std.fs.cwd().writeFile(.{ .sub_path = copy_path, .data = _fc_data }) catch @panic("File.copy write error");
+            break :blk {};
+        });
+// zbr:test/file_io_test.zbr:21
+        std.debug.print("{}\n", .{(blk: { std.fs.cwd().access(copy_path, .{}) catch break :blk false; break :blk true; })});
+// zbr:test/file_io_test.zbr:23
+        (std.fs.cwd().rename(copy_path, renamed_path) catch @panic("File.rename error"));
+// zbr:test/file_io_test.zbr:24
+        std.debug.print("{}\n", .{(blk: { std.fs.cwd().access(renamed_path, .{}) catch break :blk false; break :blk true; })});
+// zbr:test/file_io_test.zbr:25
+        std.debug.print("{}\n", .{(blk: { std.fs.cwd().access(copy_path, .{}) catch break :blk false; break :blk true; })});
+// zbr:test/file_io_test.zbr:27
+        (std.fs.cwd().deleteFile(path) catch |_fd_err| { if (_fd_err != error.FileNotFound) @panic("File.delete error"); });
+// zbr:test/file_io_test.zbr:28
+        (std.fs.cwd().deleteFile(renamed_path) catch |_fd_err| { if (_fd_err != error.FileNotFound) @panic("File.delete error"); });
+// zbr:test/file_io_test.zbr:29
+        std.debug.print("{}\n", .{(blk: { std.fs.cwd().access(path, .{}) catch break :blk false; break :blk true; })});
+// zbr:test/file_io_test.zbr:32
+        const dir_path = "/tmp/zebra_dir_test";
+// zbr:test/file_io_test.zbr:33
+        (std.fs.cwd().makeDir(dir_path) catch |_dc_err| { if (_dc_err != error.PathAlreadyExists) @panic("Dir.create error"); });
+// zbr:test/file_io_test.zbr:34
+        std.debug.print("{}\n", .{(blk: { var _de_d = std.fs.cwd().openDir(dir_path, .{}) catch break :blk false; _de_d.close(); break :blk true; })});
+// zbr:test/file_io_test.zbr:35
+        (std.fs.cwd().deleteDir(dir_path) catch |_dd_err| { if (_dd_err != error.FileNotFound) @panic("Dir.delete error"); });
+// zbr:test/file_io_test.zbr:36
+        std.debug.print("{}\n", .{(blk: { var _de_d = std.fs.cwd().openDir(dir_path, .{}) catch break :blk false; _de_d.close(); break :blk true; })});
+// zbr:test/file_io_test.zbr:39
+        const full_path = "/home/user/documents/report.txt";
+// zbr:test/file_io_test.zbr:40
+        std.debug.print("{s}\n", .{(std.fs.path.basename(full_path))});
+// zbr:test/file_io_test.zbr:41
+        std.debug.print("{s}\n", .{(std.fs.path.dirname(full_path) orelse "")});
+// zbr:test/file_io_test.zbr:42
+        std.debug.print("{s}\n", .{(std.fs.path.extension(full_path))});
+// zbr:test/file_io_test.zbr:43
+        std.debug.print("{s}\n", .{(blk: {
+            const _ps_base = std.fs.path.basename(full_path);
+            const _ps_ext = std.fs.path.extension(_ps_base);
+            break :blk _ps_base[0 .. _ps_base.len - _ps_ext.len];
+        })});
+// zbr:test/file_io_test.zbr:44
+        std.debug.print("{}\n", .{(std.fs.path.isAbsolute(full_path))});
+// zbr:test/file_io_test.zbr:45
+        std.debug.print("{}\n", .{(std.fs.path.isAbsolute("relative/path"))});
     }
 
 };

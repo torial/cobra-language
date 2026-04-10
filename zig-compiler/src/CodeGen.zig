@@ -382,34 +382,34 @@ fn detailsTypeName(expr: *const Ast.Expr) []const u8 {
     };
 }
 
-fn bodyHasRaise(stmts: []const Ast.Stmt) bool {
+fn bodyHasRaise(stmts: []const Ast.Stmt, tc_opt: ?*const TypeChecker.TypeCheckResult) bool {
     for (stmts) |stmt| {
         switch (stmt) {
             .raise   => return true,
-            .var_    => |n| { if (n.init) |e| if (exprHasTry(e)) return true; },
-            .assign  => |s| { if (exprHasTry(s.value)) return true; },
-            .return_ => |s| { if (s.value) |v| if (exprHasTry(v)) return true; },
-            .expr    => |e| if (exprHasTry(e)) return true,
-            .print   => |s| { for (s.args) |a| if (exprHasTry(a)) return true; },
+            .var_    => |n| { if (n.init) |e| if (exprHasTry(e, tc_opt)) return true; },
+            .assign  => |s| { if (exprHasTry(s.value, tc_opt)) return true; },
+            .return_ => |s| { if (s.value) |v| if (exprHasTry(v, tc_opt)) return true; },
+            .expr    => |e| if (exprHasTry(e, tc_opt)) return true,
+            .print   => |s| { for (s.args) |a| if (exprHasTry(a, tc_opt)) return true; },
             .if_     => |s| {
-                if (exprHasTry(s.cond)) return true;
-                if (bodyHasRaise(s.then_body)) return true;
+                if (exprHasTry(s.cond, tc_opt)) return true;
+                if (bodyHasRaise(s.then_body, tc_opt)) return true;
                 for (s.else_ifs) |ei| {
-                    if (exprHasTry(ei.cond)) return true;
-                    if (bodyHasRaise(ei.body)) return true;
+                    if (exprHasTry(ei.cond, tc_opt)) return true;
+                    if (bodyHasRaise(ei.body, tc_opt)) return true;
                 }
-                if (s.else_body) |eb| if (bodyHasRaise(eb)) return true;
+                if (s.else_body) |eb| if (bodyHasRaise(eb, tc_opt)) return true;
             },
-            .while_  => |s| { if (exprHasTry(s.cond)) return true; if (bodyHasRaise(s.body)) return true; },
-            .for_in  => |s| if (bodyHasRaise(s.body)) return true,
-            .for_num => |s| if (bodyHasRaise(s.body)) return true,
+            .while_  => |s| { if (exprHasTry(s.cond, tc_opt)) return true; if (bodyHasRaise(s.body, tc_opt)) return true; },
+            .for_in  => |s| if (bodyHasRaise(s.body, tc_opt)) return true,
+            .for_num => |s| if (bodyHasRaise(s.body, tc_opt)) return true,
             .branch  => |s| {
-                for (s.on) |on| if (bodyHasRaise(on.body)) return true;
-                if (s.else_) |eb| if (bodyHasRaise(eb)) return true;
+                for (s.on) |on| if (bodyHasRaise(on.body, tc_opt)) return true;
+                if (s.else_) |eb| if (bodyHasRaise(eb, tc_opt)) return true;
             },
-            .with    => |s| if (bodyHasRaise(s.body)) return true,
-            .defer_  => |s| return bodyHasRaise(&.{s.body}),
-            .guard   => |s| { if (exprHasTry(s.cond)) return true; if (bodyHasRaise(s.else_body)) return true; },
+            .with    => |s| if (bodyHasRaise(s.body, tc_opt)) return true,
+            .defer_  => |s| return bodyHasRaise(&.{s.body}, tc_opt),
+            .guard   => |s| { if (exprHasTry(s.cond, tc_opt)) return true; if (bodyHasRaise(s.else_body, tc_opt)) return true; },
             .try_catch => {}, // try/catch absorbs raises — don't propagate
             .destruct => {},
             else => {},
@@ -422,34 +422,34 @@ fn bodyHasRaise(stmts: []const Ast.Stmt) bool {
 /// the body contains either a `raise` statement or a `try expr` expression (both of
 /// which route errors through the tracking variable).
 /// Does not recurse into nested try/catch — inner blocks have their own variables.
-fn bodyNeedsErrVar(stmts: []const Ast.Stmt) bool {
+fn bodyNeedsErrVar(stmts: []const Ast.Stmt, tc_opt: ?*const TypeChecker.TypeCheckResult) bool {
     for (stmts) |stmt| {
         switch (stmt) {
             .raise   => return true,
-            .var_    => |n| { if (n.init) |e| if (exprHasTry(e)) return true; },
-            .assign  => |s| { if (exprHasTry(s.value)) return true; },
-            .return_ => |s| { if (s.value) |v| if (exprHasTry(v)) return true; },
-            .expr    => |e| if (exprHasTry(e)) return true,
-            .print   => |s| { for (s.args) |a| if (exprHasTry(a)) return true; },
+            .var_    => |n| { if (n.init) |e| if (exprHasTry(e, tc_opt)) return true; },
+            .assign  => |s| { if (exprHasTry(s.value, tc_opt)) return true; },
+            .return_ => |s| { if (s.value) |v| if (exprHasTry(v, tc_opt)) return true; },
+            .expr    => |e| if (exprHasTry(e, tc_opt)) return true,
+            .print   => |s| { for (s.args) |a| if (exprHasTry(a, tc_opt)) return true; },
             .if_     => |s| {
-                if (exprHasTry(s.cond)) return true;
-                if (bodyNeedsErrVar(s.then_body)) return true;
+                if (exprHasTry(s.cond, tc_opt)) return true;
+                if (bodyNeedsErrVar(s.then_body, tc_opt)) return true;
                 for (s.else_ifs) |ei| {
-                    if (exprHasTry(ei.cond)) return true;
-                    if (bodyNeedsErrVar(ei.body)) return true;
+                    if (exprHasTry(ei.cond, tc_opt)) return true;
+                    if (bodyNeedsErrVar(ei.body, tc_opt)) return true;
                 }
-                if (s.else_body) |eb| if (bodyNeedsErrVar(eb)) return true;
+                if (s.else_body) |eb| if (bodyNeedsErrVar(eb, tc_opt)) return true;
             },
-            .while_  => |s| { if (exprHasTry(s.cond)) return true; if (bodyNeedsErrVar(s.body)) return true; },
-            .for_in  => |s| if (bodyNeedsErrVar(s.body)) return true,
-            .for_num => |s| if (bodyNeedsErrVar(s.body)) return true,
+            .while_  => |s| { if (exprHasTry(s.cond, tc_opt)) return true; if (bodyNeedsErrVar(s.body, tc_opt)) return true; },
+            .for_in  => |s| if (bodyNeedsErrVar(s.body, tc_opt)) return true,
+            .for_num => |s| if (bodyNeedsErrVar(s.body, tc_opt)) return true,
             .branch  => |s| {
-                for (s.on) |on| if (bodyNeedsErrVar(on.body)) return true;
-                if (s.else_) |eb| if (bodyNeedsErrVar(eb)) return true;
+                for (s.on) |on| if (bodyNeedsErrVar(on.body, tc_opt)) return true;
+                if (s.else_) |eb| if (bodyNeedsErrVar(eb, tc_opt)) return true;
             },
-            .with    => |s| if (bodyNeedsErrVar(s.body)) return true,
-            .defer_  => |s| return bodyNeedsErrVar(&.{s.body}),
-            .guard   => |s| { if (exprHasTry(s.cond)) return true; if (bodyNeedsErrVar(s.else_body)) return true; },
+            .with    => |s| if (bodyNeedsErrVar(s.body, tc_opt)) return true,
+            .defer_  => |s| return bodyNeedsErrVar(&.{s.body}, tc_opt),
+            .guard   => |s| { if (exprHasTry(s.cond, tc_opt)) return true; if (bodyNeedsErrVar(s.else_body, tc_opt)) return true; },
             .try_catch => {}, // inner try has its own err variable
             .destruct => {},
             else => {},
@@ -489,22 +489,30 @@ fn bodyHasThrowsCall(stmts: []const Ast.Stmt, resolve: *const Resolver.ResolveRe
     return false;
 }
 
-fn exprHasTry(expr: *const Ast.Expr) bool {
+fn exprHasTry(expr: *const Ast.Expr, tc_opt: ?*const TypeChecker.TypeCheckResult) bool {
     return switch (expr.*) {
-        .try_   => true,
-        .binary => |e| exprHasTry(e.left) or exprHasTry(e.right),
-        .unary  => |e| exprHasTry(e.operand),
+        .try_ => |_| blk: {
+            // TC records optional-unwrap `.try_` nodes in `optional_unwraps` by
+            // checking the inner ident's DECLARED type (pre nil-narrowing).
+            // Only count this as a real error propagation if it's NOT an opt-unwrap.
+            if (tc_opt) |tc| {
+                if (tc.optional_unwraps.contains(expr)) break :blk false;
+            }
+            break :blk true;
+        },
+        .binary => |e| exprHasTry(e.left, tc_opt) or exprHasTry(e.right, tc_opt),
+        .unary  => |e| exprHasTry(e.operand, tc_opt),
         .call   => |e| blk: {
-            if (exprHasTry(e.callee)) break :blk true;
-            for (e.args) |a| if (exprHasTry(a.value)) break :blk true;
+            if (exprHasTry(e.callee, tc_opt)) break :blk true;
+            for (e.args) |a| if (exprHasTry(a.value, tc_opt)) break :blk true;
             break :blk false;
         },
-        .member    => |e| exprHasTry(e.object),
-        .orelse_   => |e| exprHasTry(e.expr) or exprHasTry(e.fallback),
-        .catch_    => |e| exprHasTry(e.expr) or exprHasTry(e.fallback),
-        .to_non_nil => |e| exprHasTry(e.expr),
-        .to_nilable => |e| exprHasTry(e.expr),
-        .is_nil    => |e| exprHasTry(e.expr),
+        .member    => |e| exprHasTry(e.object, tc_opt),
+        .orelse_   => |e| exprHasTry(e.expr, tc_opt) or exprHasTry(e.fallback, tc_opt),
+        .catch_    => |e| exprHasTry(e.expr, tc_opt) or exprHasTry(e.fallback, tc_opt),
+        .to_non_nil => |e| exprHasTry(e.expr, tc_opt),
+        .to_nilable => |e| exprHasTry(e.expr, tc_opt),
+        .is_nil    => |e| exprHasTry(e.expr, tc_opt),
         else => false,
     };
 }
@@ -2589,7 +2597,7 @@ const Generator = struct {
             // "error: ZebraError" with a backtrace.
             const main_throws = findMainMethod(module.decls) != null and blk: {
                 const m = findMainMethod(module.decls).?;
-                break :blk m.throws or (m.body != null and bodyHasRaise(m.body.?));
+                break :blk m.throws or (m.body != null and bodyHasRaise(m.body.?, g.tc));
             };
             if (main_throws) {
                 try g.w.print(
@@ -3051,7 +3059,7 @@ const Generator = struct {
         }
         try g.w.writeAll(") ");
 
-        const needs_error = m.throws or (m.body != null and bodyHasRaise(m.body.?));
+        const needs_error = m.throws or (m.body != null and bodyHasRaise(m.body.?, g.tc));
         if (needs_error) try g.w.writeAll("anyerror!");
         if (m.return_type) |rt| try g.genType(rt) else try g.w.writeAll("void");
 
@@ -3178,7 +3186,7 @@ const Generator = struct {
 
         // Emit anyerror! if explicitly annotated OR if the body contains raise/try.
         const needs_error = n.throws or
-            (n.body != null and bodyHasRaise(n.body.?));
+            (n.body != null and bodyHasRaise(n.body.?, g.tc));
         if (needs_error) try g.w.writeAll("anyerror!");
         if (n.return_type) |rt| try g.genType(rt) else try g.w.writeAll("void");
 
@@ -3944,6 +3952,68 @@ const Generator = struct {
             try g.w.writeAll("})");
             return true;
         }
+        if (std.mem.eql(u8, method, "append")) {
+            // File.append(path, content) → append content; creates file if absent.
+            // openFile with read_write; fall back to createFile if not found.
+            try g.w.writeAll("(blk: {\n");
+            const bg = g.indented();
+            try bg.writeIndent();
+            try bg.w.writeAll("const _fa_path = ");
+            if (args.len >= 1) try bg.genExpr(args[0].value) else try bg.w.writeAll("\"\"");
+            try bg.w.writeAll(";\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("const _fa_file = std.fs.cwd().openFile(_fa_path, .{ .mode = .read_write })\n");
+            try bg.indented().writeIndent();
+            try bg.indented().w.writeAll("catch std.fs.cwd().createFile(_fa_path, .{}) catch @panic(\"File.append error\");\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("defer _fa_file.close();\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("_ = _fa_file.seekFromEnd(0) catch @panic(\"File.append seek error\");\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("_fa_file.writeAll(");
+            if (args.len >= 2) try bg.genExpr(args[1].value) else try bg.w.writeAll("\"\"");
+            try bg.w.writeAll(") catch @panic(\"File.append write error\");\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("break :blk {};\n");
+            try g.writeIndent();
+            try g.w.writeAll("})");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "delete")) {
+            // File.delete(path) → delete file (ignores not-found)
+            try g.w.writeAll("(std.fs.cwd().deleteFile(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(") catch |_fd_err| { if (_fd_err != error.FileNotFound) @panic(\"File.delete error\"); })");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "rename")) {
+            // File.rename(oldPath, newPath) → rename/move within cwd.
+            // std.fs.Dir.rename(old, new) — both relative to the same Dir.
+            try g.w.writeAll("(std.fs.cwd().rename(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(", ");
+            if (args.len >= 2) try g.genExpr(args[1].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(") catch @panic(\"File.rename error\"))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "copy")) {
+            // File.copy(src, dst) → copy file contents
+            try g.w.writeAll("(blk: {\n");
+            const bg = g.indented();
+            try bg.writeIndent();
+            try bg.w.writeAll("const _fc_data = std.fs.cwd().readFileAlloc(_allocator, ");
+            if (args.len >= 1) try bg.genExpr(args[0].value) else try bg.w.writeAll("\"\"");
+            try bg.w.writeAll(", std.math.maxInt(usize)) catch @panic(\"File.copy read error\");\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("std.fs.cwd().writeFile(.{ .sub_path = ");
+            if (args.len >= 2) try bg.genExpr(args[1].value) else try bg.w.writeAll("\"\"");
+            try bg.w.writeAll(", .data = _fc_data }) catch @panic(\"File.copy write error\");\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("break :blk {};\n");
+            try g.writeIndent();
+            try g.w.writeAll("})");
+            return true;
+        }
         if (std.mem.eql(u8, method, "listDir")) {
             // File.listDir(path) → ArrayList([]const u8) of entry names in directory.
             try g.w.writeAll("(blk: {\n");
@@ -3968,6 +4038,137 @@ const Generator = struct {
             try bg.w.writeAll("break :blk _ld_list;\n");
             try g.writeIndent();
             try g.w.writeAll("})");
+            return true;
+        }
+        return false;
+    }
+
+    // ── Dir static methods ────────────────────────────────────────────────────
+    //
+    //   Dir.create(path)        → void (creates; no-op if exists)
+    //   Dir.createAll(path)     → void (creates all intermediate dirs)
+    //   Dir.delete(path)        → void (removes empty dir; ignores not-found)
+    //   Dir.deleteAll(path)     → void (removes dir tree recursively)
+    //   Dir.exists(path)        → bool
+    //   Dir.list(path)          → List(str)  (entry names)
+    fn genDirCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "create")) {
+            try g.w.writeAll("(std.fs.cwd().makeDir(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(") catch |_dc_err| { if (_dc_err != error.PathAlreadyExists) @panic(\"Dir.create error\"); })");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "createAll")) {
+            try g.w.writeAll("(std.fs.cwd().makePath(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(") catch @panic(\"Dir.createAll error\"))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "delete")) {
+            try g.w.writeAll("(std.fs.cwd().deleteDir(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(") catch |_dd_err| { if (_dd_err != error.FileNotFound) @panic(\"Dir.delete error\"); })");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "deleteAll")) {
+            try g.w.writeAll("(std.fs.cwd().deleteTree(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(") catch @panic(\"Dir.deleteAll error\"))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "exists")) {
+            // Open the directory to check; access() only works for files.
+            try g.w.writeAll("(blk: { var _de_d = std.fs.cwd().openDir(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(", .{}) catch break :blk false; _de_d.close(); break :blk true; })");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "list")) {
+            // Dir.list(path) → ArrayList([]const u8) of entry names
+            try g.w.writeAll("(blk: {\n");
+            const bg = g.indented();
+            try bg.writeIndent();
+            try bg.w.writeAll("var _dl_dir = std.fs.cwd().openDir(");
+            if (args.len >= 1) try bg.genExpr(args[0].value) else try bg.w.writeAll("\".\"\n");
+            try bg.w.writeAll(", .{ .iterate = true }) catch @panic(\"Dir.list error\");\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("defer _dl_dir.close();\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("var _dl_list = std.ArrayList([]const u8){};\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("var _dl_iter = _dl_dir.iterate();\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("while (_dl_iter.next() catch null) |_dl_entry| {\n");
+            try bg.indented().writeIndent();
+            try bg.indented().w.writeAll("_dl_list.append(_allocator, _allocator.dupe(u8, _dl_entry.name) catch @panic(\"OOM\")) catch @panic(\"OOM\");\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("}\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("break :blk _dl_list;\n");
+            try g.writeIndent();
+            try g.w.writeAll("})");
+            return true;
+        }
+        return false;
+    }
+
+    // ── Path static methods ───────────────────────────────────────────────────
+    //
+    //   Path.join(a, b)     → str   (join two path segments)
+    //   Path.basename(path) → str   (last component, no trailing separator)
+    //   Path.dirname(path)  → str   (parent directory)
+    //   Path.ext(path)      → str   (file extension including dot, or "" if none)
+    //   Path.stem(path)     → str   (basename without extension)
+    //   Path.isAbsolute(path) → bool
+    fn genPathCall(g: Generator, method: []const u8, args: []const Ast.Arg) anyerror!bool {
+        if (std.mem.eql(u8, method, "join")) {
+            // Path.join(a, b) — use std.fs.path.join
+            try g.w.writeAll("(std.fs.path.join(_allocator, &.{");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            if (args.len >= 2) { try g.w.writeAll(", "); try g.genExpr(args[1].value); }
+            if (args.len >= 3) { try g.w.writeAll(", "); try g.genExpr(args[2].value); }
+            try g.w.writeAll("}) catch @panic(\"Path.join error\"))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "basename")) {
+            try g.w.writeAll("(std.fs.path.basename(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll("))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "dirname")) {
+            // dirname returns ?[]const u8; unwrap to "" if root.
+            try g.w.writeAll("(std.fs.path.dirname(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll(") orelse \"\")");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "ext")) {
+            try g.w.writeAll("(std.fs.path.extension(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll("))");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "stem")) {
+            // stem = basename without extension
+            try g.w.writeAll("(blk: {\n");
+            const bg = g.indented();
+            try bg.writeIndent();
+            try bg.w.writeAll("const _ps_base = std.fs.path.basename(");
+            if (args.len >= 1) try bg.genExpr(args[0].value) else try bg.w.writeAll("\"\"");
+            try bg.w.writeAll(");\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("const _ps_ext = std.fs.path.extension(_ps_base);\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("break :blk _ps_base[0 .. _ps_base.len - _ps_ext.len];\n");
+            try g.writeIndent();
+            try g.w.writeAll("})");
+            return true;
+        }
+        if (std.mem.eql(u8, method, "isAbsolute")) {
+            try g.w.writeAll("(std.fs.path.isAbsolute(");
+            if (args.len >= 1) try g.genExpr(args[0].value) else try g.w.writeAll("\"\"");
+            try g.w.writeAll("))");
             return true;
         }
         return false;
@@ -5451,11 +5652,45 @@ const Generator = struct {
                 try g.genExpr(s.value);
             },
             else => {
-                try g.genExpr(s.target);
-                try g.w.writeAll(" ");
-                try g.w.writeAll(assignOpStr(s.op));
-                try g.w.writeAll(" ");
-                try g.genExpr(s.value);
+                // Self-referential recursive field assignment:
+                // If target is a member access whose type is `?*T` and the value
+                // is of type `T` (bare struct), wrap the value in an arena alloc
+                // so Zig gets the pointer it requires.
+                const needs_box = blk: {
+                    if (s.op != .assign) break :blk false;
+                    if (s.target.* != .member) break :blk false;
+                    const tc = g.tc orelse break :blk false;
+                    const lhs_t = tc.expr_types.get(s.target) orelse break :blk false;
+                    const rhs_t = tc.expr_types.get(s.value) orelse break :blk false;
+                    if (lhs_t != .optional) break :blk false;
+                    if (lhs_t.optional.* != .named) break :blk false;
+                    if (rhs_t != .named) break :blk false;
+                    break :blk lhs_t.optional.named == rhs_t.named;
+                };
+                if (needs_box) {
+                    // Emit: { const _rp = _allocator.create(T) catch @panic("OOM"); _rp.* = value; target = _rp; }
+                    // Block statement — no trailing semicolon (it is added by the else branch below).
+                    const rhs_t = g.tc.?.expr_types.get(s.value).?;
+                    const class_name = switch (rhs_t.named.decl) {
+                        .class   => |c|  c.name,
+                        .struct_ => |ss| ss.name,
+                        else     => "",
+                    };
+                    try g.w.writeAll("{ const _rp = _allocator.create(");
+                    try g.w.writeAll(class_name);
+                    try g.w.writeAll(") catch @panic(\"OOM\"); _rp.* = ");
+                    try g.genExpr(s.value);
+                    try g.w.writeAll("; ");
+                    try g.genExpr(s.target);
+                    try g.w.writeAll(" = _rp; }\n");
+                    return; // skip trailing ;\n — block statement has no semicolon in Zig
+                } else {
+                    try g.genExpr(s.target);
+                    try g.w.writeAll(" ");
+                    try g.w.writeAll(assignOpStr(s.op));
+                    try g.w.writeAll(" ");
+                    try g.genExpr(s.value);
+                }
             },
         }
         try g.w.writeAll(";\n");
@@ -6375,7 +6610,7 @@ const Generator = struct {
         // var/const _try_err_XXXX: ?anyerror = null;
         // Use `var` only when the body may mutate the err variable (via `raise` or
         // `try expr`); otherwise `const` avoids Zig's "never mutated" diagnostic.
-        const has_raise = bodyNeedsErrVar(s.body) or bodyHasThrowsCall(s.body, g.resolve);
+        const has_raise = bodyNeedsErrVar(s.body, g.tc) or bodyHasThrowsCall(s.body, g.resolve);
         try g.writeIndent();
         try g.w.print("{s} {s}: ?anyerror = null;\n", .{
             if (has_raise) "var" else "const", err_var,
@@ -6642,7 +6877,26 @@ const Generator = struct {
             .old     => |e| try g.genExpr(e.expr), // contract pre-value → pass through
             .zig_lit => |e| try g.genZigLit(e),
             .try_ => |e| {
-                if (g.try_block_label) |lbl| {
+                // `expr?` in Zebra — two meanings depending on the inner type:
+                //   - error union → `try expr`   (propagate error to caller)
+                //   - optional    → `expr.?`      (force-unwrap; panics if nil)
+                // Note: `opt?.field` is parsed as `(try_ opt).field`, so we
+                // emit `opt.?.field` — `.?` auto-derefs through `?*T` too.
+                // Use optional_unwraps (declared type, pre nil-narrowing) rather than
+                // expr_types (which may be narrowed to the non-optional type inside guards).
+                const inner_is_optional = if (g.tc) |tc| tc.optional_unwraps.contains(expr) else false;
+                if (inner_is_optional) {
+                    // If the inner ident is already nil-narrowed, genIdent will emit
+                    // `name.?` on its own — don't add a second `.?`.
+                    const already_nil_narrowed = blk: {
+                        if (g.nil_narrowed) |nn| {
+                            if (e.expr.* == .ident) break :blk nn.contains(e.expr.ident.name);
+                        }
+                        break :blk false;
+                    };
+                    try g.genExpr(e.expr);
+                    if (!already_nil_narrowed) try g.w.writeAll(".?");
+                } else if (g.try_block_label) |lbl| {
                     // Inside a try/catch block: redirect errors to the block's
                     // tracking variable and break out, rather than propagating
                     // to the enclosing method.
@@ -6925,6 +7179,20 @@ const Generator = struct {
             const mem = e.callee.member;
             if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "File")) {
                 if (try g.genFileCall(mem.member, e.args)) return;
+            }
+        }
+        // Dir static calls: Dir.create/delete/exists/list/createAll/deleteAll.
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Dir")) {
+                if (try g.genDirCall(mem.member, e.args)) return;
+            }
+        }
+        // Path static calls: Path.join/basename/dirname/ext/stem/isAbsolute.
+        if (e.callee.* == .member) {
+            const mem = e.callee.member;
+            if (mem.object.* == .ident and std.mem.eql(u8, mem.object.ident.name, "Path")) {
+                if (try g.genPathCall(mem.member, e.args)) return;
             }
         }
         // Http static calls: Http.get/post/json/postJson/serve.
@@ -7619,8 +7887,18 @@ const Generator = struct {
                 }
             },
             .nilable     => |inner| {
-                try g.w.writeAll("?");
-                try g.genType(inner.*);
+                // Self-referential nilable field (e.g., `var next as Node?` inside `class Node`):
+                // Zig requires a pointer to break the infinite-size cycle → emit `?*ClassName`.
+                const inner_is_self_ref = inner.* == .named and
+                    g.owner.len > 0 and
+                    std.mem.eql(u8, inner.named.name, g.owner);
+                if (inner_is_self_ref) {
+                    try g.w.writeAll("?*");
+                    try g.w.writeAll(inner.named.name);
+                } else {
+                    try g.w.writeAll("?");
+                    try g.genType(inner.*);
+                }
             },
             .stream      => |inner| {
                 // Zig has no built-in stream/generator type.

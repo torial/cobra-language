@@ -54,8 +54,10 @@ pub const NAMES = std.StaticStringMap(void).initComptime(&.{
     .{ "HashMap",       {} },
     // Stdlib string builder
     .{ "StringBuilder", {} },
-    // Stdlib file I/O
+    // Stdlib file I/O and path utilities
     .{ "File",          {} },
+    .{ "Dir",           {} },
+    .{ "Path",          {} },
     // Stdlib shell / process execution
     .{ "Shell",         {} },
     // Stdlib networking

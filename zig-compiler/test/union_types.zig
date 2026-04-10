@@ -1208,11 +1208,11 @@ pub const App = struct {
         switch (s) {
             .circle => |r| {
 // zbr:test/union_types.zbr:12
-                std.debug.print("{any}\n", .{r});
+                std.debug.print("{d}\n", .{r});
             },
             .rect => |w| {
 // zbr:test/union_types.zbr:14
-                std.debug.print("{any}\n", .{w});
+                std.debug.print("{}\n", .{w});
             },
             .point => {
 // zbr:test/union_types.zbr:16
