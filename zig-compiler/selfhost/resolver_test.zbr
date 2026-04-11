@@ -1,0 +1,133 @@
+# Phase 4 test: Resolver
+# Self-hosting validation — verifies that resolver.zbr correctly:
+#   1. Builds scope tables from PNode parse trees (class names, fields, methods, locals)
+#   2. Reports undefined-name errors for unresolved expr_id references
+#   3. Accepts valid code without false positives
+#
+# Strategy: parse snippets with the Phase 3 parser, then run the Phase 4 resolver.
+# The resolver is constructed inline (`var r = Resolver.Resolver()`) in each test
+# so the Zig compiler sees a mutable cross-module class instance (needs_var_for_methods).
+# Result accessors (errorCount, symbolCount, firstError) return primitives (int/str)
+# to avoid cross-module List field TC-type inference issues.
+
+use Parser exposing PNode
+use Resolver
+
+class ResolverTest
+    def run() throws
+        .testEmptyClass()
+        .testFieldInScope()
+        .testMethodInScope()
+        .testLocalDeclaredBeforeUse()
+        .testUndefinedName()
+        .testLocalNotVisibleBeforeDecl()
+        .testArithExpr()
+        .testIfCond()
+        .testWhileLoop()
+        .testTryCatch()
+        print "resolver_test: all assertions passed"
+
+    # ── Tests ─────────────────────────────────────────────────────────────────
+
+    def testEmptyClass() throws
+        var root = Parser.Parser.parse("class Empty\n")?
+        var r = Resolver.Resolver()
+        r.resolve(root)?
+        assert r.errorCount() == 0, "empty class: expected no errors"
+        assert r.symbolCount() >= 1, "empty class: expected at least 1 symbol"
+        print "testEmptyClass: OK"
+
+    def testFieldInScope() throws
+        # A method that returns a field name — field should be in class scope
+        const src = "class Point\n    var x as int\n    def getX() as int\n        return x\n"
+        var root = Parser.Parser.parse(src)?
+        var r = Resolver.Resolver()
+        r.resolve(root)?
+        assert r.errorCount() == 0, "field in scope: expected no errors, got: " + r.firstError()
+        print "testFieldInScope: OK"
+
+    def testMethodInScope() throws
+        # A method that references another method name — methods are in class scope
+        const src = "class Counter\n    def value() as int\n        return 0\n    def doubled() as int\n        return value\n"
+        var root = Parser.Parser.parse(src)?
+        var r = Resolver.Resolver()
+        r.resolve(root)?
+        assert r.errorCount() == 0, "method in scope: expected no errors, got: " + r.firstError()
+        print "testMethodInScope: OK"
+
+    def testLocalDeclaredBeforeUse() throws
+        # var x declared, then returned — should be in scope
+        const src = "class C\n    def compute() as int\n        var x as int = 0\n        return x\n"
+        var root = Parser.Parser.parse(src)?
+        var r = Resolver.Resolver()
+        r.resolve(root)?
+        assert r.errorCount() == 0, "local before use: expected no errors, got: " + r.firstError()
+        print "testLocalDeclaredBeforeUse: OK"
+
+    def testUndefinedName() throws
+        # Reference to a name that is never declared
+        const src = "class C\n    def broken() as int\n        return undeclared\n"
+        var root = Parser.Parser.parse(src)?
+        var r = Resolver.Resolver()
+        r.resolve(root)?
+        assert r.errorCount() == 1, "undefined name: expected 1 error, got " + r.errorCount().toString()
+        const msg = r.firstError()
+        assert msg.contains("undeclared"), "undefined name: error should mention 'undeclared', got: " + msg
+        print "testUndefinedName: OK"
+
+    def testLocalNotVisibleBeforeDecl() throws
+        # `var x as int = x` — the RHS `x` is resolved BEFORE `x` is added to scope.
+        # Resolver adds to scope only after resolving the init expression.
+        const src = "class C\n    def bad()\n        var x as int = x\n"
+        var root = Parser.Parser.parse(src)?
+        var r = Resolver.Resolver()
+        r.resolve(root)?
+        assert r.errorCount() == 1, "pre-decl: expected 1 error, got " + r.errorCount().toString()
+        const msg = r.firstError()
+        assert msg.contains("'x'"), "pre-decl: error should mention 'x', got: " + msg
+        print "testLocalNotVisibleBeforeDecl: OK"
+
+    def testArithExpr() throws
+        # Binary expression with a local — resolver should walk both sides
+        const src = "class C\n    def calc() as int\n        var n as int = 3\n        return n + n\n"
+        var root = Parser.Parser.parse(src)?
+        var r = Resolver.Resolver()
+        r.resolve(root)?
+        assert r.errorCount() == 0, "arith: expected no errors, got: " + r.firstError()
+        print "testArithExpr: OK"
+
+    def testIfCond() throws
+        # If with a reference in the condition and body
+        const src = "class C\n    def check()\n        var flag as bool = true\n        if flag\n            var y as int = 1\n"
+        var root = Parser.Parser.parse(src)?
+        var r = Resolver.Resolver()
+        r.resolve(root)?
+        assert r.errorCount() == 0, "if: expected no errors, got: " + r.firstError()
+        print "testIfCond: OK"
+
+    def testWhileLoop() throws
+        # While loop with a declared counter
+        const src = "class C\n    def loop()\n        var i as int = 0\n        while i\n            pass\n"
+        var root = Parser.Parser.parse(src)?
+        var r = Resolver.Resolver()
+        r.resolve(root)?
+        assert r.errorCount() == 0, "while: expected no errors, got: " + r.firstError()
+        print "testWhileLoop: OK"
+
+    def testTryCatch() throws
+        # try/catch — catch binding 'e' should be visible in catch body
+        const src = "class C\n    def safe() throws\n        try\n            var x as int = 0\n        catch |e|\n            raise e\n"
+        var root = Parser.Parser.parse(src)?
+        var r = Resolver.Resolver()
+        r.resolve(root)?
+        assert r.errorCount() == 0, "try/catch: expected no errors, got: " + r.firstError()
+        print "testTryCatch: OK"
+
+class Main
+    shared
+        def main
+            try
+                var t = ResolverTest()
+                t.run()?
+            catch |e|
+                print "FAILED: " + e.message

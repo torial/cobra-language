@@ -240,3 +240,61 @@ left = PNode.expr_binary(PBinary(op, l, r))
 ### Net verdict: easier or harder than the Zig version?
 
 **Noticeably easier.** The grammar itself wrote cleanly in ~60% of the lines. The test harness was pleasant — nested `branch` dispatches are readable and exhaustive. The only hard part was the CodeGen bug hunt (took the majority of the phase's wall-clock time), which was invisible in the Zig version because Zig programmers would never emit a `defer deinit` on a buffer they'd already passed to a struct. Phase 3 surfaced 1 major compiler bug (arena + Allocator.free poisoning) and 3 minor missing features. Compiler bug count across all phases: Phase 1 = 8, Phase 2 = 3, Phase 3 = 1.
+
+**Post-phase cleanup:** After passing all 9 tests, the `eff_kw` override block in `genLocalVar` was removed. That block forced `var` for any List/HashMap local that wasn't borrowed or returned, under the assumption that `deinit(*Self)` would be called. Since `deinit` is never emitted now, `scanMutations` handles `var`/`const` correctly on its own (it detects `l.add()` as a mutating call). The `analyzeEscapes` docstrings were also updated to clarify that the function is now string-only (suppressing `defer _allocator.free` for returned string slices).
+
+---
+
+## Phase 4: Resolver / Binder (`resolver.zbr`)
+**Completed:** 2026-04-11
+**Lines of Zebra / Lines of Zig (approximate):** ~283 Zebra vs ~1917 generated Zig
+
+### Where Zebra felt better than Zig
+
+**Flat scope-chain model was easy to reason about.** Three `HashMap(str, int)` fields — `module_scope`, `class_scope`, `method_scope` — replace a linked-list scope tree. In Zig this would require `*Scope` pointers and manual arena allocation; in Zebra the HashMaps are just fields with no lifecycle ceremony. Swapping scope levels is a single assignment (`this.class_scope = HashMap()`), visible at a glance.
+
+**Primitive getter methods solved cross-module List inference cleanly.** The original plan used a `ResolveResult` struct with a `List(ResolveError)` field. Cross-module List field type inference doesn't work (TC returns `.unknown` for `List(T)` generics from imported modules). Replacing the result struct with `errorCount() as int`, `firstError() as str`, `symbolCount() as int` getter methods made the test file completely portable — all return types are primitives the TC can handle.
+
+**`branch` on `PNode` inside resolver methods reads as directly as the grammar.** `branch stmt on PNode.stmt_var as v: resolveExpr(v.init_expr); method_scope.put(v.name, 4)` is the intent expressed with no noise. The two-pass structure (bind then resolve) maps onto two methods, each a `branch` on the module tree.
+
+**3-line test structure per test case.** Each test is: parse → resolve → assert. The assertions use `r.errorCount()`, `r.symbolCount()`, `r.firstError()` — plain integers and strings that compose naturally in boolean expressions.
+
+### Where Zebra felt worse or missing
+
+**`for decl in m.decls` over a branch-binding field didn't work.** When `m` is bound by `on PNode.module_ as m`, `m`'s TC type is `.unknown` (branch bindings of cross-module union payloads can't be typed through the TypeChecker's symbol table). `genForIn` couldn't determine that `m.decls` is a `List(PNode)` and generated `for (m.decls) |decl|` without `.items`. Required a CodeGen fix: when the iter is a `.member` access and no type can be determined, fall back to `genForInList` — safe because in Zebra, iterating a struct field must be a `List(T)`.
+
+**`this.field.method()` dispatch broken.** `getExprDeclaredType` handled `ident.field` (local var) and class-ident.field patterns, but NOT `this.field`. Since `this` is its own expression type (not an ident), the field type of `this.errors`, `this.method_scope`, etc. was always `.unknown`. This caused `this.method_scope.contains(name)` to dispatch through the List `contains` path (`std.mem.indexOfScalar`) instead of the HashMap path (`.contains(k)`). Required extending `getExprDeclaredType` to handle `this.field` by looking up `g.owner_members`.
+
+**Transitive allocator initialization wasn't automatic.** `resolver_test.zbr` imports `Parser` and `Resolver` directly. `Lexer` and `Token` are transitive deps (imported by Parser). The generated `main()` only called `_initAllocator` for direct imports, leaving `Lexer._allocator` uninitialized → segfault on first `out.append()`. Required a CodeGen fix: `_initAllocator` now propagates to all of the module's own imports, so transitive init is automatic.
+
+**No way to call `m.name` when `m` is `^PModule`.** The `^T` auto-deref works for field access inside `branch on ... as m` arms, but only for the generated field access (`m.decls`). For method calls on a `^T` binding the TC type is still `.unknown`. This is a known limitation; workaround is to extract fields into locals before passing to helpers.
+
+### Did `branch` / union dispatch do its job?
+
+Yes. The `resolveStmt` and `resolveExpr` methods are pure `branch` dispatch tables — one arm per statement/expression kind. Reading the code, you can see the entire Zebra grammar reflected. The `else => pass` catch-all made it safe to add new variants without breaking existing dispatch. The two-pass design (bind first, then resolve) required no special branch machinery — just separate methods called on the same tree.
+
+### Error propagation (`?` / Result) — did it read naturally?
+
+Yes. `r.resolve(root)?` in each test propagates errors from the resolver walk. The resolver itself uses `?` on all self-method calls transparently. The `?` on `Parser.Parser.parse(src)?` in var-init position was the only non-obvious moment — without `?`, the return type would be `anyerror!PNode` rather than `PNode`, causing a type mismatch for `root`.
+
+### Allocator model — did it get in the way?
+
+Less than Phase 3. HashMaps and Lists are constructed freely, no allocator threading. The `HashMap()` constructor (without type args) works correctly because the field declaration provides the key/value types. The only edge: `HashMap.put` returns `error{OutOfMemory}!void` in Zig, requiring `try`. CodeGen emits `catch unreachable` (not `try`) since OOM in an arena is fatal anyway — once `getExprDeclaredType` resolved `this.module_scope` as `HashMap(str, int)`, the correct dispatch path fired.
+
+### Missing language features discovered
+
+1. **Branch-binding type propagation** — when `on UnionType.variant as x`, the TC should push `x`'s type into `narrowed_types` even for cross-module union types (currently only works for same-module `.named` types). Would fix `for decl in m.decls` and all member-access-on-branch-binding patterns at the language level rather than as a CodeGen heuristic.
+2. **`for x in container.field` where container is a branch binding** — sub-case of #1. The CodeGen workaround (fall back to `.items` for `.member` iter) is pragmatic but not principled.
+3. **Transitive import initialization** — now fixed in CodeGen (`_initAllocator` propagates), but this should arguably be a language guarantee: "importing a module initializes it fully, including its dependencies."
+
+### Surprise wins
+
+**`3:1 Zebra-to-Zig compression** holds.** ~283 Zebra lines → ~1917 generated Zig. Same ratio as Phase 3. The Zig expansion is entirely allocator threading, `try` keywords, and verbose type annotations — the algorithm itself is identical.
+
+**Zero logic bugs after the CodeGen fixes.** Once the 4 CodeGen issues (for-in member fallback, `this.field` declared-type lookup, transitive allocator init, `.items.len` cast) were resolved, all 10 resolver tests passed on the first clean run. The resolver logic itself was correct; the failures were all language-infrastructure issues.
+
+**`.items.len` → `@as(i64, @intCast(...))` fix benefited all three emit paths.** The `usize` → `i64` cast was missing in `genStdlibProp`, the `generic_named` TC fallback, AND the last-resort `.len` path. Fixing all three means `list.len` now works correctly in return statements, arithmetic, and comparisons without any special-casing at the call site.
+
+### Net verdict: easier or harder than the Zig version?
+
+**Easier for the algorithm, harder than Phase 3 for infrastructure.** The resolver logic (two-pass, flat scope chain, `branch` dispatch) was pleasant to write. The friction was entirely CodeGen: three separate bugs around `this.field` type resolution, cross-module struct field iteration, and transitive initialization. All three are now fixed and will benefit Phase 5+. Phase 4 surfaced 4 new CodeGen bugs; compiler bug count across all phases: Phase 1 = 8, Phase 2 = 3, Phase 3 = 1, Phase 4 = 4, **total = 16**.

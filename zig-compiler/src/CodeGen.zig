@@ -1331,9 +1331,18 @@ const Generator = struct {
         try g.w.writeAll("var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);\n");
         // `var` (not `const`) so that `arena` blocks can save/restore it.
         try g.w.writeAll("var _allocator: std.mem.Allocator = undefined;\n");
-        // Called from the root module's `main` after the arena is set up,
-        // so that library modules share the same allocator.
-        try g.w.writeAll("pub fn _initAllocator(a: std.mem.Allocator) void { _allocator = a; }\n\n");
+        // `_initAllocator` sets this module's allocator AND propagates to every
+        // directly-imported Zebra module, so transitive deps are always initialised
+        // even when the root `main` only calls it for direct imports.
+        try g.w.writeAll("pub fn _initAllocator(a: std.mem.Allocator) void {\n    _allocator = a;\n");
+        for (module.decls) |decl| {
+            const u = switch (decl) { .use => |u| u, else => continue };
+            if (g.native_uses) |nu| if (nu.get(u.path) != null) continue;
+            const imp_path = try std.mem.replaceOwned(u8, g.alloc, u.path, ".", "/");
+            defer g.alloc.free(imp_path);
+            try g.w.print("    @import(\"{s}.zig\")._initAllocator(a);\n", .{imp_path});
+        }
+        try g.w.writeAll("}\n\n");
         // Thread-local error context — populated by `raise` statements.
         try g.w.writeAll("const _Stringable = struct {\n");
         try g.w.writeAll("    ptr:         *anyopaque,\n");
@@ -4605,8 +4614,11 @@ const Generator = struct {
             .generic => |gtr| {
                 if (std.mem.eql(u8, gtr.name, "List")) {
                     if (std.mem.eql(u8, prop, "len") or std.mem.eql(u8, prop, "count")) {
+                        // `.items.len` is `usize`; cast to `i64` so assignments/returns
+                        // to Zebra `int` fields compile without explicit @intCast.
+                        try g.w.writeAll("@as(i64, @intCast(");
                         try g.genExpr(object);
-                        try g.w.writeAll(".items.len");
+                        try g.w.writeAll(".items.len))");
                         return true;
                     }
                 }
@@ -7129,6 +7141,14 @@ const Generator = struct {
             }
         }
 
+        // Fallback for struct field accesses (e.g. `m.decls` where `m` is a
+        // branch-binding payload from a cross-module union).  The TC cannot
+        // infer the type through catch_binding symbols, but in Zebra struct
+        // fields that are iterable are always `List(T)` → `std.ArrayListUnmanaged`
+        // and therefore need `.items`.  Call-expressions and ident-only cases
+        // are already handled above; a bare member access here is always a List.
+        if (s.iter.* == .member) return g.genForInList(s);
+
         // Default: standard Zig for-loop over a slice / range.
         try g.writeIndent();
         try g.w.writeAll("for (");
@@ -7999,8 +8019,9 @@ const Generator = struct {
                         const gn = obj_tc.generic_named;
                         if (std.mem.eql(u8, gn.sym.name, "List") and
                             (std.mem.eql(u8, e.member, "len") or std.mem.eql(u8, e.member, "count"))) {
+                            try g.w.writeAll("@as(i64, @intCast(");
                             try g.genExpr(e.object);
-                            try g.w.writeAll(".items.len");
+                            try g.w.writeAll(".items.len))");
                             break :sw;
                         }
                         if (std.mem.eql(u8, gn.sym.name, "HashMap") and
@@ -8070,8 +8091,10 @@ const Generator = struct {
                 if (std.mem.eql(u8, e.member, "len")) {
                     const obj_tc = if (g.tc) |tc| tc.expr_types.get(e.object) orelse .unknown else TypeChecker.Type.unknown;
                     if (obj_tc == .unknown) {
+                        // Cast usize → i64 so `return x.len` works when the method declares `as int`.
+                        try g.w.writeAll("@as(i64, @intCast(");
                         try g.genExpr(e.object);
-                        try g.w.writeAll(".items.len");
+                        try g.w.writeAll(".items.len))");
                         break :sw;
                     }
                 }
@@ -8295,6 +8318,21 @@ const Generator = struct {
                 .param => |p| p.type_,
                 else   => null,
             };
+        }
+        // Handle `this.fieldName` — look up the field in the current class's member list.
+        if (expr.* == .member) {
+            const mem = expr.member;
+            if (mem.object.* == .this) {
+                for (g.owner_members) |decl| {
+                    if (decl == .var_) {
+                        const field = decl.var_;
+                        if (std.mem.eql(u8, field.name, mem.member)) {
+                            return field.type_;
+                        }
+                    }
+                }
+                return null;
+            }
         }
         // Handle `ClassName.fieldName` — look through the class's member list for the field type.
         if (expr.* == .member) {

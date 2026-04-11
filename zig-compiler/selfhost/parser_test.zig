@@ -6,7 +6,12 @@ const builtin = @import("builtin");
 
 var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 var _allocator: std.mem.Allocator = undefined;
-pub fn _initAllocator(a: std.mem.Allocator) void { _allocator = a; }
+pub fn _initAllocator(a: std.mem.Allocator) void {
+    _allocator = a;
+    @import("Token.zig")._initAllocator(a);
+    @import("Lexer.zig")._initAllocator(a);
+    @import("Parser.zig")._initAllocator(a);
+}
 
 const _Stringable = struct {
     ptr:         *anyopaque,
@@ -1519,7 +1524,7 @@ pub const ParserTest = struct {
 // zbr:selfhost/parser_test.zbr:42
         const decls = try self.moduleDecls("use Foo\n");
 // zbr:selfhost/parser_test.zbr:43
-        if (!((decls.items.len == 1))) {
+        if (!((@as(i64, @intCast(decls.items.len)) == 1))) {
             std.debug.print("assertion failed\n", .{});
             unreachable;
         }
@@ -1548,7 +1553,7 @@ pub const ParserTest = struct {
 // zbr:selfhost/parser_test.zbr:52
         const decls = try self.moduleDecls("class Empty\n");
 // zbr:selfhost/parser_test.zbr:53
-        if (!((decls.items.len == 1))) {
+        if (!((@as(i64, @intCast(decls.items.len)) == 1))) {
             std.debug.print("assertion failed\n", .{});
             unreachable;
         }
@@ -1561,7 +1566,7 @@ pub const ParserTest = struct {
                     unreachable;
                 }
 // zbr:selfhost/parser_test.zbr:57
-                if (!((c.members.items.len == 0))) {
+                if (!((@as(i64, @intCast(c.members.items.len)) == 0))) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
@@ -1584,7 +1589,7 @@ pub const ParserTest = struct {
 // zbr:selfhost/parser_test.zbr:64
         const decls = try self.moduleDecls(src);
 // zbr:selfhost/parser_test.zbr:65
-        if (!((decls.items.len == 1))) {
+        if (!((@as(i64, @intCast(decls.items.len)) == 1))) {
             std.debug.print("assertion failed\n", .{});
             unreachable;
         }
@@ -1597,7 +1602,7 @@ pub const ParserTest = struct {
                     unreachable;
                 }
 // zbr:selfhost/parser_test.zbr:69
-                if (!((c.members.items.len == 2))) {
+                if (!((@as(i64, @intCast(c.members.items.len)) == 2))) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
@@ -1647,7 +1652,7 @@ pub const ParserTest = struct {
 // zbr:selfhost/parser_test.zbr:83
         const decls = try self.moduleDecls(src);
 // zbr:selfhost/parser_test.zbr:84
-        if (!((decls.items.len == 1))) {
+        if (!((@as(i64, @intCast(decls.items.len)) == 1))) {
             std.debug.print("assertion failed\n", .{});
             unreachable;
         }
@@ -1660,7 +1665,7 @@ pub const ParserTest = struct {
                     unreachable;
                 }
 // zbr:selfhost/parser_test.zbr:88
-                if (!((c.members.items.len == 1))) {
+                if (!((@as(i64, @intCast(c.members.items.len)) == 1))) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
@@ -1683,7 +1688,7 @@ pub const ParserTest = struct {
                             unreachable;
                         }
 // zbr:selfhost/parser_test.zbr:94
-                        if (!((m.stmts.items.len == 1))) {
+                        if (!((@as(i64, @intCast(m.stmts.items.len)) == 1))) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
                         }
@@ -1721,7 +1726,7 @@ pub const ParserTest = struct {
                 switch (c.members.items[@as(usize, @intCast(0))]) {
                     .method_ => |m| {
 // zbr:selfhost/parser_test.zbr:108
-                        if (!((m.stmts.items.len == 1))) {
+                        if (!((@as(i64, @intCast(m.stmts.items.len)) == 1))) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
                         }
@@ -1729,7 +1734,7 @@ pub const ParserTest = struct {
                         switch (m.stmts.items[@as(usize, @intCast(0))]) {
                             .stmt_return => |ret| {
 // zbr:selfhost/parser_test.zbr:111
-                                if (!((ret.value.items.len == 1))) {
+                                if (!((@as(i64, @intCast(ret.value.items.len)) == 1))) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
                                 }
@@ -1793,7 +1798,7 @@ pub const ParserTest = struct {
                 switch (c.members.items[@as(usize, @intCast(0))]) {
                     .method_ => |m| {
 // zbr:selfhost/parser_test.zbr:132
-                        if (!((m.stmts.items.len == 1))) {
+                        if (!((@as(i64, @intCast(m.stmts.items.len)) == 1))) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
                         }
@@ -1801,17 +1806,17 @@ pub const ParserTest = struct {
                         switch (m.stmts.items[@as(usize, @intCast(0))]) {
                             .stmt_if => |if_node| {
 // zbr:selfhost/parser_test.zbr:135
-                                if (!((if_node.cond.items.len == 1))) {
+                                if (!((@as(i64, @intCast(if_node.cond.items.len)) == 1))) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
                                 }
 // zbr:selfhost/parser_test.zbr:136
-                                if (!((if_node.then_stmts.items.len == 1))) {
+                                if (!((@as(i64, @intCast(if_node.then_stmts.items.len)) == 1))) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
                                 }
 // zbr:selfhost/parser_test.zbr:137
-                                if (!((if_node.else_stmts.items.len == 0))) {
+                                if (!((@as(i64, @intCast(if_node.else_stmts.items.len)) == 0))) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
                                 }
@@ -1869,12 +1874,12 @@ pub const ParserTest = struct {
                                             unreachable;
                                         }
 // zbr:selfhost/parser_test.zbr:159
-                                        if (!((b.left.items.len == 1))) {
+                                        if (!((@as(i64, @intCast(b.left.items.len)) == 1))) {
                                             std.debug.print("assertion failed\n", .{});
                                             unreachable;
                                         }
 // zbr:selfhost/parser_test.zbr:160
-                                        if (!((b.right.items.len == 1))) {
+                                        if (!((@as(i64, @intCast(b.right.items.len)) == 1))) {
                                             std.debug.print("assertion failed\n", .{});
                                             unreachable;
                                         }
@@ -2026,7 +2031,7 @@ pub const ParserTest = struct {
                 switch (c.members.items[@as(usize, @intCast(0))]) {
                     .method_ => |m| {
 // zbr:selfhost/parser_test.zbr:215
-                        if (!((m.stmts.items.len == 1))) {
+                        if (!((@as(i64, @intCast(m.stmts.items.len)) == 1))) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
                         }
@@ -2077,7 +2082,7 @@ pub const ParserTest = struct {
                 switch (c.members.items[@as(usize, @intCast(0))]) {
                     .method_ => |m| {
 // zbr:selfhost/parser_test.zbr:235
-                        if (!((m.stmts.items.len == 1))) {
+                        if (!((@as(i64, @intCast(m.stmts.items.len)) == 1))) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
                         }
@@ -2100,7 +2105,7 @@ pub const ParserTest = struct {
                                     unreachable;
                                 }
 // zbr:selfhost/parser_test.zbr:241
-                                if (!((v.init_expr.items.len == 1))) {
+                                if (!((@as(i64, @intCast(v.init_expr.items.len)) == 1))) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
                                 }
@@ -2174,7 +2179,7 @@ pub const Main = struct {
 // zbr:selfhost/parser_test.zbr:259
             var t = ParserTest.init();
 // zbr:selfhost/parser_test.zbr:260
-            t.run() catch |_tc_21ed5db61b0| { _try_err_61f0 = _tc_21ed5db61b0; break :_try_blk_61f0; };
+            t.run() catch |_tc_23455f061b0| { _try_err_61f0 = _tc_23455f061b0; break :_try_blk_61f0; };
             break :_try_blk_61f0;
         }
         if (_try_err_61f0 != null) {
