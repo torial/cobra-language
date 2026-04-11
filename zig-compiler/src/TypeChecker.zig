@@ -933,7 +933,7 @@ const TypeChecker = struct {
             if (n.type_) |tr| {
                 if (tr == .generic) {
                     const gn = tr.generic.name;
-                    if (std.mem.eql(u8, gn, "List") or std.mem.eql(u8, gn, "HashMap")) {
+                    if (Builtins.isMutableCollection(gn)) {
                         try tc.emitError(n.span,
                             "'{s}(...)' requires explicit initialization; use 'var {s} = {s}()()'",
                             .{ gn, n.name, gn });

@@ -109,9 +109,23 @@ pub const NAMES = std.StaticStringMap(void).initComptime(&.{
     .{ "TimerHandle",   {} },
 });
 
+/// Generic container types that require explicit initialization as local variables.
+/// `var x as List(T)` with no `=` is a compile error; class fields are exempt.
+/// Add new mutable collection types here — TypeChecker queries this set.
+pub const MUTABLE_COLLECTIONS = std.StaticStringMap(void).initComptime(&.{
+    .{ "List",    {} },
+    .{ "HashMap", {} },
+});
+
 /// Returns true iff `name` is a built-in type name.
 pub fn isBuiltin(name: []const u8) bool {
     return NAMES.get(name) != null;
+}
+
+/// Returns true iff `name` is a mutable collection type that requires explicit
+/// initialization when declared as a local variable.
+pub fn isMutableCollection(name: []const u8) bool {
+    return MUTABLE_COLLECTIONS.get(name) != null;
 }
 
 /// Returns true iff `name` is a dynamically-sized numeric type (e.g. `int5`,
