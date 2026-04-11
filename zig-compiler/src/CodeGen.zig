@@ -4534,6 +4534,15 @@ const Generator = struct {
     // Returns true and emits code if `method` on a value of type `tr` is a
     // known stdlib operation.  Returns false and emits nothing otherwise.
 
+    /// Emit `@as(i64, @intCast(<object>.items.len))`.
+    /// Single canonical site for all List.len / List.count emissions so
+    /// the usize→i64 cast is never forgotten.
+    fn writeListLen(g: Generator, object: *const Ast.Expr) anyerror!void {
+        try g.w.writeAll("@as(i64, @intCast(");
+        try g.genExpr(object);
+        try g.w.writeAll(".items.len))");
+    }
+
     fn genStdlibMethod(
         g:      Generator,
         object: *const Ast.Expr,
@@ -4614,11 +4623,7 @@ const Generator = struct {
             .generic => |gtr| {
                 if (std.mem.eql(u8, gtr.name, "List")) {
                     if (std.mem.eql(u8, prop, "len") or std.mem.eql(u8, prop, "count")) {
-                        // `.items.len` is `usize`; cast to `i64` so assignments/returns
-                        // to Zebra `int` fields compile without explicit @intCast.
-                        try g.w.writeAll("@as(i64, @intCast(");
-                        try g.genExpr(object);
-                        try g.w.writeAll(".items.len))");
+                        try g.writeListLen(object);
                         return true;
                     }
                 }
@@ -6156,10 +6161,7 @@ const Generator = struct {
             return true;
         }
         if (std.mem.eql(u8, method, "count")) {
-            // items.len is usize; cast to i64 to match Zebra's int type.
-            try g.w.writeAll("@as(i64, @intCast(");
-            try g.genExpr(obj);
-            try g.w.writeAll(".items.len))");
+            try g.writeListLen(obj);
             return true;
         }
         if (std.mem.eql(u8, method, "sort")) {
@@ -8019,9 +8021,7 @@ const Generator = struct {
                         const gn = obj_tc.generic_named;
                         if (std.mem.eql(u8, gn.sym.name, "List") and
                             (std.mem.eql(u8, e.member, "len") or std.mem.eql(u8, e.member, "count"))) {
-                            try g.w.writeAll("@as(i64, @intCast(");
-                            try g.genExpr(e.object);
-                            try g.w.writeAll(".items.len))");
+                            try g.writeListLen(e.object);
                             break :sw;
                         }
                         if (std.mem.eql(u8, gn.sym.name, "HashMap") and
@@ -8091,10 +8091,7 @@ const Generator = struct {
                 if (std.mem.eql(u8, e.member, "len")) {
                     const obj_tc = if (g.tc) |tc| tc.expr_types.get(e.object) orelse .unknown else TypeChecker.Type.unknown;
                     if (obj_tc == .unknown) {
-                        // Cast usize → i64 so `return x.len` works when the method declares `as int`.
-                        try g.w.writeAll("@as(i64, @intCast(");
-                        try g.genExpr(e.object);
-                        try g.w.writeAll(".items.len))");
+                        try g.writeListLen(e.object);
                         break :sw;
                     }
                 }
