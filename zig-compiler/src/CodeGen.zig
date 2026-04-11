@@ -535,9 +535,20 @@ fn exprCallIsThrows(
     e:                *const Ast.ExprCall,
     resolve:          *const Resolver.ResolveResult,
     imported_modules: ?*const std.StringHashMap(TypeChecker.ModuleInterface),
+    owner_members:    []const Ast.Decl,
 ) bool {
     if (e.callee.* != .member) return false;
     const mem = e.callee.member;
+    // `.method()` syntax: callee is `this.method_name` — walk owner members.
+    if (mem.object.* == .this) {
+        for (owner_members) |decl| {
+            if (decl == .method) {
+                const m = decl.method;
+                if (std.mem.eql(u8, m.name, mem.member)) return m.throws;
+            }
+        }
+        return false;
+    }
     if (mem.object.* != .ident) return false;
     const sym = resolve.exprs.get(&mem.object.ident) orelse return false;
     // Cross-module call: receiver is a `.module` symbol (from `use ModuleName`).
@@ -578,14 +589,15 @@ fn bodyHasThrowsCall(
     stmts:            []const Ast.Stmt,
     resolve:          *const Resolver.ResolveResult,
     imported_modules: ?*const std.StringHashMap(TypeChecker.ModuleInterface),
+    owner_members:    []const Ast.Decl,
 ) bool {
     for (stmts) |stmt| {
         if (stmt == .expr and stmt.expr.* == .call) {
-            if (exprCallIsThrows(stmt.expr.call, resolve, imported_modules)) return true;
+            if (exprCallIsThrows(stmt.expr.call, resolve, imported_modules, owner_members)) return true;
         }
         // Var init that's a throws call also counts (affects try-block var tracking).
         if (stmt == .var_ and stmt.var_.init != null and stmt.var_.init.?.* == .call) {
-            if (exprCallIsThrows(stmt.var_.init.?.call, resolve, imported_modules)) return true;
+            if (exprCallIsThrows(stmt.var_.init.?.call, resolve, imported_modules, owner_members)) return true;
         }
     }
     return false;
@@ -1187,6 +1199,18 @@ const Generator = struct {
     /// Structs have no `_type_tag` field, so `cue init` bodies must skip the
     /// `self._type_tag = _ttag_*` stamp that classes require.
     is_struct_owner: bool = false,
+    /// True when the enclosing method is `throws` (returns `anyerror!T`).
+    /// Enables automatic `try` prefix for calls to other `throws` methods,
+    /// avoiding Zig's "error union is ignored" error at call sites.
+    current_method_throws: bool = false,
+    /// Set to true by the `.try_` codegen path before calling genExpr on the inner
+    /// expression, so that genCall does not also emit a `try` prefix.  Prevents
+    /// `try try self.foo()` when the Zebra source has `foo()?`.
+    suppress_auto_try: bool = false,
+    /// Member declarations of the current class or struct.  Used in genCall to
+    /// look up whether a self-method called via `.method()` syntax is `throws`.
+    /// Empty slice at module scope or when owner is a namespace.
+    owner_members: []const Ast.Decl = &.{},
     /// Incremented each time we enter an `arena` block so nested scopes get
     /// unique variable names (_arena_scope_1, _arena_scope_2, …).
     arena_depth: u32 = 0,
@@ -1202,7 +1226,7 @@ const Generator = struct {
     /// Set owner name + owner_class pointer for a non-generic concrete class.
     /// This enables `resolveFieldTypeRef` for `^T` boxing in the class body.
     fn withClass(g: Generator, cls: *const Ast.DeclClass) Generator {
-        var c = g; c.owner = cls.name; c.owner_class = cls; return c;
+        var c = g; c.owner = cls.name; c.owner_class = cls; c.owner_members = cls.members; return c;
     }
     fn withGeneric(g: Generator, cls: *const Ast.DeclClass) Generator {
         var c = g; c.is_generic = true; c.owner_class = cls; return c;
@@ -3639,6 +3663,7 @@ const Generator = struct {
     fn genStruct(g: Generator, n: *Ast.DeclStruct) anyerror!void {
         var sg = g.withOwner(n.name);
         sg.is_struct_owner = true;
+        sg.owner_members = n.members;
         try g.writeIndent();
         try g.w.print("pub const {s} = struct {{\n", .{n.name});
         const ig = sg.indented();
@@ -3860,7 +3885,7 @@ const Generator = struct {
     }
 
     fn genMethod(g: Generator, n: *Ast.DeclMethod) anyerror!void {
-        const mg = g.asMethod();
+        var mg = g.asMethod();
 
         try g.writeIndent();
         try g.w.print("pub fn {s}(", .{n.name});
@@ -3897,6 +3922,7 @@ const Generator = struct {
         // Emit anyerror! if explicitly annotated OR if the body contains raise/try.
         const needs_error = n.throws or
             (n.body != null and bodyHasRaise(n.body.?, g.tc));
+        mg.current_method_throws = needs_error;
         if (needs_error) try g.w.writeAll("anyerror!");
         if (n.return_type) |rt| try g.genType(rt) else try g.w.writeAll("void");
 
@@ -4169,7 +4195,7 @@ const Generator = struct {
                 // Inside a try block, a call to a `throws` method must have its
                 // error captured and redirected to the block's tracking variable.
                 if (e.* == .call and g.try_block_label != null and
-                    exprCallIsThrows(e.call, g.resolve, g.imported_modules))
+                    exprCallIsThrows(e.call, g.resolve, g.imported_modules, g.owner_members))
                 {
                     const ev  = g.try_err_var.?;
                     const lbl = g.try_block_label.?;
@@ -4384,7 +4410,7 @@ const Generator = struct {
             // (including cross-module calls like `Lexer.tokenize(...)`), redirect the error
             // to the block's tracking variable so the catch clause fires.
             if (e.* == .call and g.try_block_label != null and
-                exprCallIsThrows(e.call, g.resolve, g.imported_modules))
+                exprCallIsThrows(e.call, g.resolve, g.imported_modules, g.owner_members))
             {
                 const ev  = g.try_err_var.?;
                 const lbl = g.try_block_label.?;
@@ -7878,7 +7904,7 @@ const Generator = struct {
         // var/const _try_err_XXXX: ?anyerror = null;
         // Use `var` only when the body may mutate the err variable (via `raise` or
         // `try expr`); otherwise `const` avoids Zig's "never mutated" diagnostic.
-        const has_raise = bodyNeedsErrVar(s.body, g.tc) or bodyHasThrowsCall(s.body, g.resolve, g.imported_modules);
+        const has_raise = bodyNeedsErrVar(s.body, g.tc) or bodyHasThrowsCall(s.body, g.resolve, g.imported_modules, g.owner_members);
         try g.writeIndent();
         try g.w.print("{s} {s}: ?anyerror = null;\n", .{
             if (has_raise) "var" else "const", err_var,
@@ -7951,16 +7977,21 @@ const Generator = struct {
             .float_lit     => |e| try g.w.writeAll(e.text),
             .bool_lit      => |e| try g.w.writeAll(if (e.value) "true" else "false"),
             .char_lit      => |e| {
-                // Zebra char literals: c'A' or c"A" → strip 'c' prefix; Zig uses 'A'
-                // Also convert c"A" double-quote form to single-quote form.
-                const inner = e.text[1..]; // strip leading 'c'
-                if (inner.len >= 2 and inner[0] == '"') {
-                    // c"A" → 'A' (swap delimiters)
-                    try g.w.writeByte('\'');
-                    try g.w.writeAll(inner[1 .. inner.len - 1]);
-                    try g.w.writeByte('\'');
+                // Two forms:
+                //   Legacy:  c'A' or c"A" — strip the 'c' prefix; Zig uses 'A'
+                //   New:     'A'           — already valid Zig char literal; emit as-is
+                if (e.text.len > 0 and e.text[0] == 'c') {
+                    const inner = e.text[1..]; // strip leading 'c'
+                    if (inner.len >= 2 and inner[0] == '"') {
+                        // c"A" → 'A' (swap delimiters)
+                        try g.w.writeByte('\'');
+                        try g.w.writeAll(inner[1 .. inner.len - 1]);
+                        try g.w.writeByte('\'');
+                    } else {
+                        try g.w.writeAll(inner); // c'A' → 'A'
+                    }
                 } else {
-                    try g.w.writeAll(inner); // c'A' → 'A'
+                    try g.w.writeAll(e.text); // 'A' → 'A' (no transformation needed)
                 }
             },
             .string_lit    => |e| try g.genStringLit(e),
@@ -8234,7 +8265,11 @@ const Generator = struct {
                     try g.w.print(" catch |{s}| {{ {s} = {s}; break :{s}; }}", .{ tmp, ev, tmp, lbl });
                 } else {
                     try g.w.writeAll("try ");
-                    try g.genExpr(e.expr);
+                    // Suppress auto-try inside genCall — the `try` above already covers it.
+                    // g is a value parameter, so shadow it with a mutable copy.
+                    var g2 = g;
+                    g2.suppress_auto_try = true;
+                    try g2.genExpr(e.expr);
                 }
             },
             .tuple_lit => |e| {
@@ -8967,6 +9002,16 @@ const Generator = struct {
                         .method => |m| m.params,
                         else    => null,
                     };
+                    // Auto-propagate errors: when calling a `throws` method from
+                    // inside a `throws` method (and not inside a try/catch block),
+                    // emit `try` so Zig doesn't reject the ignored error union.
+                    const callee_throws: bool = switch (sym.decl) {
+                        .method => |m| m.throws or bodyHasRaise(m.body orelse &.{}, g.tc),
+                        else    => false,
+                    };
+                    if (callee_throws and g.current_method_throws and g.try_block_label == null and !g.suppress_auto_try) {
+                        try g.w.writeAll("try ");
+                    }
                     if (is_top_level) {
                         try g.w.writeAll(ident.name);
                     } else if (is_shared) {
@@ -9000,6 +9045,41 @@ const Generator = struct {
                     }
                 }
             }
+        }
+        // Cross-module `throws` method call: emit `try` when the callee's module
+        // interface records the method as throwing and we're in a throws context.
+        if (g.current_method_throws and g.try_block_label == null and !g.suppress_auto_try and
+            e.callee.* == .member and e.callee.member.object.* == .ident)
+        {
+            const mod_name = e.callee.member.object.ident.name;
+            const method_name = e.callee.member.member;
+            if (g.imported_modules) |imp| {
+                if (imp.get(mod_name)) |iface| {
+                    if (iface.throws_methods.contains(method_name)) {
+                        try g.w.writeAll("try ");
+                    }
+                }
+            }
+        }
+        // Self method call via `.method()` syntax: callee is `this.method_name`.
+        // The resolver doesn't store idents for member-access callees, so we walk
+        // the owner class/struct members to check if the called method is `throws`.
+        // Only emit `try ` prefix when we're in a throws method outside any try block.
+        // Inside a try/catch block, `genStmt` handles the catch-and-redirect suffix
+        // (see the `exprCallIsThrows` check there, which now covers `this.method()` too).
+        if (!g.suppress_auto_try and g.current_method_throws and g.try_block_label == null and
+            e.callee.* == .member and e.callee.member.object.* == .this)
+        {
+            const method_name = e.callee.member.member;
+            const callee_throws = for (g.owner_members) |decl| {
+                if (decl == .method) {
+                    const m = decl.method;
+                    if (std.mem.eql(u8, m.name, method_name)) {
+                        break m.throws or bodyHasRaise(m.body orelse &.{}, g.tc);
+                    }
+                }
+            } else false;
+            if (callee_throws) try g.w.writeAll("try ");
         }
         try g.genExpr(e.callee);
         try g.w.writeAll("(");

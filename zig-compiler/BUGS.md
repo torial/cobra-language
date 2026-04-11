@@ -256,6 +256,27 @@ These fail WITH A COMPILER ERROR — that IS the test passing:
 
 ---
 
+### BUG-023: Multi-line `cue init` blocked by indentation validator — FIXED 2026-04-10
+- **Status:** Fixed 2026-04-10
+- **Was:** The tokenizer's `processIndentation` function checked indentation on EVERY new line, including continuation lines inside open parentheses. A `cue init(a as int, b as int)` spanning two lines would trigger "SpaceIndentNotMultipleOfFour" because the continuation line's alignment indentation wasn't a multiple of 4. All `cue init` signatures had to fit on one line regardless of parameter count.
+- **Fix:** Added `paren_depth: u32 = 0` tracking to Tokenizer. Incremented in `scanOperator` on `(` and decremented on `)`. Also incremented in `scanIdentOrKeyword`'s `open_call` path (which consumed `(` without going through `scanOperator`). `processIndentation` returns early when `paren_depth > 0`. EOL tokens suppressed when `paren_depth > 0` to prevent parser syntax errors on continuation lines.
+- **Found by:** Self-hosting Phase 2 (`selfhost/ast.zbr`) — forced all `cue init` signatures onto single lines.
+
+---
+
+### BUG-024: `throws` auto-propagation missing — FIXED 2026-04-10
+- **Status:** Fixed 2026-04-10
+- **Was:** Calling a `throws` method from inside a `throws` method required explicit `?` suffix on every call. Without `?`, Zig rejects the call with "error union is ignored". CodeGen had no mechanism to auto-emit `try` for callee methods. This was a self-hosting blocker for the Parser phase (which throws on every input).
+- **Fix:** Added `current_method_throws: bool = false` to Generator, set in `genMethod` when the method signature or body requires error return. Two propagation paths:
+  1. **Bare-name calls** (`ident` callee resolved via `resolve.exprs`): auto-emits `try ` prefix when `callee_throws && current_method_throws && !in_try_block && !suppress_auto_try`.
+  2. **Self-method calls** (`.method()` syntax → callee is `member(this, "name")`): walks `owner_members` for the method by name; same guard conditions.
+  3. **Cross-module calls** (`Mod.method()` callee): checks `imported_modules[mod].throws_methods`; same guards.
+- **`suppress_auto_try` flag:** The `.try_` codegen path (Zebra `expr?`) already emits `try ` before calling `genExpr`. Without suppression, genCall would add a second `try`, producing `try try self.foo()`. `suppress_auto_try` is set via a `g2 = g; g2.suppress_auto_try = true` local copy before delegating.
+- **`owner_members` field:** Added to Generator (set by `withClass` and `genStruct`). Enables `exprCallIsThrows` to detect `this.method()` calls that throw — needed so `genTryCatch` declares the tracking variable as `var` (not `const`) when the try body contains bare self-method calls.
+- **Found by:** Self-hosting Phase 2 planning + throws_autoprop_test.zbr.
+
+---
+
 *Last updated: 2026-04-10*
 
 ---

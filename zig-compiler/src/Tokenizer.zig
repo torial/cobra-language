@@ -80,6 +80,12 @@ const Tokenizer = struct {
     /// Depth of open `/#` block comments (supports nesting).
     block_depth: u32 = 0,
 
+    /// Depth of open parentheses `(` without matching `)`.
+    /// When > 0, indentation checking is suppressed so that multi-line
+    /// argument lists (e.g. `cue init` signatures) don't trigger
+    /// SpaceIndentNotMultipleOfFour errors.
+    paren_depth: u32 = 0,
+
     // ── Low-level helpers ─────────────────────────────────────────────────
 
     fn col(self: *const Tokenizer) u16 {
@@ -121,10 +127,11 @@ const Tokenizer = struct {
                 switch (self.classifyLine()) {
                     .empty => {
                         // Bare newline — emit EOL and continue.
+                        // Inside balanced parens, EOL is not significant.
                         const ln = self.line;
                         const cl = self.col();
                         self.advanceNewline();
-                        try self.emit(.eol, "\n", ln, cl);
+                        if (self.paren_depth == 0) try self.emit(.eol, "\n", ln, cl);
                         at_line_start = true;
                         continue;
                     },
@@ -157,7 +164,8 @@ const Tokenizer = struct {
             if (c == '\n') {
                 const ln = self.line; const cl = self.col();
                 self.advanceNewline();
-                try self.emit(.eol, "\n", ln, cl);
+                // Inside balanced parens, newlines are not significant.
+                if (self.paren_depth == 0) try self.emit(.eol, "\n", ln, cl);
                 at_line_start = true;
                 continue;
             }
@@ -227,6 +235,10 @@ const Tokenizer = struct {
 
         if (tabs > 0 and spaces > 0) return error.MixedIndentation;
 
+        // Inside balanced parentheses, indentation is not significant —
+        // suppress INDENT/DEDENT emission and return after consuming whitespace.
+        if (self.paren_depth > 0) return;
+
         const level: u32 = if (spaces > 0) blk: {
             if (spaces % 4 != 0) return error.SpaceIndentNotMultipleOfFour;
             break :blk spaces / 4;
@@ -287,8 +299,11 @@ const Tokenizer = struct {
         // Identifiers, keywords, and string prefixes (c/r/ns/sharp)
         if (std.ascii.isAlphabetic(c) or c == '_') return self.scanIdentOrKeyword(ln, cl);
 
-        // String literals
-        if (c == '\'' or c == '"') return self.scanString(c, ln, cl);
+        // Character literals and string literals.
+        // 'x' or '\n' (exactly one char/escape + closing quote) → char literal.
+        // Multi-char single-quoted content → string literal (backwards compat).
+        if (c == '\'') return self.scanSingleQuote(ln, cl);
+        if (c == '"')  return self.scanString('"', ln, cl);
 
         // Operators and punctuation
         return self.scanOperator(ln, cl);
@@ -307,7 +322,15 @@ const Tokenizer = struct {
             self.pos += 1;  // consume @
             const id_start = self.pos;
             while (self.pos < self.src.len and isIdentContinue(self.src[self.pos])) : (self.pos += 1) {}
-            // text includes the @
+            const word = self.src[id_start..self.pos];
+            // @keyword escape hatch: @body, @init, @class, etc.
+            // If the word after @ is a reserved keyword, emit it as a plain identifier
+            // so it can be used as a field name, variable name, or parameter name.
+            if (tk.keyword_map.get(word) != null) {
+                try self.emit(.id, word, ln, cl);
+                return;
+            }
+            // Otherwise emit as at_id (e.g. @TypeName for future attributes).
             try self.emit(.at_id, self.src[id_start - 1 .. self.pos], ln, cl);
             return;
         }
@@ -394,6 +417,7 @@ const Tokenizer = struct {
         // open_call — non-keyword identifier immediately followed by `(`
         if (kind == .id and self.peek() == '(') {
             self.pos += 1;  // consume the (
+            self.paren_depth += 1;  // track depth for indentation suppression
             // text stores just the identifier name; the ( is implicit in the kind
             try self.emit(.open_call, word, ln, cl);
             return;
@@ -402,7 +426,25 @@ const Tokenizer = struct {
         try self.emit(kind, word, ln, cl);
     }
 
-    // ── Char literals  c'x'  c"x" ─────────────────────────────────────────
+    // ── Char literals  'x'  '\n'  (also legacy c'x' c"x") ───────────────────
+
+    /// Dispatch a bare `'` — decide whether it opens a char literal or a string.
+    /// Rule: if the content is exactly one character (or one `\X` escape) followed
+    /// by a closing `'`, emit as char_lit.  Otherwise fall through to scanString.
+    fn scanSingleQuote(self: *Tokenizer, ln: u32, cl: u16) TokenizeError!void {
+        // self.pos points to the opening '
+        const p1 = self.peekAt(1);  // first content char (or closing ')
+        if (p1 == '\\') {
+            // Escape sequence '\X': positions are ' \ X '
+            // p3 (offset 3) should be the closing quote for a valid 1-char escape.
+            if (self.peekAt(3) == '\'') return self.scanCharLiteral('\'', self.pos, ln, cl);
+        } else if (p1 != '\'' and p1 != 0 and p1 != '\n') {
+            // Single plain character: positions are ' X '
+            if (self.peekAt(2) == '\'') return self.scanCharLiteral('\'', self.pos, ln, cl);
+        }
+        // Multi-char content, empty '', or unterminated — fall through to string scanner.
+        return self.scanString('\'', ln, cl);
+    }
 
     fn scanCharLiteral(self: *Tokenizer, q: u8, start: usize, ln: u32, cl: u16) !void {
         self.pos += 1;  // consume quote
@@ -771,6 +813,12 @@ const Tokenizer = struct {
             '}' => .rcurly,
             else => return error.UnexpectedCharacter,
         };
+        // Track parenthesis depth for indentation suppression.
+        if (kind == .lparen) {
+            self.paren_depth += 1;
+        } else if (kind == .rparen and self.paren_depth > 0) {
+            self.paren_depth -= 1;
+        }
         try self.emit(kind, self.src[self.pos - 1 .. self.pos], ln, cl);
     }
 };

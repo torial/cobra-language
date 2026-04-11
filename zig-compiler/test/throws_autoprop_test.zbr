@@ -1,0 +1,27 @@
+## Test: throws auto-propagation
+##
+## When a `throws` method calls another `throws` method without an explicit `?`
+## suffix, the compiler must emit `try` automatically in the generated Zig.
+## Without this, Zig rejects the call because the error union return value is ignored.
+
+class ErrorPropTest
+    def inner() throws
+        raise "from inner"
+
+    ## Calls inner() with no `?` — compiler must auto-emit `try self.inner()`
+    def outer() throws
+        .inner()
+
+    ## Verify cross-method propagation works end-to-end via try/catch
+    def run()
+        try
+            .outer()
+        catch |_e|
+            print "caught: OK"
+
+class Main
+    shared
+        def main
+            var t = ErrorPropTest()
+            t.run()
+            print "throws_autoprop_test: passed"
