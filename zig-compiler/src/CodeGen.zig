@@ -348,12 +348,13 @@ fn binaryOpStr(op: Ast.BinaryOp) []const u8 {
 //  2. scanMutations  — which local names appear as assignment targets?
 //                     Used to emit `const` vs `var` for local declarations.
 //
-//  3. analyzeEscapes — which local variables escape the function (i.e. their
-//                     heap-owned values reach a `return` statement)?
-//                     Used to suppress `defer free` / `defer deinit` for vars
-//                     whose ownership transfers to the caller.  Replaces the
-//                     old `scanReturnedNames` heuristic with a proper fixed-point
-//                     propagation through the alias/depends-on graph.
+//  3. analyzeEscapes — which local string variables escape the function (i.e.
+//                     reach a `return` statement)?  Used to suppress
+//                     `defer _allocator.free(name)` for strings whose ownership
+//                     transfers to the caller.  List/HashMap variables do NOT
+//                     get individual deinit calls (arena owns all memory), so
+//                     this analysis is string-only.  Uses fixed-point propagation
+//                     through the alias/depends-on graph.
 
 const Refs = struct {
     /// True if any `ExprIdent` in the body resolves to a `.var_` (field) symbol,
@@ -767,12 +768,12 @@ fn seedEscapedFromReturns(stmts: []const Ast.Stmt, set: *std.StringHashMap(void)
 /// One propagation pass over var decls and field-write assigns:
 ///
 ///   • `var y = <expr>` — if `y` is escaped, add all idents in <expr> to the
-///     escaped set (y's buffers may have come from those idents).
+///     escaped set (y's string buffer may have come from those idents).
 ///   • `obj.field = <expr>` — if `obj` is escaped, add all idents in <expr> to
 ///     the escaped set.  Without this, code like:
-///       var list = List(); result.items = list; return result
-///     would incorrectly emit `defer list.deinit()` while `result.items`
-///     still references the freed ArrayList — a UAF.
+///       var s = str.format(x); result.msg = s; return result
+///     would incorrectly emit `defer _allocator.free(s)` while `result.msg`
+///     still references the freed slice.
 ///
 /// Returns true if the set grew (caller loops until stable).
 fn propagateEscapesOnce(stmts: []const Ast.Stmt, set: *std.StringHashMap(void)) anyerror!bool {
@@ -824,14 +825,14 @@ fn propagateEscapesOnce(stmts: []const Ast.Stmt, set: *std.StringHashMap(void)) 
     return grew;
 }
 
-/// Compute the set of local variable names whose heap-owned values escape this
-/// function body.  A variable escapes if its value (or the value of any variable
-/// that was initialised from it) reaches a `return` statement.
+/// Compute the set of local *string* variable names whose heap-owned values
+/// escape this function body.  A variable escapes if its value (or the value of
+/// any variable initialised from it) reaches a `return` statement.
 ///
-/// Replaces `scanReturnedNames`, which only caught variables that appeared
-/// *directly* in a return expression.  This implementation propagates through
-/// alias chains (var y = x → if y escapes, x escapes) and struct-embedding
-/// (var r = HttpResponse.ok(msg) → if r escapes, msg escapes).
+/// Purpose: suppresses `defer _allocator.free(name)` for strings whose slice
+/// ownership transfers to the caller.  List/HashMap variables are NOT covered
+/// here — they no longer receive individual deinit calls at all (the arena
+/// allocator owns all collection memory and frees it at program exit).
 ///
 /// Conservative: over-escaping (marking a variable escaped when it isn't)
 /// causes a memory leak, never a use-after-free.  Under-escaping causes UAF.
@@ -3939,8 +3940,9 @@ const Generator = struct {
             // Pre-scan 2: which locals are mutated? (var vs const)
             var mut_set = try scanMutations(body, g.alloc, g.tc);
             defer mut_set.deinit();
-            // Pre-scan 3: escape analysis — which locals' ownership transfers to caller?
-            // Fixed-point propagation through the alias graph; suppresses defer-free.
+            // Pre-scan 3: escape analysis — which string locals are returned?
+            // Suppresses `defer _allocator.free` for strings whose ownership
+            // transfers to the caller. Does NOT affect List/HashMap (no deinit emitted).
             var ret_set = try analyzeEscapes(body, g.alloc);
             defer ret_set.deinit();
             // Mutable map of closure-var names (populated lazily during genStmts)
@@ -4342,32 +4344,9 @@ const Generator = struct {
             }
         }
 
-        // List/HashMap owning vars must be `var` so that mutation methods (add/put)
-        // can take *Self. Borrowed vars (.at() / .fetch() init) and returned vars
-        // are const — they are not mutated through the local binding.
-        const eff_kw: []const u8 = blk: {
-            if (n.type_) |tr| {
-                if (tr == .generic) {
-                    const gn = tr.generic.name;
-                    if (std.mem.eql(u8, gn, "List") or std.mem.eql(u8, gn, "HashMap")) {
-                        const is_borrowed_kw: bool = if (n.init) |e| b2: {
-                            if (e.* == .call and e.call.callee.* == .member) {
-                                const m = e.call.callee.member.member;
-                                break :b2 std.mem.eql(u8, m, "at") or std.mem.eql(u8, m, "fetch");
-                            }
-                            break :b2 false;
-                        } else false;
-                        const is_returned_kw = if (g.returned_names) |rn| rn.contains(n.name) else false;
-                        if (!is_borrowed_kw and !is_returned_kw)
-                            break :blk "var";
-                    }
-                }
-            }
-            break :blk kw;
-        };
         // Mutable fn-ref vars: Zig requires `*const fn(P) R` type — you cannot have
         // a `var` of bare function type.  Emit `var name: @TypeOf(&func) = &func;`.
-        if (std.mem.eql(u8, eff_kw, "var") and tc_init_type == .fn_ref) {
+        if (std.mem.eql(u8, kw, "var") and tc_init_type == .fn_ref) {
             if (n.init) |e| {
                 if (e.* == .ident) {
                     const fname = e.ident.name;
@@ -4377,7 +4356,7 @@ const Generator = struct {
             }
         }
 
-        try g.w.writeAll(eff_kw);
+        try g.w.writeAll(kw);
         try g.w.writeAll(" ");
         try g.w.writeAll(n.name);
         if (n.type_) |tr| {
