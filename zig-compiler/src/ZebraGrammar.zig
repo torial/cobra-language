@@ -298,6 +298,8 @@ const program_rules: []const Rule = &.{
 
 const use_rules: []const Rule = &.{
     .{ .lhs = .UseDecl, .rhs = &.{ t(.kw_use), n(.UsePath), t(.eol) } },
+    // use Mod exposing Name1, Name2, ...
+    .{ .lhs = .UseDecl, .rhs = &.{ t(.kw_use), n(.UsePath), t(.kw_exposing), n(.IdListNE), t(.eol) } },
     .{ .lhs = .UsePath, .rhs = &.{ t(.id) } },
     .{ .lhs = .UsePath, .rhs = &.{ n(.UsePath), t(.dot), t(.id) } },
 };
@@ -911,6 +913,10 @@ const stmt_rules: []const Rule = &.{
         t(.kw_while), n(.Expr), t(.eol), n(.Block),
         t(.kw_post), t(.eol), n(.Block),
     } },
+    // while var id = Expr, Expr eol Block — bind-and-guard form
+    .{ .lhs = .StmtWhile, .rhs = &.{
+        t(.kw_while), t(.kw_var), t(.id), t(.assign), n(.Expr), t(.comma), n(.Expr), t(.eol), n(.Block),
+    } },
 
     // post while  (do-while: body executes, then condition is checked)
     .{ .lhs = .StmtPostWhile, .rhs = &.{ t(.kw_post), t(.kw_while), n(.Expr), t(.eol), n(.Block) } },
@@ -1091,9 +1097,10 @@ const expr_rules: []const Rule = &.{
     .{ .lhs = .Expr4, .rhs = &.{ n(.Expr4), t(.kw_not), t(.kw_in), n(.Expr5) } },
     .{ .lhs = .Expr4, .rhs = &.{ n(.Expr5) } },
 
-    // Expr5 → additive
-    .{ .lhs = .Expr5, .rhs = &.{ n(.Expr5), t(.plus),  n(.Expr6) } },
-    .{ .lhs = .Expr5, .rhs = &.{ n(.Expr5), t(.minus), n(.Expr6) } },
+    // Expr5 → additive, and range (`a..b` — used in branch on-clauses and literals)
+    .{ .lhs = .Expr5, .rhs = &.{ n(.Expr5), t(.plus),   n(.Expr6) } },
+    .{ .lhs = .Expr5, .rhs = &.{ n(.Expr5), t(.minus),  n(.Expr6) } },
+    .{ .lhs = .Expr5, .rhs = &.{ n(.Expr6), t(.dotdot), n(.Expr6) } }, // range: a..b
     .{ .lhs = .Expr5, .rhs = &.{ n(.Expr6) } },
 
     // Expr6 → multiplicative

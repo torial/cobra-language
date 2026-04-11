@@ -192,6 +192,16 @@ fn run(src: []const u8, path: []const u8, mode: Mode, gui_backend: CodeGen.GuiBa
     defer dep_visited.deinit();
     try dep_visited.put(path, {});
 
+    // Shared cache of compiled module interfaces, keyed by FILE PATH.
+    // This lets transitive deps (e.g. Lexer.zbr → Token.zbr) find their
+    // sub-dep interfaces without re-compiling the whole module.
+    var iface_cache = std.StringHashMap(TypeChecker.ModuleInterface).init(alloc);
+    defer {
+        var cit = iface_cache.valueIterator();
+        while (cit.next()) |v| v.deinit();
+        iface_cache.deinit();
+    }
+
     // Accumulate ModuleInterface for each compiled Zebra dep so the root file's
     // TypeChecker can resolve cross-module member types.
     var imported_modules = std.StringHashMap(TypeChecker.ModuleInterface).init(alloc);
@@ -218,10 +228,10 @@ fn run(src: []const u8, path: []const u8, mode: Mode, gui_backend: CodeGen.GuiBa
             .zbr => {
                 // dep.path lives until dep_visited is freed (end of run()).
                 // Skip if already compiled as a transitive dep of an earlier
-                // direct dep (diamond-dep case) — cross-module inference for
-                // it will show .unknown, which is an acceptable MVP limitation.
+                // direct dep (diamond-dep case).  The interface is still in
+                // iface_cache so the root file's TC can reach it.
                 if (dep_visited.contains(dep.path)) continue;
-                if (try compileZbrToZig(dep.path, &dep_visited, alloc)) |iface| {
+                if (try compileZbrToZig(dep.path, &dep_visited, &iface_cache, alloc)) |iface| {
                     try imported_modules.put(u.path, iface);
                 } else {
                     alloc.free(dep.path);
@@ -526,6 +536,37 @@ fn discoverDep(
     return null;
 }
 
+/// Clone a ModuleInterface, allocating fresh copies of all string keys.
+/// Type values are copied by value (they are primitives or .unknown; no
+/// pointers to symbol arenas are stored in a ModuleInterface).
+fn cloneInterface(src: *const TypeChecker.ModuleInterface, alloc: std.mem.Allocator) !TypeChecker.ModuleInterface {
+    var methods = std.StringHashMap(TypeChecker.Type).init(alloc);
+    errdefer methods.deinit();
+    {
+        var it = src.methods.iterator();
+        while (it.next()) |e| try methods.put(try alloc.dupe(u8, e.key_ptr.*), e.value_ptr.*);
+    }
+    var fields = std.StringHashMap(TypeChecker.Type).init(alloc);
+    errdefer fields.deinit();
+    {
+        var it = src.fields.iterator();
+        while (it.next()) |e| try fields.put(try alloc.dupe(u8, e.key_ptr.*), e.value_ptr.*);
+    }
+    var types = std.StringHashMap(bool).init(alloc);
+    errdefer types.deinit();
+    {
+        var it = src.types.iterator();
+        while (it.next()) |e| try types.put(try alloc.dupe(u8, e.key_ptr.*), e.value_ptr.*);
+    }
+    var throws_methods = std.StringHashMap(void).init(alloc);
+    errdefer throws_methods.deinit();
+    {
+        var it = src.throws_methods.keyIterator();
+        while (it.next()) |k| try throws_methods.put(try alloc.dupe(u8, k.*), {});
+    }
+    return .{ .methods = methods, .fields = fields, .types = types, .throws_methods = throws_methods };
+}
+
 /// Compile a .zbr file to the corresponding .zig file, first recursively
 /// compiling any of its own `use` dependencies.
 ///
@@ -542,17 +583,26 @@ fn discoverDep(
 /// should pre-check `dep_visited.contains()` and skip the call when the path
 /// was already compiled as a transitive dependency.
 fn compileZbrToZig(
-    zbr_path: []const u8,
-    visited:  *std.StringHashMap(void),
-    alloc:    std.mem.Allocator,
+    zbr_path:    []const u8,
+    visited:     *std.StringHashMap(void),
+    iface_cache: *std.StringHashMap(TypeChecker.ModuleInterface),
+    alloc:       std.mem.Allocator,
 ) anyerror!?TypeChecker.ModuleInterface {
     // Guard against duplicate or circular imports.
+    // If already compiled, return a clone from the cache so the caller can use
+    // the real interface (e.g. Lexer.zbr resolving Token.TokenKind after Token
+    // was already compiled by an outer run() call).
     const gop = try visited.getOrPut(zbr_path);
-    if (gop.found_existing) return TypeChecker.ModuleInterface{
-        .methods = std.StringHashMap(TypeChecker.Type).init(alloc),
-        .fields  = std.StringHashMap(TypeChecker.Type).init(alloc),
-        .types   = std.StringHashMap(void).init(alloc),
-    };
+    if (gop.found_existing) {
+        if (iface_cache.get(zbr_path)) |cached| return try cloneInterface(&cached, alloc);
+        // Genuine cycle (A → B → A): return an empty interface to break the loop.
+        return TypeChecker.ModuleInterface{
+            .methods        = std.StringHashMap(TypeChecker.Type).init(alloc),
+            .fields         = std.StringHashMap(TypeChecker.Type).init(alloc),
+            .types          = std.StringHashMap(bool).init(alloc),
+            .throws_methods = std.StringHashMap(void).init(alloc),
+        };
+    }
 
     // ── 1. Read source ────────────────────────────────────────────────────────
     const src = std.fs.cwd().readFileAlloc(alloc, zbr_path, 64 * 1024 * 1024) catch |err| {
@@ -594,6 +644,12 @@ fn compileZbrToZig(
     const dep_dir = std.fs.path.dirname(zbr_path) orelse ".";
     var dep_native_uses = std.StringHashMap(CodeGen.NativeUse).init(alloc);
     defer dep_native_uses.deinit();
+    var dep_imported_modules = std.StringHashMap(TypeChecker.ModuleInterface).init(alloc);
+    defer {
+        var mit = dep_imported_modules.valueIterator();
+        while (mit.next()) |v| v.deinit();
+        dep_imported_modules.deinit();
+    }
     for (module.decls) |decl| {
         const u = switch (decl) { .use => |u| u, else => continue };
         const dep = try discoverDep(u.path, dep_dir, alloc) orelse {
@@ -602,10 +658,10 @@ fn compileZbrToZig(
         };
         switch (dep.kind) {
             .zbr => {
-                const sub = try compileZbrToZig(dep.path, visited, alloc);
+                const sub = try compileZbrToZig(dep.path, visited, iface_cache, alloc);
                 if (sub == null) { alloc.free(dep.path); return null; }
-                var sub_iface = sub.?;
-                sub_iface.deinit(); // transitive interfaces not propagated upward
+                // Store the sub-interface so cross-module type refs resolve in this dep.
+                try dep_imported_modules.put(u.path, sub.?);
             },
             .zig => {
                 try dep_native_uses.put(u.path, .zig);
@@ -626,10 +682,10 @@ fn compileZbrToZig(
     var bind = try Binder.bindPass1(module, sym_arena.allocator(), alloc);
     defer bind.deinit();
 
-    var resolve = try Resolver.resolvePass2(module, &bind.table, alloc, alloc, null);
+    var resolve = try Resolver.resolvePass2(module, &bind.table, alloc, alloc, &dep_imported_modules);
     defer resolve.deinit();
 
-    var tc = try TypeChecker.typeCheckPass3(module, &resolve, alloc, alloc, null);
+    var tc = try TypeChecker.typeCheckPass3(module, &resolve, alloc, alloc, &dep_imported_modules);
     defer tc.deinit();
 
     var had_error = false;
@@ -642,13 +698,18 @@ fn compileZbrToZig(
     // Must happen before sym_arena / resolve are freed (deferred above).
     const iface = try TypeChecker.extractModuleInterface(module, &resolve, alloc);
 
+    // Store a clone in the cache so later callers (transitive deps compiled
+    // after us) can retrieve the real interface without re-compiling.
+    const path_key = try alloc.dupe(u8, zbr_path);
+    try iface_cache.put(path_key, try cloneInterface(&iface, alloc));
+
     // ── 7b. CodeGen → write .zig file ────────────────────────────────────────
     const zig = try zigPath(zbr_path, alloc);
     defer alloc.free(zig);
 
     var buf = std.ArrayList(u8){};
     defer buf.deinit(alloc);
-    _ = try CodeGen.generate(module, &resolve, &tc, alloc, buf.writer(alloc).any(), .stub, &dep_native_uses, false, null);
+    _ = try CodeGen.generate(module, &resolve, &tc, alloc, buf.writer(alloc).any(), .stub, &dep_native_uses, false, &dep_imported_modules);
 
     const f = try std.fs.cwd().createFile(zig, .{});
     defer f.close();

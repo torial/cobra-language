@@ -1,0 +1,29 @@
+shared def isAlpha(c as char) as bool
+    return (c >= c'a' and c <= c'z') or (c >= c'A' and c <= c'Z')
+
+shared def isDigit(c as char) as bool
+    return c >= c'0' and c <= c'9'
+
+class FnRefTest
+    def run()
+        # Store top-level function references in variables, call through them
+        var f = isAlpha
+        assert f(c'x')
+        assert not f(c'3')
+
+        var g = isDigit
+        assert g(c'7')
+        assert not g(c'z')
+
+        # Reassign a fn-ref variable
+        var pred = isAlpha
+        assert pred(c'A')
+        pred = isDigit
+        assert pred(c'5')
+        assert not pred(c'A')
+
+class Main
+    shared def main()
+        var t = FnRefTest()
+        t.run()
+        print "fn_ref_test: all OK"

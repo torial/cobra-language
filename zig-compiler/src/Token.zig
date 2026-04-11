@@ -187,6 +187,7 @@ pub const TokenKind = enum {
 
     // Module / namespace
     kw_use,
+    kw_exposing,
     kw_namespace,
 
     // Type declarations
@@ -317,6 +318,7 @@ pub const TokenKind = enum {
 /// distinguish identifiers from keywords in O(1) via hash lookup.
 pub const keyword_map = std.StaticStringMap(TokenKind).initComptime(.{
     .{ "use",         .kw_use },
+    .{ "exposing",    .kw_exposing },
     .{ "namespace",   .kw_namespace },
     .{ "class",       .kw_class },
     .{ "interface",   .kw_interface },

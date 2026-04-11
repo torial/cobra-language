@@ -319,9 +319,20 @@ const Resolver = struct {
                 if (s.else_body) |eb| try r.walkStmts(eb, scope);
             },
             .while_   => |s| {
-                try r.walkExpr(s.cond, scope);
-                try r.walkStmts(s.body, scope);
-                if (s.post_body) |pb| try r.walkStmts(pb, scope);
+                if (s.bind) |bind| {
+                    // `while var c = expr, guard` — bind is scoped to cond + body.
+                    try r.walkExpr(bind.init, scope);
+                    var body_scope = try r.table.newScope(.block, scope);
+                    const sym = try r.table.arena.create(Symbol);
+                    sym.* = .{ .name = bind.name, .kind = .local, .decl = .{ .catch_binding = s.span } };
+                    _ = try body_scope.define(bind.name, sym);
+                    try r.walkExpr(s.cond, body_scope);
+                    try r.walkStmts(s.body, body_scope);
+                } else {
+                    try r.walkExpr(s.cond, scope);
+                    try r.walkStmts(s.body, scope);
+                    if (s.post_body) |pb| try r.walkStmts(pb, scope);
+                }
             },
             .for_in   => |s| {
                 try r.walkExpr(s.iter, scope);
@@ -759,6 +770,7 @@ const Resolver = struct {
                 if (s.else_body) |eb| for (eb) |st| try r.collectFreeVarsStmt(st, local, out, seen);
             },
             .while_  => |s| {
+                if (s.bind) |bind| try r.collectFreeVars(bind.init, local, out, seen);
                 try r.collectFreeVars(s.cond, local, out, seen);
                 for (s.body) |st| try r.collectFreeVarsStmt(st, local, out, seen);
             },
@@ -897,6 +909,7 @@ const Resolver = struct {
                 if (s.else_body) |eb| for (eb) |st| try r.checkCaptureBoundaryStmt(st, lambda_local);
             },
             .while_  => |s| {
+                if (s.bind) |bind| try r.checkCaptureBoundary(bind.init, lambda_local);
                 try r.checkCaptureBoundary(s.cond, lambda_local);
                 for (s.body) |st| try r.checkCaptureBoundaryStmt(st, lambda_local);
             },

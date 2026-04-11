@@ -63,10 +63,14 @@ pub const Decl = union(enum) {
 };
 
 /// `use Foo.Bar` — module import directive.
+/// `use Foo.Bar exposing Name1, Name2` — selective import; exposed names are
+/// bound directly in scope so callers can write `Name1.x` without the module prefix.
 pub const DeclUse = struct {
     span: Span,
     /// Full dotted path as raw text, e.g. `"System.Collections"`.
     path: []const u8,
+    /// Names to expose directly into scope.  Empty slice means import whole module.
+    exposing: []const []const u8,
 };
 
 /// `namespace Foo` — groups declarations under a dotted namespace name.
@@ -343,8 +347,16 @@ pub const ElseIf = struct {
     body: []const Stmt,
 };
 
+/// Optional per-iteration binding for `while var c = expr, guard` loops.
+pub const WhileBind = struct {
+    name: []const u8,
+    init: *Expr,
+};
+
 pub const StmtWhile = struct {
     span: Span,
+    /// `while var c = expr, guard` — bind `c` each iteration before testing `guard`.
+    bind: ?WhileBind,
     cond: *Expr,
     /// `post` body (runs after each iteration if no break).
     post_body: ?[]const Stmt,

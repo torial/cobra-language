@@ -231,6 +231,15 @@ const Binder = struct {
         if (try scope.define(alias, sym)) |_| {
             try b.emitDuplicateError(n.span, alias);
         }
+        // For selective imports (`use Mod exposing Name1, Name2`), register each
+        // exposed name as an additional `.module` symbol so ident/type-ref resolution
+        // doesn't error on bare `Name1` usage.  The same `DeclUse` pointer is stored
+        // so CodeGen can recover the module alias from `sym.decl.use.path`.
+        for (n.exposing) |exp_name| {
+            if (std.mem.eql(u8, exp_name, alias)) continue; // already registered above
+            const exp_sym = try b.table.newSymbol(exp_name, .module, .{ .use = n });
+            _ = try scope.define(exp_name, exp_sym);
+        }
     }
 
     // ── Member declarations ───────────────────────────────────────────────────

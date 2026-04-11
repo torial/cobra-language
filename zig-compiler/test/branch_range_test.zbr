@@ -1,0 +1,27 @@
+class BranchRangeTest
+    def classify(c as char) as str
+        branch c
+            on c'a'..c'z'
+                return "lower"
+            on c'A'..c'Z'
+                return "upper"
+            on c'0'..c'9'
+                return "digit"
+            else
+                return "other"
+
+    def run()
+        assert classify(c'g') == "lower"
+        assert classify(c'M') == "upper"
+        assert classify(c'5') == "digit"
+        assert classify(c'!') == "other"
+        assert classify(c'z') == "lower"
+        assert classify(c'A') == "upper"
+        assert classify(c'0') == "digit"
+        assert classify(c'9') == "digit"
+
+class Main
+    shared def main()
+        var t = BranchRangeTest()
+        t.run()
+        print "branch_range_test: all OK"

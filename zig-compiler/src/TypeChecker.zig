@@ -126,6 +126,13 @@ pub const Type = union(enum) {
     /// boundaries.  The slices point into the `imported_modules` key arena.
     cross_module: struct { module: []const u8, type_name: []const u8 },
 
+    // ── Function reference ────────────────────────────────────────────────────
+    /// A first-class reference to a named function / method.
+    /// Produced when a method ident is used in non-call position:
+    ///   `var f = isAlpha`  or  `list.forEach(isAlpha)`
+    /// The referenced symbol is stored for later arity/type checking.
+    fn_ref: *const Symbol,
+
     // ── Special ───────────────────────────────────────────────────────────────
     /// Cannot determine type: upstream error or unsupported construct.
     /// Suppresses further cascading errors.
@@ -189,6 +196,7 @@ pub const Type = union(enum) {
                                         std.mem.eql(u8, cm_a.type_name, cm_b.type_name),
                 else => false,
             },
+            .fn_ref         => |sa| switch (b) { .fn_ref => |sb| sa == sb, else => false },
             .unknown        => b == .unknown,
         };
     }
@@ -218,6 +226,8 @@ pub const Type = union(enum) {
         if (from == .optional and from.optional.* == .void_) return to == .optional; // nil → ?T
         // T is assignable to ?T (wrapping in optional)
         if (to == .optional) return isAssignable(from, to.optional.*);
+        // Any fn_ref is assignable to any fn_ref (same-arity compatibility deferred to runtime)
+        if (from == .fn_ref and to == .fn_ref) return true;
         return eql(from, to);
     }
 
@@ -260,6 +270,7 @@ pub const Type = union(enum) {
             .optional       => "?T",
             .tuple          => "tuple",
             .cross_module   => |cm| cm.type_name,
+            .fn_ref         => |s| s.name,
             .unknown        => "<unknown>",
         };
     }
@@ -299,8 +310,15 @@ pub const ModuleInterface = struct {
     /// Field / property types: "ClassName.fieldName" → Type
     fields:  std.StringHashMap(Type),
     /// Exported type names: class, struct, enum, union names declared at top level.
-    /// Used by the Resolver to recognise cross-module TypeRefs like `Ast.Expr`.
-    types:   std.StringHashMap(void),
+    /// Value is `true` when the type is a union (discriminated-union / variant type),
+    /// `false` for class/struct/enum.  Used by the Resolver to recognise cross-module
+    /// TypeRefs like `Ast.Expr`, and by CodeGen to decide whether to unwrap a sole
+    /// same-named type on import (unions are skipped in that count).
+    types:   std.StringHashMap(bool),
+    /// Subset of `methods` keys for methods declared `throws`.
+    /// Used by CodeGen to emit `catch` redirects when a cross-module throwing method
+    /// is called inside a `try/catch` block's var initializer.
+    throws_methods: std.StringHashMap(void),
 
     pub fn deinit(self: *ModuleInterface) void {
         const alloc = self.methods.allocator;
@@ -313,6 +331,9 @@ pub const ModuleInterface = struct {
         var tk = self.types.keyIterator();
         while (tk.next()) |k| alloc.free(k.*);
         self.types.deinit();
+        var tmk = self.throws_methods.keyIterator();
+        while (tmk.next()) |k| alloc.free(k.*);
+        self.throws_methods.deinit();
     }
 };
 
@@ -330,52 +351,56 @@ pub fn extractModuleInterface(
     errdefer methods.deinit();
     var fields = std.StringHashMap(Type).init(alloc);
     errdefer fields.deinit();
-    var types = std.StringHashMap(void).init(alloc);
+    var types = std.StringHashMap(bool).init(alloc);
     errdefer types.deinit();
+    var throws_methods = std.StringHashMap(void).init(alloc);
+    errdefer throws_methods.deinit();
 
-    try extractFromDecls(module.decls, resolve, alloc, &methods, &fields, &types);
-    return .{ .methods = methods, .fields = fields, .types = types };
+    try extractFromDecls(module.decls, resolve, alloc, &methods, &fields, &types, &throws_methods);
+    return .{ .methods = methods, .fields = fields, .types = types, .throws_methods = throws_methods };
 }
 
 fn extractFromDecls(
-    decls:   []const Ast.Decl,
-    resolve: *const Resolver.ResolveResult,
-    alloc:   Allocator,
-    methods: *std.StringHashMap(Type),
-    fields:  *std.StringHashMap(Type),
-    types:   *std.StringHashMap(void),
+    decls:          []const Ast.Decl,
+    resolve:        *const Resolver.ResolveResult,
+    alloc:          Allocator,
+    methods:        *std.StringHashMap(Type),
+    fields:         *std.StringHashMap(Type),
+    types:          *std.StringHashMap(bool),
+    throws_methods: *std.StringHashMap(void),
 ) !void {
     for (decls) |decl| switch (decl) {
         .class  => |c| {
             const key = try alloc.dupe(u8, c.name);
-            try types.put(key, {});
-            try extractFromMembers(c.name, c.members, resolve, alloc, methods, fields);
+            try types.put(key, false); // false = not a union
+            try extractFromMembers(c.name, c.members, resolve, alloc, methods, fields, throws_methods);
         },
         .struct_ => |s| {
             const key = try alloc.dupe(u8, s.name);
-            try types.put(key, {});
-            try extractFromMembers(s.name, s.members, resolve, alloc, methods, fields);
+            try types.put(key, false);
+            try extractFromMembers(s.name, s.members, resolve, alloc, methods, fields, throws_methods);
         },
         .enum_ => |e| {
             const key = try alloc.dupe(u8, e.name);
-            try types.put(key, {});
+            try types.put(key, false);
         },
         .union_ => |u| {
             const key = try alloc.dupe(u8, u.name);
-            try types.put(key, {});
+            try types.put(key, true); // true = is a union (skipped in sole-type import heuristic)
         },
-        .namespace => |ns| try extractFromDecls(ns.decls, resolve, alloc, methods, fields, types),
+        .namespace => |ns| try extractFromDecls(ns.decls, resolve, alloc, methods, fields, types, throws_methods),
         else => {},
     };
 }
 
 fn extractFromMembers(
-    class_name: []const u8,
-    members:    []const Ast.Decl,
-    resolve:    *const Resolver.ResolveResult,
-    alloc:      Allocator,
-    methods:    *std.StringHashMap(Type),
-    fields:     *std.StringHashMap(Type),
+    class_name:     []const u8,
+    members:        []const Ast.Decl,
+    resolve:        *const Resolver.ResolveResult,
+    alloc:          Allocator,
+    methods:        *std.StringHashMap(Type),
+    fields:         *std.StringHashMap(Type),
+    throws_methods: *std.StringHashMap(void),
 ) !void {
     for (members) |m| switch (m) {
         .method => |meth| {
@@ -387,6 +412,10 @@ fn extractFromMembers(
             // ModuleInterface.deinit() walks and frees keys.
             const key = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ class_name, meth.name });
             try methods.put(key, ret);
+            if (meth.throws) {
+                const tk = try alloc.dupe(u8, key);
+                try throws_methods.put(tk, {});
+            }
         },
         .var_  => |v| {
             const t = simpleTypeFromRef(if (v.type_) |*tr| tr else null, resolve, alloc);
@@ -876,6 +905,10 @@ const TypeChecker = struct {
                 }
             },
             .while_   => |s| {
+                if (s.bind) |bind| {
+                    // `while var c = expr, guard` — infer bind.init type; guard references c.
+                    _ = try tc.inferExpr(bind.init);
+                }
                 try tc.checkBoolExpr(s.cond);
                 try tc.checkStmts(s.body);
                 if (s.post_body) |pb| try tc.checkStmts(pb);
@@ -1539,7 +1572,41 @@ const TypeChecker = struct {
                         const decl = sym.decl.method;
                         return tc.typeFromOptRef(if (decl.return_type) |*rt| rt else null);
                     }
-                    return tc.symbolType(sym);
+                    // Exposed class constructor: `use Mod exposing ClassName` then `ClassName(args)`.
+                    // The symbol kind is `.module` but the name is the exposed type (not the module alias).
+                    // Return `cross_module` so genLocalVar emits `var` (methods take *Self receivers).
+                    if (sym.kind == .module and sym.decl == .use) {
+                        const use_decl = sym.decl.use;
+                        const last_dot = std.mem.lastIndexOf(u8, use_decl.path, ".");
+                        const mod_alias = if (last_dot) |d| use_decl.path[d + 1..] else use_decl.path;
+                        // If this is an exposed name (sym.name != module alias), it's an exposed type.
+                        if (!std.mem.eql(u8, sym.name, mod_alias)) {
+                            if (tc.imported_modules) |imp| {
+                                if (imp.get(mod_alias)) |iface| {
+                                    if (iface.types.getPtr(sym.name)) |is_union_ptr| {
+                                        if (!is_union_ptr.*) {
+                                            // Non-union exposed type = class/struct constructor call.
+                                            return Type{ .cross_module = .{
+                                                .module    = mod_alias,
+                                                .type_name = sym.name,
+                                            }};
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    const sym_type = tc.symbolType(sym);
+                    // If the callee is a variable holding a function reference,
+                    // chase the reference to get the actual function return type.
+                    if (sym_type == .fn_ref) {
+                        const ref_sym = sym_type.fn_ref;
+                        if (ref_sym.kind == .method) {
+                            const decl = ref_sym.decl.method;
+                            return tc.typeFromOptRef(if (decl.return_type) |*rt| rt else null);
+                        }
+                    }
+                    return sym_type;
                 }
             },
             .member => |mem| {
@@ -2253,7 +2320,7 @@ const TypeChecker = struct {
         return switch (sym.kind) {
             .class, .interface, .struct_, .mixin, .enum_ => .{ .named = sym },
             .namespace_   => .unknown, // namespaces are not value-typed
-            .method       => .unknown, // use inferCall to resolve the return type
+            .method       => .{ .fn_ref = sym }, // first-class function reference
             .property     => {
                 const decl = sym.decl.property;
                 return tc.typeFromOptRef(if (decl.type_) |*t| t else null);

@@ -1,0 +1,16 @@
+union Color
+    red
+    green
+    blue
+
+class Palette
+    var name as str
+
+    cue init(n as str)
+        name = n
+
+    def describe() as str
+        return "Palette:" + name
+
+shared def makeRed() as Color
+    return Color.red()

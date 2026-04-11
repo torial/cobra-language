@@ -203,6 +203,18 @@ These fail WITH A COMPILER ERROR — that IS the test passing:
   2. `ref_box_type_name` extended: for `localVar.field = x` targets, after searching `owner_class`, falls back to looking up the field via the TC type of the object. For nested `a.b.field = x`, looks up `field` in the declared type of `a.b`.
 - **Test:** `test/recursive_type_test.zbr` — `PairHolder` test with non-optional `^Pair` field.
 
+### BUG-017: `len` on unknown-TC-type emits `.items.len` heuristic — imprecise
+- **Severity:** Low
+- **Status:** Open — known imprecision; deferred until ModuleInterface preserves return types
+- **Symptom:** When a local variable's TC type is `.unknown` (most commonly: the result of a cross-module method call whose return type isn't tracked in `ModuleInterface.methods`) and `.len` is accessed on it, CodeGen emits `.items.len` as a last-resort fallback. This is correct for `ArrayList`-backed `List(T)` values but is wrong for any user-defined struct that has a field named `len`.
+- **Example that triggered it:** `lexer_test.zbr` — `var toks = Lexer.tokenize(src)` returned a cross-module `List(Token.Token)`; `toks.len` needed `.items.len`. TC type of `toks` was `.unknown` because `ModuleInterface.methods` stores only `TypeChecker.Type` scalars, not generic `List(T)` return shapes.
+- **Root cause:** `ModuleInterface` does not preserve enough information to know that `Lexer.tokenize` returns a `List(Token.Token)`. The methods map stores `Type` values which have no "list of T" variant. So cross-module list-returning calls always land with `.unknown` TC type, and the `len` heuristic fires.
+- **Proper fix:** Add a `.list { elem_type }` variant to `TypeChecker.Type`, store it in `ModuleInterface.methods` for methods that return `List(T)`, and propagate it through `inferCall` for cross-module calls. Then the heuristic can be removed; `len` on a `.list` type correctly emits `.items.len`, and `len` on any other type emits `.len` (for slices/strings).
+- **Risk of current heuristic:** A user struct with a field named `len` whose type can't be inferred cross-module will silently get `.items.len` emitted — producing a Zig compile error (not a silent wrong answer), so the bug is detectable.
+- **Found by:** Self-hosting Phase 1 (`selfhost/lexer_test.zbr`).
+
+---
+
 *Last updated: 2026-04-10*
 
 ---

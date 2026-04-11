@@ -119,11 +119,22 @@ const Builder = struct {
     // ── Use directive ─────────────────────────────────────────────────────────
 
     fn buildUseDecl(b: Builder, node: TN) anyerror!Ast.DeclUse {
-        // use UsePath eol
         const kids = ch(node);
+        if (kids.len == 5) {
+            // use UsePath kw_exposing IdListNE eol
+            var names = std.ArrayList([]const u8){};
+            try b.collectIdListNE(kids[3], &names);
+            return .{
+                .span     = spanOf(node, b.tokens),
+                .path     = spanText(kids[1], b.tokens),
+                .exposing = try names.toOwnedSlice(b.arena),
+            };
+        }
+        // use UsePath eol
         return .{
-            .span = spanOf(node, b.tokens),
-            .path = spanText(kids[1], b.tokens),
+            .span     = spanOf(node, b.tokens),
+            .path     = spanText(kids[1], b.tokens),
+            .exposing = &.{},
         };
     }
 
@@ -1107,10 +1118,25 @@ const Builder = struct {
     }
 
     fn buildStmtWhile(b: Builder, node: TN) anyerror!Ast.StmtWhile {
-        // kw_while Expr eol Block [kw_post eol Block]
         const kids = ch(node);
+        if (kids.len == 9) {
+            // while var id = Expr , Expr eol Block
+            // [0]       [1]  [2] [3] [4] [5] [6] [7]  [8]
+            // kw_while kw_var id assign Expr comma Expr eol Block
+            const bind_name = leafText(kids[2], b.tokens);
+            const bind_init = try b.box(Ast.Expr, try b.buildExpr(kids[4]));
+            return .{
+                .span      = spanOf(node, b.tokens),
+                .bind      = .{ .name = bind_name, .init = bind_init },
+                .cond      = try b.box(Ast.Expr, try b.buildExpr(kids[6])),
+                .body      = try b.buildBlock(kids[8]),
+                .post_body = null,
+            };
+        }
+        // kw_while Expr eol Block [kw_post eol Block]
         return .{
             .span      = spanOf(node, b.tokens),
+            .bind      = null,
             .cond      = try b.box(Ast.Expr, try b.buildExpr(kids[1])),
             .body      = try b.buildBlock(kids[3]),
             .post_body = if (kids.len > 4) try b.buildBlock(kids[6]) else null,
@@ -1122,6 +1148,7 @@ const Builder = struct {
         const kids = ch(node);
         return .{
             .span      = spanOf(node, b.tokens),
+            .bind      = null,
             .cond      = try b.box(Ast.Expr, try b.buildExpr(kids[2])),
             .body      = try b.buildBlock(kids[4]),
             .post_body = null,
@@ -1833,6 +1860,7 @@ const Builder = struct {
                 .slashslash => mk.bin(b, s, .int_div, left, right),
                 .percent   => mk.bin(b, s, .mod,     left, right),
                 .starstar  => mk.bin(b, s, .pow,     left, right),
+                .dotdot    => mk.bin(b, s, .dotdot,  left, right), // range: a..b
                 .kw_orelse => .{ .orelse_ = try b.box(Ast.ExprOrelse, .{
                     .span = s, .expr = left, .fallback = right,
                 }) },

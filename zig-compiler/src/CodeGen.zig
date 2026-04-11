@@ -138,6 +138,10 @@ pub fn generate(
     defer mixins.deinit();
     var union_names = try collectUnionNames(module, alloc);
     defer union_names.deinit();
+    var exposed_unions = std.StringHashMap(void).init(alloc);
+    defer exposed_unions.deinit();
+    var exposed_classes = std.StringHashMap(void).init(alloc);
+    defer exposed_classes.deinit();
 
     var uses_gui    = false;
     var has_exports = false;
@@ -154,6 +158,8 @@ pub fn generate(
         .closure_vars     = null,
         .capture_fields   = &.{},
         .union_names      = &union_names,
+        .exposed_unions   = &exposed_unions,
+        .exposed_classes  = &exposed_classes,
         .gui_backend      = gui_backend,
         .uses_gui_ptr     = &uses_gui,
         .native_uses      = native_uses,
@@ -364,6 +370,7 @@ fn refsInStmt(stmt: Ast.Stmt, r: *const Resolver.ResolveResult, o: *Refs) anyerr
             if (s.else_body) |eb| try refsInStmts(eb, r, o);
         },
         .while_    => |s| {
+            if (s.bind) |bind| try refsInExpr(bind.init, r, o);
             try refsInExpr(s.cond, r, o);
             try refsInStmts(s.body, r, o);
             if (s.post_body) |pb| try refsInStmts(pb, r, o);
@@ -432,7 +439,11 @@ fn bodyHasRaise(stmts: []const Ast.Stmt, tc_opt: ?*const TypeChecker.TypeCheckRe
                 }
                 if (s.else_body) |eb| if (bodyHasRaise(eb, tc_opt)) return true;
             },
-            .while_  => |s| { if (exprHasTry(s.cond, tc_opt)) return true; if (bodyHasRaise(s.body, tc_opt)) return true; },
+            .while_  => |s| {
+                if (s.bind) |bind| if (exprHasTry(bind.init, tc_opt)) return true;
+                if (exprHasTry(s.cond, tc_opt)) return true;
+                if (bodyHasRaise(s.body, tc_opt)) return true;
+            },
             .for_in  => |s| if (bodyHasRaise(s.body, tc_opt)) return true,
             .for_num => |s| if (bodyHasRaise(s.body, tc_opt)) return true,
             .branch  => |s| {
@@ -473,7 +484,11 @@ fn bodyNeedsErrVar(stmts: []const Ast.Stmt, tc_opt: ?*const TypeChecker.TypeChec
                 }
                 if (s.else_body) |eb| if (bodyNeedsErrVar(eb, tc_opt)) return true;
             },
-            .while_  => |s| { if (exprHasTry(s.cond, tc_opt)) return true; if (bodyNeedsErrVar(s.body, tc_opt)) return true; },
+            .while_  => |s| {
+                if (s.bind) |bind| if (exprHasTry(bind.init, tc_opt)) return true;
+                if (exprHasTry(s.cond, tc_opt)) return true;
+                if (bodyNeedsErrVar(s.body, tc_opt)) return true;
+            },
             .for_in  => |s| if (bodyNeedsErrVar(s.body, tc_opt)) return true,
             .for_num => |s| if (bodyNeedsErrVar(s.body, tc_opt)) return true,
             .branch  => |s| {
@@ -493,12 +508,35 @@ fn bodyNeedsErrVar(stmts: []const Ast.Stmt, tc_opt: ?*const TypeChecker.TypeChec
 }
 
 /// Returns true if `e` is a call to a `throws`-annotated method
-/// (ClassName.methodName(args) form only).
-fn exprCallIsThrows(e: *const Ast.ExprCall, resolve: *const Resolver.ResolveResult) bool {
+/// (ClassName.methodName(args) form only, including cross-module Module.method calls).
+fn exprCallIsThrows(
+    e:                *const Ast.ExprCall,
+    resolve:          *const Resolver.ResolveResult,
+    imported_modules: ?*const std.StringHashMap(TypeChecker.ModuleInterface),
+) bool {
     if (e.callee.* != .member) return false;
     const mem = e.callee.member;
     if (mem.object.* != .ident) return false;
     const sym = resolve.exprs.get(&mem.object.ident) orelse return false;
+    // Cross-module call: receiver is a `.module` symbol (from `use ModuleName`).
+    if (sym.kind == .module) {
+        if (imported_modules) |imp| {
+            if (imp.get(sym.name)) |iface| {
+                // Key format: "ClassName.methodName" — for a sole-class module the
+                // class name equals the module alias.
+                // Try both "Alias.method" and "Alias.Alias.method" forms.
+                if (iface.throws_methods.contains(mem.member)) return true;
+                const key_buf: [256]u8 = undefined;
+                _ = key_buf;
+                // Build "ModAlias.method" key.
+                var buf: [512]u8 = undefined;
+                const k1 = std.fmt.bufPrint(&buf, "{s}.{s}", .{ sym.name, mem.member }) catch return false;
+                if (iface.throws_methods.contains(k1)) return true;
+            }
+        }
+        return false;
+    }
+    // Same-file class/struct call.
     const members: []const Ast.Decl = switch (sym.decl) {
         .class   => |c| c.members,
         .struct_ => |s| s.members,
@@ -514,10 +552,18 @@ fn exprCallIsThrows(e: *const Ast.ExprCall, resolve: *const Resolver.ResolveResu
 }
 
 /// Returns true if any statement in `stmts` is a direct call to a `throws` method.
-fn bodyHasThrowsCall(stmts: []const Ast.Stmt, resolve: *const Resolver.ResolveResult) bool {
+fn bodyHasThrowsCall(
+    stmts:            []const Ast.Stmt,
+    resolve:          *const Resolver.ResolveResult,
+    imported_modules: ?*const std.StringHashMap(TypeChecker.ModuleInterface),
+) bool {
     for (stmts) |stmt| {
         if (stmt == .expr and stmt.expr.* == .call) {
-            if (exprCallIsThrows(stmt.expr.call, resolve)) return true;
+            if (exprCallIsThrows(stmt.expr.call, resolve, imported_modules)) return true;
+        }
+        // Var init that's a throws call also counts (affects try-block var tracking).
+        if (stmt == .var_ and stmt.var_.init != null and stmt.var_.init.?.* == .call) {
+            if (exprCallIsThrows(stmt.var_.init.?.call, resolve, imported_modules)) return true;
         }
     }
     return false;
@@ -555,9 +601,20 @@ fn refsInExpr(expr: *const Ast.Expr, r: *const Resolver.ResolveResult, o: *Refs)
     switch (expr.*) {
         .ident => |*e| {
             if (r.exprs.get(e)) |sym| switch (sym.kind) {
-                .var_  => o.uses_self = true,
-                .param => try o.param_names.put(e.name, {}),
-                else   => {},
+                .var_    => o.uses_self = true,
+                // Unqualified instance method call within the same class → emitted as
+                // self.method() in Zig, so self IS needed.
+                // Exception: top-level `def` (LANG-001) are called without self, so
+                // referencing them does NOT imply self is used.
+                .method  => {
+                    const is_top = switch (sym.decl) {
+                        .method => |m| m.is_top_level,
+                        else    => false,
+                    };
+                    if (!is_top) o.uses_self = true;
+                },
+                .param   => try o.param_names.put(e.name, {}),
+                else     => {},
             };
         },
         .binary      => |e| { try refsInExpr(e.left, r, o);    try refsInExpr(e.right, r, o); },
@@ -785,6 +842,7 @@ fn scanMutationsInto(
                 if (s.else_body) |eb| try scanMutationsInto(eb, set, tc_opt);
             },
             .while_  => |s| {
+                if (s.bind) |bind| try scanMutationsInExpr(bind.init, set, tc_opt);
                 try scanMutationsInto(s.body, set, tc_opt);
                 if (s.post_body) |pb| try scanMutationsInto(pb, set, tc_opt);
             },
@@ -964,7 +1022,10 @@ fn nameUsedInStmt(name: []const u8, stmt: Ast.Stmt) bool {
             if (s.else_body) |eb| if (nameUsedInStmts(name, eb)) break :blk true;
             break :blk false;
         },
-        .while_  => |s| nameUsedInExpr(name, s.cond) or nameUsedInStmts(name, s.body),
+        .while_  => |s| blk: {
+            if (s.bind) |bind| if (nameUsedInExpr(name, bind.init)) break :blk true;
+            break :blk nameUsedInExpr(name, s.cond) or nameUsedInStmts(name, s.body);
+        },
         .for_in  => |s| nameUsedInExpr(name, s.iter) or nameUsedInStmts(name, s.body),
         .for_num => |s| nameUsedInExpr(name, s.start) or nameUsedInExpr(name, s.stop) or nameUsedInStmts(name, s.body),
         .guard       => |s| nameUsedInExpr(name, s.cond) or nameUsedInStmts(name, s.else_body),
@@ -1030,6 +1091,14 @@ const Generator = struct {
     /// Names of all union types declared in the current module.
     /// Used to detect union construction calls: `Type.variant(value)`.
     union_names: *const std.StringHashMap(void),
+    /// Union type names introduced by selective imports (`use Mod exposing UnionName`).
+    /// Populated lazily by `genUse` when an exposed name is a union in the dep's
+    /// ModuleInterface.  Allows `UnionName.variant(v)` → `UnionName{ .variant = v }`.
+    exposed_unions: *std.StringHashMap(void),
+    /// Class/struct names introduced by selective imports (`use Mod exposing ClassName`).
+    /// Populated lazily by `genUse` when the exposed name is a class (non-union) type.
+    /// Allows `ClassName(args)` → `ClassName.init(args)` without a class symbol lookup.
+    exposed_classes: *std.StringHashMap(void),
     /// When non-null, we are inside a `try` block.  `raise` breaks the labeled
     /// block (name = try_block_label) and records the error into this variable
     /// instead of returning from the enclosing method.
@@ -1088,9 +1157,6 @@ const Generator = struct {
     /// When `is_generic`, points to the class declaration so that `genAssign` can
     /// resolve field types for explicit `std.ArrayList(T){}` emission.
     owner_class: ?*const Ast.DeclClass = null,
-    /// Resolved Zig element-type string for an imminent `List()` call.
-    /// Set by `genAssign` when the LHS field type is known; cleared after use.
-    lhs_list_elem: ?[]const u8 = null,
     /// Incremented each time we enter an `arena` block so nested scopes get
     /// unique variable names (_arena_scope_1, _arena_scope_2, …).
     arena_depth: u32 = 0,
@@ -1135,32 +1201,13 @@ const Generator = struct {
         return null;
     }
 
-    fn resolveListElemType(g: Generator, field_name: []const u8) ?[]const u8 {
-        const cls = g.owner_class orelse return null;
-        for (cls.members) |m| {
-            const vd: *const Ast.DeclVar = switch (m) {
-                .var_ => |v| v,
-                else  => continue,
-            };
-            if (!std.mem.eql(u8, vd.name, field_name)) continue;
-            const tr = vd.type_ orelse return null;
-            // Must be `List(X)` — TypeRef.generic with name "List" and one arg.
-            if (tr != .generic) return null;
-            const gen = tr.generic;
-            if (!std.mem.eql(u8, gen.name, "List")) return null;
-            if (gen.args.len != 1) return null;
-            const arg = gen.args[0];
-            // Check if the arg is a type parameter of the class.
-            if (arg == .named) {
-                for (cls.type_params) |tp| {
-                    if (std.mem.eql(u8, tp.name, arg.named.name)) return tp.name; // use param name directly
-                }
-                // Not a type param — treat as a concrete type.
-                return Builtins.zigTypeName(arg.named.name);
-            }
-            return null;
-        }
-        return null;
+    /// Return the `GenericTypeRef` for a class field named `field_name`, or null
+    /// if the field doesn't exist, has no type annotation, or isn't a generic type.
+    /// Works for any `List(T)`, `HashMap(K,V)`, or user-defined generic `Stack(T)`.
+    fn resolveFieldGenericTypeRef(g: Generator, field_name: []const u8) ?Ast.GenericTypeRef {
+        const tr = g.resolveFieldTypeRef(field_name) orelse return null;
+        if (tr != .generic) return null;
+        return tr.generic;
     }
     fn asMethod(g: Generator) Generator {
         var c = g; c.in_method = true; return c;
@@ -3126,20 +3173,53 @@ const Generator = struct {
                 try g.w.print("// {s}: C source compiled inline (use zig\"extern fn...\" for declarations)\n", .{alias});
             },
         } else {
-            // Zebra dep: if the module exports a type with the same name as the alias,
-            // unwrap it so `Alias.method()` works without double qualification.
-            // Otherwise, import the whole module so `Alias.TypeName` works for cross-module types.
-            const has_same_named_type = blk: {
+            // Zebra dep: if the module exports EXACTLY ONE non-union type whose name
+            // matches the alias, unwrap it so `Alias.method()` works without double
+            // qualification.  Union types (discriminated-union variants) are excluded
+            // from the count because they are always accessed as `Module.UnionName.variant`.
+            // Multi-type modules (e.g. Token: TokenKind(union) + Token + Keywords) must
+            // be imported whole so qualified refs like `Token.TokenKind` resolve correctly.
+            const has_sole_same_named_type = blk: {
                 const imp = g.imported_modules orelse break :blk false;
                 const iface = imp.get(alias) orelse break :blk false;
-                break :blk iface.types.contains(alias);
+                // Count only non-union types (value == false).
+                var non_union_count: usize = 0;
+                var it = iface.types.valueIterator();
+                while (it.next()) |is_union| { if (!is_union.*) non_union_count += 1; }
+                if (non_union_count != 1) break :blk false;
+                // The sole non-union type must be named after the alias.
+                const is_union_ptr = iface.types.getPtr(alias) orelse break :blk false;
+                break :blk !is_union_ptr.*;
             };
-            if (has_same_named_type) {
+            if (has_sole_same_named_type) {
                 try g.w.print("const {s} = @import(\"{s}.zig\").{s};\n", .{ alias, import_rel, alias });
             } else {
                 // Multi-type module or module whose primary type has a different name —
                 // import the whole file so `Alias.TypeName.method()` works.
                 try g.w.print("const {s} = @import(\"{s}.zig\");\n", .{ alias, import_rel });
+            }
+            // Selective imports: `use Mod exposing Name1, Name2`
+            // Emit `const Name = Alias.Name;` for each exposed name that doesn't
+            // conflict with the module alias.  Track exposed union names so that
+            // `Name.variant(v)` → `Name{ .variant = v }` works in genCall.
+            if (n.exposing.len > 0) {
+                const iface_opt = if (g.imported_modules) |im| im.get(alias) else null;
+                for (n.exposing) |exp_name| {
+                    if (!std.mem.eql(u8, exp_name, alias)) {
+                        try g.writeIndent();
+                        try g.w.print("const {s} = {s}.{s};\n", .{ exp_name, alias, exp_name });
+                    }
+                    // Track exposed union/class names for correct construction emit.
+                    if (iface_opt) |iface| {
+                        if (iface.types.getPtr(exp_name)) |is_union_ptr| {
+                            if (is_union_ptr.*) {
+                                try g.exposed_unions.put(exp_name, {});
+                            } else {
+                                try g.exposed_classes.put(exp_name, {});
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -3562,9 +3642,10 @@ const Generator = struct {
 
     fn genUnion(g: Generator, n: *Ast.DeclUnion) anyerror!void {
         // Emit a Zig tagged union: pub const Name = union(enum) { ... };
+        // Top-level unions are always pub so cross-module users (via `use Module`) can
+        // reference them as `Module.UnionName`.
         try g.writeIndent();
-        const pub_str: []const u8 = if (n.mods.public or n.mods.shared) "pub " else "";
-        try g.w.print("{s}const {s} = union(enum) {{\n", .{pub_str, n.name});
+        try g.w.print("pub const {s} = union(enum) {{\n", .{n.name});
         const ig = g.indented();
         for (n.variants) |v| {
             try ig.writeIndent();
@@ -4038,7 +4119,7 @@ const Generator = struct {
                 // Inside a try block, a call to a `throws` method must have its
                 // error captured and redirected to the block's tracking variable.
                 if (e.* == .call and g.try_block_label != null and
-                    exprCallIsThrows(e.call, g.resolve))
+                    exprCallIsThrows(e.call, g.resolve, g.imported_modules))
                 {
                     const ev  = g.try_err_var.?;
                     const lbl = g.try_block_label.?;
@@ -4208,6 +4289,18 @@ const Generator = struct {
             }
             break :blk kw;
         };
+        // Mutable fn-ref vars: Zig requires `*const fn(P) R` type — you cannot have
+        // a `var` of bare function type.  Emit `var name: @TypeOf(&func) = &func;`.
+        if (std.mem.eql(u8, eff_kw, "var") and tc_init_type == .fn_ref) {
+            if (n.init) |e| {
+                if (e.* == .ident) {
+                    const fname = e.ident.name;
+                    try g.w.print("var {s}: @TypeOf(&{s}) = &{s};\n", .{ n.name, fname, fname });
+                    return;
+                }
+            }
+        }
+
         try g.w.writeAll(eff_kw);
         try g.w.writeAll(" ");
         try g.w.writeAll(n.name);
@@ -4232,6 +4325,16 @@ const Generator = struct {
         if (n.init) |e| {
             try g.w.writeAll(" = ");
             try g.genExpr(e);
+            // Inside a try/catch block, if the initializer is a call to a `throws` method
+            // (including cross-module calls like `Lexer.tokenize(...)`), redirect the error
+            // to the block's tracking variable so the catch clause fires.
+            if (e.* == .call and g.try_block_label != null and
+                exprCallIsThrows(e.call, g.resolve, g.imported_modules))
+            {
+                const ev  = g.try_err_var.?;
+                const lbl = g.try_block_label.?;
+                try g.w.print(" catch |_e| {{ {s} = _e; break :{s}; }}", .{ ev, lbl });
+            }
         } else {
             try g.w.writeAll(" = undefined");
         }
@@ -6635,14 +6738,32 @@ const Generator = struct {
                     try g.w.writeAll(" ");
                     try g.w.writeAll(assignOpStr(s.op));
                     try g.w.writeAll(" ");
-                    // In generic class bodies, resolve List() element type from the LHS
-                    // field so we emit `std.ArrayList(T){}` instead of relying on `.{}`.
-                    const generic_list_emitted: bool = emit: {
-                        if (!g.is_generic or s.op != .assign) break :emit false;
+                    // fn-ref reassignment: `pred = isDigit` → `pred = &isDigit`
+                    // Mutable fn-ref vars have type `*const fn(P) R`; bare function
+                    // names are function values, so we need `&` to take a pointer.
+                    const fn_ref_emitted: bool = fn_emit: {
+                        if (s.op != .assign) break :fn_emit false;
+                        if (s.value.* != .ident) break :fn_emit false;
+                        const tc = g.tc orelse break :fn_emit false;
+                        const rhs_t = tc.expr_types.get(s.value) orelse break :fn_emit false;
+                        if (rhs_t != .fn_ref) break :fn_emit false;
+                        try g.w.writeAll("&");
+                        try g.genExpr(s.value);
+                        break :fn_emit true;
+                    };
+                    if (fn_ref_emitted) {
+                        try g.w.writeAll(";\n");
+                        return;
+                    }
+                    // In class bodies (generic or concrete), resolve the declared generic
+                    // field type from the LHS so any zero-arg constructor `T()` emits
+                    // `std.ArrayList(T){}` / `T(Arg).init()` correctly.
+                    // Works for List, HashMap, and user-defined generics alike.
+                    const generic_emitted: bool = emit: {
+                        if (s.op != .assign) break :emit false;
                         if (s.value.* != .call) break :emit false;
                         const rhs_call = s.value.call;
                         if (rhs_call.callee.* != .ident) break :emit false;
-                        if (!std.mem.eql(u8, rhs_call.callee.ident.name, "List")) break :emit false;
                         if (rhs_call.args.len != 0) break :emit false;
                         // Resolve field name from target: bare ident (in method body) or
                         // explicit `self.field` member access (rare in Zebra, but supported).
@@ -6655,13 +6776,13 @@ const Generator = struct {
                             },
                             else => break :emit false,
                         };
-                        const elem = g.resolveListElemType(field_name) orelse break :emit false;
-                        var gg = g;
-                        gg.lhs_list_elem = elem;
-                        try gg.genExpr(s.value);
+                        const gtr = g.resolveFieldGenericTypeRef(field_name) orelse break :emit false;
+                        // RHS callee must name the same generic type as the field declaration.
+                        if (!std.mem.eql(u8, rhs_call.callee.ident.name, gtr.name)) break :emit false;
+                        try g.genStdlibInit(gtr);
                         break :emit true;
                     };
-                    if (!generic_list_emitted) try g.genExpr(s.value);
+                    if (!generic_emitted) try g.genExpr(s.value);
                 }
             },
         }
@@ -6769,6 +6890,23 @@ const Generator = struct {
 
     fn genWhile(g: Generator, s: *Ast.StmtWhile) anyerror!void {
         try g.writeIndent();
+        if (s.bind) |bind| {
+            // `while var c = expr, guard` → while (true) { const c = expr; if (!guard) break; body }
+            try g.w.writeAll("while (true) {\n");
+            const bg = g.indented();
+            try bg.writeIndent();
+            try bg.w.print("const {s} = ", .{bind.name});
+            try bg.genExpr(bind.init);
+            try bg.w.writeAll(";\n");
+            try bg.writeIndent();
+            try bg.w.writeAll("if (!(");
+            try bg.genExpr(s.cond);
+            try bg.w.writeAll(")) break;\n");
+            try bg.genStmts(s.body);
+            try g.writeIndent();
+            try g.w.writeAll("}\n");
+            return;
+        }
         try g.w.writeAll("while (");
         try g.genExpr(s.cond);
         try g.w.writeAll(") {\n");
@@ -7297,7 +7435,14 @@ const Generator = struct {
                         try bg.genExpr(v);
                     }
                 } else {
-                    try bg.genExpr(v);
+                    // Char/int range: `on c'a'..c'z'` → `'a'...'z'` in Zig switch
+                    if (v.* == .binary and v.binary.op == .dotdot) {
+                        try bg.genExpr(v.binary.left);
+                        try bg.w.writeAll("...");
+                        try bg.genExpr(v.binary.right);
+                    } else {
+                        try bg.genExpr(v);
+                    }
                 }
             }
             if (is_union) {
@@ -7672,7 +7817,7 @@ const Generator = struct {
         // var/const _try_err_XXXX: ?anyerror = null;
         // Use `var` only when the body may mutate the err variable (via `raise` or
         // `try expr`); otherwise `const` avoids Zig's "never mutated" diagnostic.
-        const has_raise = bodyNeedsErrVar(s.body, g.tc) or bodyHasThrowsCall(s.body, g.resolve);
+        const has_raise = bodyNeedsErrVar(s.body, g.tc) or bodyHasThrowsCall(s.body, g.resolve, g.imported_modules);
         try g.writeIndent();
         try g.w.print("{s} {s}: ?anyerror = null;\n", .{
             if (has_raise) "var" else "const", err_var,
@@ -7851,6 +7996,20 @@ const Generator = struct {
                     try g.w.print(".@\"{s}\"", .{e.member});
                     break :sw;
                 }
+                // Last-resort List.len: cross-module calls returning List(T) have TC type
+                // `.unknown` (generic returns are not preserved in ModuleInterface).
+                // When the member is `len` AND the object's type is unknown (not a concrete
+                // named type, not a string), assume ArrayList and emit `.items.len`.
+                // Use `.len` only (not `count`) to avoid collisions with user struct fields
+                // named `count` (e.g. `Counter.count`).
+                if (std.mem.eql(u8, e.member, "len")) {
+                    const obj_tc = if (g.tc) |tc| tc.expr_types.get(e.object) orelse .unknown else TypeChecker.Type.unknown;
+                    if (obj_tc == .unknown) {
+                        try g.genExpr(e.object);
+                        try g.w.writeAll(".items.len");
+                        break :sw;
+                    }
+                }
                 try g.genExpr(e.object);
                 try g.w.writeAll(".");
                 try g.w.writeAll(e.member);
@@ -7860,15 +8019,40 @@ const Generator = struct {
             .index => |e| {
                 try g.genExpr(e.object);
                 try g.w.writeAll("[");
+                // str ([]const u8) requires usize index; i64 variables need a cast.
+                const idx_needs_cast = if (g.tc) |tc| blk: {
+                    const t = tc.expr_types.get(e.index) orelse .unknown;
+                    break :blk t == .int or t == .uint;
+                } else false;
+                if (idx_needs_cast) try g.w.writeAll("@intCast(");
                 try g.genExpr(e.index);
+                if (idx_needs_cast) try g.w.writeAll(")");
                 try g.w.writeAll("]");
             },
             .slice => |e| {
                 try g.genExpr(e.object);
                 try g.w.writeAll("[");
-                if (e.start) |s| try g.genExpr(s) else try g.w.writeAll("0");
+                if (e.start) |s| {
+                    const needs_cast = if (g.tc) |tc| blk: {
+                        const t = tc.expr_types.get(s) orelse .unknown;
+                        break :blk t == .int or t == .uint;
+                    } else false;
+                    if (needs_cast) try g.w.writeAll("@intCast(");
+                    try g.genExpr(s);
+                    if (needs_cast) try g.w.writeAll(")");
+                } else {
+                    try g.w.writeAll("0");
+                }
                 try g.w.writeAll("..");
-                if (e.stop) |s| try g.genExpr(s);
+                if (e.stop) |s| {
+                    const needs_cast = if (g.tc) |tc| blk: {
+                        const t = tc.expr_types.get(s) orelse .unknown;
+                        break :blk t == .int or t == .uint;
+                    } else false;
+                    if (needs_cast) try g.w.writeAll("@intCast(");
+                    try g.genExpr(s);
+                    if (needs_cast) try g.w.writeAll(")");
+                }
                 try g.w.writeAll("]");
             },
 
@@ -8219,6 +8403,34 @@ const Generator = struct {
         }
         if (e.callee.* == .member) {
             const mem = e.callee.member;
+            // Cross-module union construction: Module.UnionName.variant(value?)
+            // Callee shape: { object: member { object: ident(mod_alias), member: type_name }, member: variant }
+            // Emit: mod_alias.TypeName{ .variant = value_or_{} }
+            if (mem.object.* == .member) {
+                const outer = mem.object.member;
+                if (outer.object.* == .ident) {
+                    const mod_alias  = outer.object.ident.name;
+                    const type_name  = outer.member;
+                    const variant    = mem.member;
+                    // Confirm the type is a union in the imported module.
+                    const is_xmod_union = blk: {
+                        const imp = g.imported_modules orelse break :blk false;
+                        const iface = imp.get(mod_alias) orelse break :blk false;
+                        const is_union_ptr = iface.types.getPtr(type_name) orelse break :blk false;
+                        break :blk is_union_ptr.*;
+                    };
+                    if (is_xmod_union) {
+                        try g.w.print("{s}.{s}{{ .{s} = ", .{ mod_alias, type_name, variant });
+                        if (e.args.len == 1) {
+                            try g.genExpr(e.args[0].value);
+                        } else {
+                            try g.w.writeAll("{}");
+                        }
+                        try g.w.writeAll(" }");
+                        return;
+                    }
+                }
+            }
             if (mem.object.* == .ident) {
                 // Result.ok(v) / Result.err(v) → anonymous struct literal, inferred to declared type
                 if (std.mem.eql(u8, mem.object.ident.name, "Result")) {
@@ -8230,7 +8442,7 @@ const Generator = struct {
                     }
                 }
                 const type_name = mem.object.ident.name;
-                if (g.union_names.contains(type_name)) {
+                if (g.union_names.contains(type_name) or g.exposed_unions.contains(type_name)) {
                     try g.w.print("{s}{{ .{s} = ", .{type_name, mem.member});
                     if (e.args.len == 1) {
                         try g.genExpr(e.args[0].value);
@@ -8249,14 +8461,13 @@ const Generator = struct {
         if (e.callee.* == .ident and e.args.len == 0) {
             const name = e.callee.ident.name;
             if (std.mem.eql(u8, name, "List")) {
+                // Zero-arg `List()` without LHS type context.
+                // Class field assignments now go through genStdlibInit directly (in genAssign),
+                // so this path only fires for bare expressions like `return List()` or
+                // unannotated local vars. Rely on Zig inference via `.{}` in generic bodies,
+                // or emit the untyped ArrayList form for non-generic contexts.
                 if (g.is_generic) {
-                    // Explicit element type if caller resolved it from the LHS field.
-                    if (g.lhs_list_elem) |elem| {
-                        try g.w.print("std.ArrayList({s}){{}}", .{elem});
-                    } else {
-                        // Fallback: rely on Zig's type inference from the assignment target.
-                        try g.w.writeAll(".{}");
-                    }
+                    try g.w.writeAll(".{}");
                 } else {
                     try g.w.writeAll("std.ArrayList([]const u8){}");
                 }
@@ -8268,6 +8479,21 @@ const Generator = struct {
             }
             if (std.mem.eql(u8, name, "CsvWriter")) {
                 try g.w.writeAll("_csv_writer_init()");
+                return;
+            }
+        }
+        // Constructor call for exposed class alias: `ExposedClass(args)` after
+        // `use Mod exposing ExposedClass` → `ExposedClass.init(args)`.
+        // Must be checked before the generic ident-call path below.
+        if (e.callee.* == .ident) {
+            const cname = e.callee.ident.name;
+            if (g.exposed_classes.contains(cname)) {
+                try g.w.print("{s}.init(", .{cname});
+                for (e.args, 0..) |a, i| {
+                    if (i > 0) try g.w.writeAll(", ");
+                    try g.genExpr(a.value);
+                }
+                try g.w.writeAll(")");
                 return;
             }
         }
@@ -8708,6 +8934,16 @@ const Generator = struct {
                 try g.genExpr(e.right);
                 try g.w.writeAll(")");
             },
+            .mod => {
+                // Zig's `%` operator on signed integers requires explicit @rem or @mod.
+                // Use @mod (mathematical modulo, result has sign of divisor) which matches
+                // Zebra's `%` semantics and works for both signed and float types.
+                try g.w.writeAll("@mod(");
+                try g.genExpr(e.left);
+                try g.w.writeAll(", ");
+                try g.genExpr(e.right);
+                try g.w.writeAll(")");
+            },
             .dotdot => {
                 try g.genExpr(e.left);
                 try g.w.writeAll("..");
@@ -8727,7 +8963,17 @@ const Generator = struct {
                     }
                     break :blk false;
                 };
-                if (left_is_str) {
+                // If the left side is unknown but the right side is a known string
+                // (e.g. a string literal), use std.mem.eql to avoid Zig slice == error.
+                const right_is_str = blk: {
+                    if (either_nil or left_is_str) break :blk false;
+                    if (g.tc) |tc| {
+                        const t = tc.expr_types.get(e.right) orelse .unknown;
+                        break :blk t == .string;
+                    }
+                    break :blk false;
+                };
+                if (left_is_str or right_is_str) {
                     if (e.op == .ne) try g.w.writeAll("!");
                     try g.w.writeAll("std.mem.eql(u8, ");
                     try g.genExpr(e.left);
@@ -9406,7 +9652,8 @@ fn printFmt(tc: ?*const TypeChecker.TypeCheckResult, catch_var: []const u8, expr
         .optional,
         .tuple,
         .generic_named,
-        .cross_module                  => "{any}",
+        .cross_module,
+        .fn_ref                        => "{any}",
     };
 }
 
