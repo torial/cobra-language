@@ -138,6 +138,8 @@ pub fn generate(
     defer mixins.deinit();
     var union_names = try collectUnionNames(module, alloc);
     defer union_names.deinit();
+    var union_decls = try collectUnionDecls(module, alloc);
+    defer union_decls.deinit();
     var exposed_unions = std.StringHashMap(void).init(alloc);
     defer exposed_unions.deinit();
     var exposed_classes = std.StringHashMap(void).init(alloc);
@@ -158,6 +160,7 @@ pub fn generate(
         .closure_vars     = null,
         .capture_fields   = &.{},
         .union_names      = &union_names,
+        .union_decls      = &union_decls,
         .exposed_unions   = &exposed_unions,
         .exposed_classes  = &exposed_classes,
         .gui_backend      = gui_backend,
@@ -203,6 +206,25 @@ fn collectUnionNamesInDecls(decls: []const Ast.Decl, set: *std.StringHashMap(voi
         .union_    => |u| try set.put(u.name, {}),
         .namespace => |n| try collectUnionNamesInDecls(n.decls, set),
         .class     => |c| try collectUnionNamesInDecls(c.members, set),
+        else       => {},
+    };
+}
+
+/// Collect a map from union-type name → DeclUnion pointer for same-module
+/// union variant construction.  Used by CodeGen to detect `^T` payloads and
+/// emit the labeled-block boxing expression instead of a bare value.
+fn collectUnionDecls(module: Ast.Module, alloc: Allocator) !std.StringHashMap(*const Ast.DeclUnion) {
+    var map = std.StringHashMap(*const Ast.DeclUnion).init(alloc);
+    errdefer map.deinit();
+    collectUnionDeclsInDecls(module.decls, &map) catch {};
+    return map;
+}
+
+fn collectUnionDeclsInDecls(decls: []const Ast.Decl, map: *std.StringHashMap(*const Ast.DeclUnion)) !void {
+    for (decls) |*decl| switch (decl.*) {
+        .union_    => try map.put(decl.union_.name, decl.union_),
+        .namespace => |n|  try collectUnionDeclsInDecls(n.decls, map),
+        .class     => |c|  try collectUnionDeclsInDecls(c.members, map),
         else       => {},
     };
 }
@@ -1091,6 +1113,10 @@ const Generator = struct {
     /// Names of all union types declared in the current module.
     /// Used to detect union construction calls: `Type.variant(value)`.
     union_names: *const std.StringHashMap(void),
+    /// DeclUnion pointers for all union types declared in the current module.
+    /// Used to check whether a variant's payload is `^T` so the construction
+    /// expression can emit a labeled-block boxing expression.
+    union_decls: *const std.StringHashMap(*const Ast.DeclUnion),
     /// Union type names introduced by selective imports (`use Mod exposing UnionName`).
     /// Populated lazily by `genUse` when an exposed name is a union in the dep's
     /// ModuleInterface.  Allows `UnionName.variant(v)` → `UnionName{ .variant = v }`.
@@ -1157,6 +1183,10 @@ const Generator = struct {
     /// When `is_generic`, points to the class declaration so that `genAssign` can
     /// resolve field types for explicit `std.ArrayList(T){}` emission.
     owner_class: ?*const Ast.DeclClass = null,
+    /// True when generating the body of a `struct` (not a `class`).
+    /// Structs have no `_type_tag` field, so `cue init` bodies must skip the
+    /// `self._type_tag = _ttag_*` stamp that classes require.
+    is_struct_owner: bool = false,
     /// Incremented each time we enter an `arena` block so nested scopes get
     /// unique variable names (_arena_scope_1, _arena_scope_2, …).
     arena_depth: u32 = 0,
@@ -3607,7 +3637,8 @@ const Generator = struct {
     // ── struct ────────────────────────────────────────────────────────────────
 
     fn genStruct(g: Generator, n: *Ast.DeclStruct) anyerror!void {
-        const sg = g.withOwner(n.name);
+        var sg = g.withOwner(n.name);
+        sg.is_struct_owner = true;
         try g.writeIndent();
         try g.w.print("pub const {s} = struct {{\n", .{n.name});
         const ig = sg.indented();
@@ -4013,10 +4044,12 @@ const Generator = struct {
         const bg = mg.indented().withMutated(&mut_set).withClosureVars(&cv_map);
         try bg.writeIndent();
         try bg.w.print("var self: {s} = undefined;\n", .{self_type_name});
-        // Initialise the type-ID field so `expr is TypeName` works correctly
-        // even when the struct was allocated with `= undefined`.
-        try bg.writeIndent();
-        try bg.w.print("self._type_tag = _ttag_{s};\n", .{g.owner});
+        // Initialise the type-ID field so `expr is TypeName` works correctly.
+        // Structs do NOT have a _type_tag field — skip for those.
+        if (!g.is_struct_owner) {
+            try bg.writeIndent();
+            try bg.w.print("self._type_tag = _ttag_{s};\n", .{g.owner});
+        }
         for (n.params) |p| {
             if (!refs.param_names.contains(p.name)) {
                 try bg.writeIndent();
@@ -7450,18 +7483,24 @@ const Generator = struct {
             for (on.values, 0..) |v, i| {
                 if (i > 0) try bg.w.writeAll(", ");
                 if (is_union) {
-                    // Emit `.variant_name` — extract member part of `Type.variant` expr.
+                    // Emit `.variant_name` — extract member part of `Type.variant` or
+                    // `Type.variant()` (constructor-call form used in on-clauses) expr.
                     if (v.* == .member) {
                         try bg.w.print(".{s}", .{v.member.member});
+                    } else if (v.* == .call and v.call.callee.* == .member) {
+                        try bg.w.print(".{s}", .{v.call.callee.member.member});
                     } else {
                         try bg.genExpr(v);
                     }
                 } else {
                     // Char/int range: `on c'a'..c'z'` → `'a'...'z'` in Zig switch
+                    // Enum member: `on Foo.bar` or `on mod.Foo.bar` → `.bar`
                     if (v.* == .binary and v.binary.op == .dotdot) {
                         try bg.genExpr(v.binary.left);
                         try bg.w.writeAll("...");
                         try bg.genExpr(v.binary.right);
+                    } else if (v.* == .member) {
+                        try bg.w.print(".{s}", .{v.member.member});
                     } else {
                         try bg.genExpr(v);
                     }
@@ -8455,7 +8494,23 @@ const Generator = struct {
                     if (is_xmod_union) {
                         try g.w.print("{s}.{s}{{ .{s} = ", .{ mod_alias, type_name, variant });
                         if (e.args.len == 1) {
-                            try g.genExpr(e.args[0].value);
+                            // Check whether this cross-module variant's payload is ^T.
+                            const box_type: ?[]const u8 = blk: {
+                                const imp = g.imported_modules orelse break :blk null;
+                                const iface = imp.get(mod_alias) orelse break :blk null;
+                                const key = try std.fmt.allocPrint(g.alloc, "{s}.{s}", .{ type_name, variant });
+                                defer g.alloc.free(key);
+                                break :blk iface.boxed_variants.get(key);
+                            };
+                            if (box_type) |inner_name| {
+                                try g.w.writeAll("box: { const _p = try _allocator.create(");
+                                try g.w.print("{s}.{s}", .{ mod_alias, inner_name });
+                                try g.w.writeAll("); _p.* = ");
+                                try g.genExpr(e.args[0].value);
+                                try g.w.writeAll("; break :box _p; }");
+                            } else {
+                                try g.genExpr(e.args[0].value);
+                            }
                         } else {
                             try g.w.writeAll("{}");
                         }
@@ -8478,7 +8533,29 @@ const Generator = struct {
                 if (g.union_names.contains(type_name) or g.exposed_unions.contains(type_name)) {
                     try g.w.print("{s}{{ .{s} = ", .{type_name, mem.member});
                     if (e.args.len == 1) {
-                        try g.genExpr(e.args[0].value);
+                        // Check whether this variant's payload is ^T (heap-boxed).
+                        // If so, emit a labeled-block expression that allocates and fills a pointer.
+                        var box_inner: ?*const Ast.TypeRef = null;
+                        if (g.union_decls.get(type_name)) |du| {
+                            for (du.variants) |v| {
+                                if (std.mem.eql(u8, v.name, mem.member)) {
+                                    if (v.payload) |pl| switch (pl) {
+                                        .ref_to => |inner| { box_inner = inner; },
+                                        else    => {},
+                                    };
+                                    break;
+                                }
+                            }
+                        }
+                        if (box_inner) |inner| {
+                            try g.w.writeAll("box: { const _p = try _allocator.create(");
+                            try g.genType(inner.*);
+                            try g.w.writeAll("); _p.* = ");
+                            try g.genExpr(e.args[0].value);
+                            try g.w.writeAll("; break :box _p; }");
+                        } else {
+                            try g.genExpr(e.args[0].value);
+                        }
                     } else {
                         try g.w.writeAll("{}");
                     }
@@ -8554,6 +8631,24 @@ const Generator = struct {
                             try g.genExpr(a.value);
                         }
                         try g.w.writeAll(")");
+                    } else if (sym.kind == .struct_) {
+                        // Structs without `cue init`: emit a struct literal.
+                        // Named args → .field = value; positional → value (order = declaration order).
+                        if (e.args.len == 0) {
+                            try g.w.print("{s}{{}}", .{class_name});
+                        } else {
+                            try g.w.print("{s}{{", .{class_name});
+                            for (e.args, 0..) |a, i| {
+                                if (i > 0) try g.w.writeAll(",");
+                                if (a.name) |n| {
+                                    try g.w.print(" .{s} = ", .{n});
+                                } else {
+                                    try g.w.writeAll(" ");
+                                }
+                                try g.genExpr(a.value);
+                            }
+                            try g.w.writeAll(" }");
+                        }
                     } else {
                         // No explicit `cue init`: call the synthetic default init().
                         // Every class now has a generated init() that stamps _type_id.

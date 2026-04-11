@@ -1487,7 +1487,7 @@ pub const App = struct {
         var _try_err_29a8: ?anyerror = null;
         _try_blk_29a8: {
 // zbr:test/raise_auto.zbr:11
-            result = App.risky(5) catch |_tc_24a33cb2938| { _try_err_29a8 = _tc_24a33cb2938; break :_try_blk_29a8; };
+            result = App.risky(5) catch |_tc_1d157022938| { _try_err_29a8 = _tc_1d157022938; break :_try_blk_29a8; };
             break :_try_blk_29a8;
         }
         if (_try_err_29a8 != null) {

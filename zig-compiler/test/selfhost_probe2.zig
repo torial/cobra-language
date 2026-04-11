@@ -1546,19 +1546,19 @@ pub const Helper = struct {
     pub fn kindName(k: TokenKind) []const u8 {
 // zbr:test/selfhost_probe2.zbr:39
         switch (k) {
-            TokenKind.ident => {
+            .ident => {
 // zbr:test/selfhost_probe2.zbr:40
                 return "ident";
             },
-            TokenKind.number => {
+            .number => {
 // zbr:test/selfhost_probe2.zbr:41
                 return "number";
             },
-            TokenKind.plus => {
+            .plus => {
 // zbr:test/selfhost_probe2.zbr:42
                 return "plus";
             },
-            TokenKind.eof => {
+            .eof => {
 // zbr:test/selfhost_probe2.zbr:43
                 return "eof";
             },

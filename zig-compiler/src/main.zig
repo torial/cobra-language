@@ -564,7 +564,18 @@ fn cloneInterface(src: *const TypeChecker.ModuleInterface, alloc: std.mem.Alloca
         var it = src.throws_methods.keyIterator();
         while (it.next()) |k| try throws_methods.put(try alloc.dupe(u8, k.*), {});
     }
-    return .{ .methods = methods, .fields = fields, .types = types, .throws_methods = throws_methods };
+    var boxed_variants = std.StringHashMap([]const u8).init(alloc);
+    errdefer boxed_variants.deinit();
+    {
+        var it = src.boxed_variants.iterator();
+        while (it.next()) |e| {
+            const k = try alloc.dupe(u8, e.key_ptr.*);
+            errdefer alloc.free(k);
+            const v = try alloc.dupe(u8, e.value_ptr.*);
+            try boxed_variants.put(k, v);
+        }
+    }
+    return .{ .methods = methods, .fields = fields, .types = types, .throws_methods = throws_methods, .boxed_variants = boxed_variants };
 }
 
 /// Compile a .zbr file to the corresponding .zig file, first recursively
@@ -601,6 +612,7 @@ fn compileZbrToZig(
             .fields         = std.StringHashMap(TypeChecker.Type).init(alloc),
             .types          = std.StringHashMap(bool).init(alloc),
             .throws_methods = std.StringHashMap(void).init(alloc),
+            .boxed_variants = std.StringHashMap([]const u8).init(alloc),
         };
     }
 

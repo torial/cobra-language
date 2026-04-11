@@ -331,6 +331,12 @@ pub const ModuleInterface = struct {
     /// Used by CodeGen to emit `catch` redirects when a cross-module throwing method
     /// is called inside a `try/catch` block's var initializer.
     throws_methods: std.StringHashMap(void),
+    /// Union variants whose payload type is `^T` (heap-boxed pointer).
+    /// Key: "UnionName.variantName", value: inner type name (the T in ^T).
+    /// Used by CodeGen to emit the labeled-block boxing expression when constructing
+    /// cross-module union variants:
+    ///   `box: { const _p = try _allocator.create(T); _p.* = val; break :box _p; }`
+    boxed_variants: std.StringHashMap([]const u8),
 
     pub fn deinit(self: *ModuleInterface) void {
         const alloc = self.methods.allocator;
@@ -346,6 +352,11 @@ pub const ModuleInterface = struct {
         var tmk = self.throws_methods.keyIterator();
         while (tmk.next()) |k| alloc.free(k.*);
         self.throws_methods.deinit();
+        var bvk = self.boxed_variants.keyIterator();
+        while (bvk.next()) |k| alloc.free(k.*);
+        var bvv = self.boxed_variants.valueIterator();
+        while (bvv.next()) |v| alloc.free(v.*);
+        self.boxed_variants.deinit();
     }
 };
 
@@ -367,19 +378,22 @@ pub fn extractModuleInterface(
     errdefer types.deinit();
     var throws_methods = std.StringHashMap(void).init(alloc);
     errdefer throws_methods.deinit();
+    var boxed_variants = std.StringHashMap([]const u8).init(alloc);
+    errdefer boxed_variants.deinit();
 
-    try extractFromDecls(module.decls, resolve, alloc, &methods, &fields, &types, &throws_methods);
-    return .{ .methods = methods, .fields = fields, .types = types, .throws_methods = throws_methods };
+    try extractFromDecls(module.decls, resolve, alloc, &methods, &fields, &types, &throws_methods, &boxed_variants);
+    return .{ .methods = methods, .fields = fields, .types = types, .throws_methods = throws_methods, .boxed_variants = boxed_variants };
 }
 
 fn extractFromDecls(
-    decls:          []const Ast.Decl,
-    resolve:        *const Resolver.ResolveResult,
-    alloc:          Allocator,
-    methods:        *std.StringHashMap(Type),
-    fields:         *std.StringHashMap(Type),
-    types:          *std.StringHashMap(bool),
-    throws_methods: *std.StringHashMap(void),
+    decls:           []const Ast.Decl,
+    resolve:         *const Resolver.ResolveResult,
+    alloc:           Allocator,
+    methods:         *std.StringHashMap(Type),
+    fields:          *std.StringHashMap(Type),
+    types:           *std.StringHashMap(bool),
+    throws_methods:  *std.StringHashMap(void),
+    boxed_variants:  *std.StringHashMap([]const u8),
 ) !void {
     for (decls) |decl| switch (decl) {
         .class  => |c| {
@@ -399,8 +413,24 @@ fn extractFromDecls(
         .union_ => |u| {
             const key = try alloc.dupe(u8, u.name);
             try types.put(key, true); // true = is a union (skipped in sole-type import heuristic)
+            // Record any variants whose payload is ^T (ref_to) so CodeGen can
+            // emit the labeled-block boxing expression for cross-module construction.
+            for (u.variants) |v| {
+                if (v.payload) |pl| switch (pl) {
+                    .ref_to => |inner| switch (inner.*) {
+                        .named => |nr| {
+                            const bv_key = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ u.name, v.name });
+                            errdefer alloc.free(bv_key);
+                            const bv_val = try alloc.dupe(u8, nr.name);
+                            try boxed_variants.put(bv_key, bv_val);
+                        },
+                        else => {},
+                    },
+                    else => {},
+                };
+            }
         },
-        .namespace => |ns| try extractFromDecls(ns.decls, resolve, alloc, methods, fields, types, throws_methods),
+        .namespace => |ns| try extractFromDecls(ns.decls, resolve, alloc, methods, fields, types, throws_methods, boxed_variants),
         else => {},
     };
 }

@@ -1,0 +1,66 @@
+# AST type smoke-test: construct leaf nodes and read back fields.
+# Phase 2 self-hosting validation — verifies that ast.zbr type definitions
+# are valid and usable from Zebra code.
+
+use ast
+
+class AstTest
+    def run()
+        .testSpan()
+        .testNamedTypeRef()
+        .testExprIntLit()
+        .testBinaryOp()
+        .testDeclVar()
+        .testUnionTypeRef()
+        print "ast_test: all assertions passed"
+
+    def testSpan()
+        const s = ast.Span(1, 5, 1, 10)
+        assert s.line == 1
+        assert s.col == 5
+        assert s.end_line == 1
+        assert s.end_col == 10
+
+    def testNamedTypeRef()
+        const s = ast.Span(2, 1, 2, 6)
+        const nr = ast.NamedTypeRef(s, "String")
+        assert nr.name == "String"
+        assert nr.span.line == 2
+
+    def testExprIntLit()
+        const s = ast.Span(3, 1, 3, 2)
+        const lit = ast.ExprIntLit(s, "42", ast.IntBase.decimal)
+        assert lit.text == "42"
+
+    def testBinaryOp()
+        # Test plain enum branch/on dispatch — no struct construction needed
+        const op = ast.BinaryOp.add
+        branch op
+            on ast.BinaryOp.add
+                pass
+            else
+                assert false, "expected add"
+
+    def testDeclVar()
+        const s = ast.Span(5, 1, 5, 10)
+        const mods = ast.Modifiers(false, false, false, false, false, false)
+        const dv = ast.DeclVar(s, mods, "x", nil, nil, false)
+        assert dv.name == "x"
+        assert not dv.is_const
+
+    def testUnionTypeRef()
+        # Test TypeRef union construction and pattern matching (non-allocating variant)
+        const s = ast.Span(6, 1, 6, 8)
+        const nr = ast.NamedTypeRef(s, "int")
+        const tr = ast.TypeRef.named(nr)
+        branch tr
+            on ast.TypeRef.named as nr2
+                assert nr2.name == "int"
+            else
+                assert false, "expected named"
+
+class Main
+    shared
+        def main
+            var t = AstTest()
+            t.run()

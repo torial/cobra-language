@@ -1544,19 +1544,19 @@ const _reflect_Diag_field_types: []const []const u8 = &.{"str", "int", "int"};
 pub fn kindName(k: TokenKind) []const u8 {
 // zbr:test/selfhost_probe.zbr:47
     switch (k) {
-        TokenKind.ident => {
+        .ident => {
 // zbr:test/selfhost_probe.zbr:48
             return "ident";
         },
-        TokenKind.number => {
+        .number => {
 // zbr:test/selfhost_probe.zbr:49
             return "number";
         },
-        TokenKind.plus => {
+        .plus => {
 // zbr:test/selfhost_probe.zbr:50
             return "plus";
         },
-        TokenKind.eof => {
+        .eof => {
 // zbr:test/selfhost_probe.zbr:51
             return "eof";
         },

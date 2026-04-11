@@ -1470,15 +1470,15 @@ pub const Main = struct {
         const c = Color{ .green = {} };
 // zbr:test/exposing_test.zbr:7
         switch (c) {
-            expose_lib.Color.red => {
+            .red => {
 // zbr:test/exposing_test.zbr:9
                 std.debug.print("{s}\n", .{"red"});
             },
-            expose_lib.Color.green => {
+            .green => {
 // zbr:test/exposing_test.zbr:11
                 std.debug.print("{s}\n", .{"green"});
             },
-            expose_lib.Color.blue => {
+            .blue => {
 // zbr:test/exposing_test.zbr:13
                 std.debug.print("{s}\n", .{"blue"});
             },

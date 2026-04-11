@@ -2869,7 +2869,7 @@ pub const Lexer = struct {
                 const lk = self.classifyLine();
 // zbr:selfhost\Lexer.zbr:750
                 switch (lk) {
-                    LineKind.empty => {
+                    .empty => {
 // zbr:selfhost\Lexer.zbr:752
                         const ln = self.line;
 // zbr:selfhost\Lexer.zbr:753
@@ -2882,7 +2882,7 @@ pub const Lexer = struct {
                         atLineStart = true;
                         continue;
                     },
-                    LineKind.whitespace_only => {
+                    .whitespace_only => {
 // zbr:selfhost\Lexer.zbr:759
                         while ((_zebra_lt(self.pos, self.src.len) and (self.src[@intCast(self.pos)] != '\n'))) {
 // zbr:selfhost\Lexer.zbr:760
@@ -2897,7 +2897,7 @@ pub const Lexer = struct {
                         atLineStart = true;
                         continue;
                     },
-                    LineKind.comment_only => {
+                    .comment_only => {
 // zbr:selfhost\Lexer.zbr:766
                         while ((_zebra_lt(self.pos, self.src.len) and (self.src[@intCast(self.pos)] != '\n'))) {
 // zbr:selfhost\Lexer.zbr:767
@@ -2912,7 +2912,7 @@ pub const Lexer = struct {
                         atLineStart = true;
                         continue;
                     },
-                    LineKind.has_content => {
+                    .has_content => {
 // zbr:selfhost\Lexer.zbr:773
                         try self.processIndentation();
                     },

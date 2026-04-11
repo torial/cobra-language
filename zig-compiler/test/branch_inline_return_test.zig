@@ -1470,19 +1470,19 @@ pub const Op = union(enum) {
 pub fn opName(o: Op) []const u8 {
 // zbr:test/branch_inline_return_test.zbr:17
     switch (o) {
-        Op.add => {
+        .add => {
 // zbr:test/branch_inline_return_test.zbr:18
             return "add";
         },
-        Op.sub => {
+        .sub => {
 // zbr:test/branch_inline_return_test.zbr:19
             return "sub";
         },
-        Op.mul => {
+        .mul => {
 // zbr:test/branch_inline_return_test.zbr:20
             return "mul";
         },
-        Op.neg => {
+        .neg => {
 // zbr:test/branch_inline_return_test.zbr:21
             return "neg";
         },
@@ -1492,19 +1492,19 @@ pub fn opName(o: Op) []const u8 {
 pub fn opSymbol(o: Op) []const u8 {
 // zbr:test/branch_inline_return_test.zbr:24
     switch (o) {
-        Op.add => {
+        .add => {
 // zbr:test/branch_inline_return_test.zbr:25
             return "+";
         },
-        Op.sub => {
+        .sub => {
 // zbr:test/branch_inline_return_test.zbr:26
             return "-";
         },
-        Op.mul => {
+        .mul => {
 // zbr:test/branch_inline_return_test.zbr:27
             return "*";
         },
-        Op.neg => {
+        .neg => {
 // zbr:test/branch_inline_return_test.zbr:28
             return "-";
         },
@@ -1514,19 +1514,19 @@ pub fn opSymbol(o: Op) []const u8 {
 pub fn opPriority(o: Op) i64 {
 // zbr:test/branch_inline_return_test.zbr:32
     switch (o) {
-        Op.add => {
+        .add => {
 // zbr:test/branch_inline_return_test.zbr:33
             return (1 + 0);
         },
-        Op.sub => {
+        .sub => {
 // zbr:test/branch_inline_return_test.zbr:34
             return (1 + 0);
         },
-        Op.mul => {
+        .mul => {
 // zbr:test/branch_inline_return_test.zbr:35
             return (2 + 0);
         },
-        Op.neg => {
+        .neg => {
 // zbr:test/branch_inline_return_test.zbr:36
             return (3 + 0);
         },
@@ -1536,19 +1536,19 @@ pub fn opPriority(o: Op) i64 {
 pub fn isAdditive(o: Op) bool {
 // zbr:test/branch_inline_return_test.zbr:40
     switch (o) {
-        Op.add => {
+        .add => {
 // zbr:test/branch_inline_return_test.zbr:41
             return true;
         },
-        Op.sub => {
+        .sub => {
 // zbr:test/branch_inline_return_test.zbr:42
             return true;
         },
-        Op.mul => {
+        .mul => {
 // zbr:test/branch_inline_return_test.zbr:43
             return false;
         },
-        Op.neg => {
+        .neg => {
 // zbr:test/branch_inline_return_test.zbr:44
             return false;
         },
@@ -1575,19 +1575,19 @@ pub const Calc = struct {
         _ = self;
 // zbr:test/branch_inline_return_test.zbr:56
         switch (o) {
-            Op.add => {
+            .add => {
 // zbr:test/branch_inline_return_test.zbr:57
                 return opName(o);
             },
-            Op.sub => {
+            .sub => {
 // zbr:test/branch_inline_return_test.zbr:58
                 return opName(o);
             },
-            Op.mul => {
+            .mul => {
 // zbr:test/branch_inline_return_test.zbr:59
                 return opName(o);
             },
-            Op.neg => {
+            .neg => {
 // zbr:test/branch_inline_return_test.zbr:60
                 return opName(o);
             },
@@ -1604,19 +1604,19 @@ const _reflect_Calc_field_types: []const []const u8 = &.{"int"};
 pub fn opCode(o: Op) i64 {
 // zbr:test/branch_inline_return_test.zbr:64
     switch (o) {
-        Op.add => {
+        .add => {
 // zbr:test/branch_inline_return_test.zbr:65
             return 10;
         },
-        Op.sub => {
+        .sub => {
 // zbr:test/branch_inline_return_test.zbr:67
             return 20;
         },
-        Op.mul => {
+        .mul => {
 // zbr:test/branch_inline_return_test.zbr:69
             return 30;
         },
-        Op.neg => {
+        .neg => {
 // zbr:test/branch_inline_return_test.zbr:71
             return 40;
         },
@@ -1660,19 +1660,19 @@ pub const Main = struct {
         const x = Op{ .mul = {} };
 // zbr:test/branch_inline_return_test.zbr:103
         switch (x) {
-            Op.add => {
+            .add => {
 // zbr:test/branch_inline_return_test.zbr:104
                 std.debug.print("{s}\n", .{"unexpected"});
             },
-            Op.sub => {
+            .sub => {
 // zbr:test/branch_inline_return_test.zbr:105
                 std.debug.print("{s}\n", .{"unexpected"});
             },
-            Op.mul => {
+            .mul => {
 // zbr:test/branch_inline_return_test.zbr:106
                 std.debug.print("{s}\n", .{"matched mul"});
             },
-            Op.neg => {
+            .neg => {
 // zbr:test/branch_inline_return_test.zbr:107
                 std.debug.print("{s}\n", .{"unexpected"});
             },
