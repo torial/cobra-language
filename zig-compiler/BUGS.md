@@ -277,7 +277,25 @@ These fail WITH A COMPILER ERROR — that IS the test passing:
 
 ---
 
-*Last updated: 2026-04-10*
+### BUG-025: `scanMutationsInExpr` didn't recurse into `.try_` nodes — FIXED 2026-04-11
+- **Status:** Fixed 2026-04-11
+- **Was:** `scanMutationsInExpr` handled `.call`, `.binary`, `.member`, `.unary`, `.orelse_`, `.catch_`, `.tuple_lit`, `.type_check` — but not `.try_` (the Zebra `expr?` propagation node). When a variable's method was called via `localVar.method()?`, the `?` wraps the call in a `.try_` node. `scanMutationsInExpr` hit the `else => {}` branch and didn't recurse into the inner call expression, so the receiver `localVar` was never added to the `mutated` set. Result: the variable was emitted as `const`, and Zig rejected the mutable method call with "cast discards const qualifier".
+- **Fix:** Added `.try_ => |e| try scanMutationsInExpr(e.expr, set, tc_opt)` to `scanMutationsInExpr`.
+- **Found by:** `throws_nested_test.zbr` and `selfhost/ast_test.zbr` — using `localVar.method()?` inside a try block.
+
+### DESIGN-001: Throws auto-propagation scope — nested expression calls require `?`
+- **Not a bug** — by design
+- **Description:** Throws auto-propagation emits `try` for direct self-method calls (`.method()` syntax) and for statement-level calls whose receiver is detected as a `throws` method. It does NOT auto-propagate for:
+  - `localVar.method()` — receiver is a local variable (TC type lookup not wired into auto-try)
+  - `this.field.method()` — chained member access through a field
+  - Calls nested inside compound expressions (as arguments, in binary ops, etc.)
+- **Required action:** Use explicit `?` suffix for these cases: `localVar.method()?`, `this.field.method()?`
+- **Rationale:** Expression-level `?` keeps error flow visible at the use site. Auto-propagation is most valuable for statement-level self-method calls (the dominant pattern in method bodies), where the `throws`-chain needs to flow upward without per-call boilerplate.
+- **Documented by:** `test/throws_nested_test.zbr` — exercises both auto and explicit-? patterns.
+
+---
+
+*Last updated: 2026-04-11*
 
 ---
 

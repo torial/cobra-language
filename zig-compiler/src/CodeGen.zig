@@ -1022,6 +1022,8 @@ fn scanMutationsInExpr(
         .catch_    => |e| { try scanMutationsInExpr(e.expr, set, tc_opt); try scanMutationsInExpr(e.fallback, set, tc_opt); },
         .tuple_lit  => |e| { for (e.elems) |el| try scanMutationsInExpr(el, set, tc_opt); },
         .type_check => |e| try scanMutationsInExpr(e.expr, set, tc_opt),
+        // `expr?` — recurse so that `localVar.method()?` marks `localVar` as mutated.
+        .try_       => |e| try scanMutationsInExpr(e.expr, set, tc_opt),
         else        => {},
     }
 }
@@ -1227,6 +1229,12 @@ const Generator = struct {
     /// This enables `resolveFieldTypeRef` for `^T` boxing in the class body.
     fn withClass(g: Generator, cls: *const Ast.DeclClass) Generator {
         var c = g; c.owner = cls.name; c.owner_class = cls; c.owner_members = cls.members; return c;
+    }
+    /// Set owner name + owner_members for a struct body.
+    /// Mirrors `withClass` so that `exprCallIsThrows` and `genCall`'s auto-try
+    /// logic can look up throws status for `self.method()` calls inside struct methods.
+    fn withStruct(g: Generator, s: *const Ast.DeclStruct) Generator {
+        var c = g; c.owner = s.name; c.owner_members = s.members; c.is_struct_owner = true; return c;
     }
     fn withGeneric(g: Generator, cls: *const Ast.DeclClass) Generator {
         var c = g; c.is_generic = true; c.owner_class = cls; return c;
@@ -3661,9 +3669,7 @@ const Generator = struct {
     // ── struct ────────────────────────────────────────────────────────────────
 
     fn genStruct(g: Generator, n: *Ast.DeclStruct) anyerror!void {
-        var sg = g.withOwner(n.name);
-        sg.is_struct_owner = true;
-        sg.owner_members = n.members;
+        const sg = g.withStruct(n);
         try g.writeIndent();
         try g.w.print("pub const {s} = struct {{\n", .{n.name});
         const ig = sg.indented();

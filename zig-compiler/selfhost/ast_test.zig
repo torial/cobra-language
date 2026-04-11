@@ -1464,69 +1464,83 @@ const ast = @import("ast.zig");
 pub const AstTest = struct {
     _type_tag: u64 = _ttag_AstTest,
     pub fn run(self: *AstTest) void {
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:9
-        self.testSpan();
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:10
-        self.testNamedTypeRef();
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:11
-        self.testExprIntLit();
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:12
-        self.testBinaryOp();
 // zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:13
-        self.testDeclVar();
+        self.testSpan();
 // zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:14
-        self.testUnionTypeRef();
+        self.testNamedTypeRef();
 // zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:15
+        self.testExprIntLit();
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:16
+        self.testBinaryOp();
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:17
+        self.testDeclVar();
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:18
+        self.testUnionTypeRef();
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:19
+        var _try_err_198: ?anyerror = null;
+        _try_blk_198: {
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:20
+            self.testNilableTypeRef() catch |_e| { _try_err_198 = _e; break :_try_blk_198; };
+            break :_try_blk_198;
+        }
+        if (_try_err_198 != null) {
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:22
+            if (!(false)) {
+                std.debug.print("assertion failed\n", .{});
+                unreachable;
+            }
+        }
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:23
         std.debug.print("{s}\n", .{"ast_test: all assertions passed"});
     }
 
     pub fn testSpan(self: *AstTest) void {
         _ = self;
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:18
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:26
         const s = ast.Span.init(1, 5, 1, 10);
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:19
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:27
         std.debug.assert((s.line == 1));
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:20
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:28
         std.debug.assert((s.col == 5));
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:21
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:29
         std.debug.assert((s.end_line == 1));
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:22
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:30
         std.debug.assert((s.end_col == 10));
     }
 
     pub fn testNamedTypeRef(self: *AstTest) void {
         _ = self;
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:25
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:33
         const s = ast.Span.init(2, 1, 2, 6);
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:26
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:34
         const nr = ast.NamedTypeRef.init(s, "String");
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:27
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:35
         std.debug.assert(std.mem.eql(u8, nr.name, "String"));
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:28
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:36
         std.debug.assert((nr.span.line == 2));
     }
 
     pub fn testExprIntLit(self: *AstTest) void {
         _ = self;
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:31
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:39
         const s = ast.Span.init(3, 1, 3, 2);
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:32
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:40
         const lit = ast.ExprIntLit.init(s, "42", ast.IntBase.decimal);
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:33
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:41
         std.debug.assert(std.mem.eql(u8, lit.text, "42"));
     }
 
     pub fn testBinaryOp(self: *AstTest) void {
         _ = self;
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:37
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:45
         const op = ast.BinaryOp.add;
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:38
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:46
         switch (op) {
             .add => {
                 // pass
             },
             else => {
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:42
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:50
                 if (!(false)) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
@@ -1537,34 +1551,59 @@ pub const AstTest = struct {
 
     pub fn testDeclVar(self: *AstTest) void {
         _ = self;
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:45
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:53
         const s = ast.Span.init(5, 1, 5, 10);
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:46
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:54
         const mods = ast.Modifiers.init(false, false, false, false, false, false);
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:47
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:55
         const dv = ast.DeclVar.init(s, mods, "x", null, null, false);
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:48
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:56
         std.debug.assert(std.mem.eql(u8, dv.name, "x"));
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:49
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:57
         std.debug.assert((!dv.is_const));
     }
 
     pub fn testUnionTypeRef(self: *AstTest) void {
         _ = self;
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:53
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:61
         const s = ast.Span.init(6, 1, 6, 8);
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:54
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:62
         const nr = ast.NamedTypeRef.init(s, "int");
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:55
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:63
         const tr = ast.TypeRef{ .named = nr };
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:56
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:64
         switch (tr) {
             .named => |nr2| {
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:58
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:66
                 std.debug.assert(std.mem.eql(u8, nr2.name, "int"));
             },
             else => {
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:60
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:68
+                if (!(false)) {
+                    std.debug.print("assertion failed\n", .{});
+                    unreachable;
+                }
+            },
+        }
+    }
+
+    pub fn testNilableTypeRef(self: *AstTest) anyerror!void {
+        _ = self;
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:76
+        const s = ast.Span.init(6, 1, 6, 8);
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:77
+        const nr = ast.NamedTypeRef.init(s, "float");
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:78
+        const inner = ast.TypeRef{ .named = nr };
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:79
+        const tr = ast.TypeRef{ .nilable = box: { const _p = try _allocator.create(ast.TypeRef); _p.* = inner; break :box _p; } };
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:80
+        switch (tr) {
+            .nilable => {
+                // pass
+            },
+            else => {
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:84
                 if (!(false)) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
@@ -1589,9 +1628,9 @@ const _reflect_AstTest_field_types: []const []const u8 = &.{};
 pub const Main = struct {
     _type_tag: u64 = _ttag_Main,
     pub fn main() void {
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:65
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:89
         var t = AstTest.init();
-// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:66
+// zbr:C:/projects/cobra-language/zig-compiler/selfhost/ast_test.zbr:90
         t.run();
     }
 

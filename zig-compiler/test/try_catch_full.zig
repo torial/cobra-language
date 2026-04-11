@@ -1485,7 +1485,7 @@ pub const App = struct {
         var _try_err_2948: ?anyerror = null;
         _try_blk_2948: {
 // zbr:test/try_catch_full.zbr:10
-            const result: i64 = App.risky(5) catch |_tc_2668d3c0378| { _try_err_2948 = _tc_2668d3c0378; break :_try_blk_2948; };
+            const result: i64 = App.risky(5) catch |_tc_1a691a00378| { _try_err_2948 = _tc_1a691a00378; break :_try_blk_2948; };
 // zbr:test/try_catch_full.zbr:11
             std.debug.print("{}\n", .{result});
             break :_try_blk_2948;

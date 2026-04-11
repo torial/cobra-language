@@ -1,0 +1,55 @@
+## Test: throws auto-propagation scope — which call patterns auto-emit `try`
+##
+## Auto-propagation fires for:
+##   1. `.directMethod()` — direct self method call via dot-name syntax
+##
+## Still requires explicit `?` for:
+##   2. `localVar.method()` — receiver is a local variable (not `self`)
+##   3. `.field.method()` — chained member access through a field
+##
+## Inside try/catch, cases 2 and 3 need `?` which redirects via catch-break.
+## Case 1 is handled by `exprCallIsThrows` detecting `this.method`.
+
+class Helper
+    def compute() throws
+        raise "from compute"
+
+class Engine
+    var helper as Helper
+
+    cue init()
+        this.helper = Helper()
+
+    ## Case 1: direct self method call — auto-propagation works
+    def doWork() throws
+        raise "from doWork"
+
+    ## Calls `.doWork()` which auto-gets `try self.doWork()`
+    def run() throws
+        .doWork()
+
+    ## Inside try/catch, local var call still needs `?`
+    ## This documents current behaviour — not a limitation of the design,
+    ## just a narrower auto-propagation scope.
+    def runWithHelper() throws
+        const h = Helper()
+        h.compute()?  # ? required: h is a local variable, not self (void result)
+
+class Main
+    shared
+        def main
+            var e = Engine()
+
+            ## Case 1: direct self-call chain — auto-propagation fires
+            try
+                e.run()?   # e.run() calls .doWork(); both get try auto-emitted
+            catch |_e|
+                pass       # expected: doWork raises
+
+            ## Case 3: chained field access — explicit ? required
+            try
+                e.helper.compute()?   # `.field.method()` needs ?
+            catch |_e|
+                pass
+
+            print "throws_nested_test: passed"

@@ -1,6 +1,10 @@
 # AST type smoke-test: construct leaf nodes and read back fields.
 # Phase 2 self-hosting validation — verifies that ast.zbr type definitions
 # are valid and usable from Zebra code.
+#
+# Updated 2026-04-10: testNilableTypeRef() is `throws` (^TypeRef boxing
+# requires allocator). run() wraps it in a try/catch block so that main()
+# stays clean (no error propagation needed at the top level).
 
 use ast
 
@@ -12,6 +16,10 @@ class AstTest
         .testBinaryOp()
         .testDeclVar()
         .testUnionTypeRef()
+        try
+            .testNilableTypeRef()
+        catch |_e|
+            assert false, "testNilableTypeRef raised unexpectedly"
         print "ast_test: all assertions passed"
 
     def testSpan()
@@ -58,6 +66,22 @@ class AstTest
                 assert nr2.name == "int"
             else
                 assert false, "expected named"
+
+    def testNilableTypeRef() throws
+        # Test ^TypeRef boxing: TypeRef.nilable wraps its payload in a heap-allocated
+        # pointer. The boxing emits `try _allocator.create(TypeRef)`, which requires
+        # this method to be `throws`. Auto-propagation means no explicit `?` needed
+        # here — calling .testNilableTypeRef() from run()'s try block redirects the
+        # error via catch-break machinery automatically.
+        const s = ast.Span(6, 1, 6, 8)
+        const nr = ast.NamedTypeRef(s, "float")
+        const inner = ast.TypeRef.named(nr)
+        const tr = ast.TypeRef.nilable(inner)
+        branch tr
+            on ast.TypeRef.nilable
+                pass  # variant confirmed — auto-boxing and pattern match both work
+            else
+                assert false, "expected nilable variant"
 
 class Main
     shared
