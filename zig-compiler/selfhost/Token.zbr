@@ -1,0 +1,385 @@
+# Token kinds and source-annotated token structs for the Zebra self-hosted lexer.
+
+union TokenKind
+    indent
+    dedent
+    eol
+    eof
+    id
+    at_id
+    integer_lit
+    integer_lit_explicit
+    hex_lit
+    hex_lit_unsign
+    hex_lit_explicit
+    float_lit
+    float_lit_exp
+    fractional_lit
+    decimal_lit
+    number_lit
+    int_size
+    uint_size
+    float_size
+    char_lit_single
+    char_lit_double
+    string_single
+    string_double
+    string_nosub_single
+    string_nosub_double
+    string_raw_single
+    string_raw_double
+    string_start_single
+    string_part_single
+    string_stop_single
+    string_start_double
+    string_part_double
+    string_stop_double
+    string_part_format
+    rcurly_special
+    zig_single
+    zig_double
+    doc_string_start
+    doc_string_line
+    dot
+    dotdot
+    colon
+    semi
+    comma
+    lparen
+    rparen
+    lbracket
+    rbracket
+    lcurly
+    rcurly
+    at_lbracket
+    plus
+    plusplus
+    minus
+    minusminus
+    arrow
+    star
+    starstar
+    slash
+    slashslash
+    percent
+    percentpercent
+    ampersand
+    vertical_bar
+    caret
+    tilde
+    question
+    bang
+    double_lt
+    double_gt
+    assign
+    eq
+    ne
+    lt
+    gt
+    le
+    ge
+    plus_equals
+    minus_equals
+    star_equals
+    slash_equals
+    slashslash_equals
+    percent_equals
+    starstar_equals
+    ampersand_equals
+    vertical_bar_equals
+    caret_equals
+    double_lt_equals
+    double_gt_equals
+    question_equals
+    bang_equals
+    toq
+    open_call
+    kw_use
+    kw_exposing
+    kw_namespace
+    kw_class
+    kw_interface
+    kw_mixin
+    kw_struct
+    kw_enum
+    kw_extend
+    kw_def
+    kw_sig
+    kw_get
+    kw_set
+    kw_pro
+    kw_var
+    kw_const
+    kw_cue
+    kw_test
+    kw_implements
+    kw_adds
+    kw_is
+    kw_as
+    kw_from
+    kw_has
+    kw_body
+    kw_shared
+    kw_invariant
+    kw_where
+    kw_abstract
+    kw_extern
+    kw_internal
+    kw_public
+    kw_private
+    kw_protected
+    kw_readonly
+    kw_bool
+    kw_char
+    kw_int
+    kw_uint
+    kw_float
+    kw_same
+    kw_require
+    kw_ensure
+    kw_old
+    kw_implies
+    kw_assert
+    kw_branch
+    kw_on
+    kw_expect
+    kw_if
+    kw_else
+    kw_lock
+    kw_while
+    kw_post
+    kw_for
+    kw_break
+    kw_continue
+    kw_pass
+    kw_print
+    kw_stop
+    kw_trace
+    kw_return
+    kw_yield
+    kw_defer
+    kw_errdefer
+    kw_this
+    kw_to
+    kw_and
+    kw_or
+    kw_not
+    kw_any
+    kw_all
+    kw_in
+    kw_orelse
+    kw_catch
+    kw_true
+    kw_false
+    kw_nil
+    kw_vari
+    kw_aspect
+    kw_weaves
+    kw_error
+    kw_raise
+    kw_throws
+    kw_try
+    kw_capture
+    kw_with
+    kw_except
+    kw_union
+    kw_arena
+    kw_guard
+
+class Token
+    var kind as TokenKind
+    var text as str
+    var line as int
+    var col  as int
+
+    cue init(k as TokenKind, t as str, ln as int, cl as int)
+        kind = k
+        text = t
+        line = ln
+        col  = cl
+
+class Keywords
+    shared def lookup(word as str) as TokenKind?
+        if word == "use"
+            return TokenKind.kw_use()
+        if word == "exposing"
+            return TokenKind.kw_exposing()
+        if word == "namespace"
+            return TokenKind.kw_namespace()
+        if word == "class"
+            return TokenKind.kw_class()
+        if word == "interface"
+            return TokenKind.kw_interface()
+        if word == "mixin"
+            return TokenKind.kw_mixin()
+        if word == "struct"
+            return TokenKind.kw_struct()
+        if word == "enum"
+            return TokenKind.kw_enum()
+        if word == "extend"
+            return TokenKind.kw_extend()
+        if word == "def"
+            return TokenKind.kw_def()
+        if word == "sig"
+            return TokenKind.kw_sig()
+        if word == "get"
+            return TokenKind.kw_get()
+        if word == "set"
+            return TokenKind.kw_set()
+        if word == "pro"
+            return TokenKind.kw_pro()
+        if word == "var"
+            return TokenKind.kw_var()
+        if word == "const"
+            return TokenKind.kw_const()
+        if word == "cue"
+            return TokenKind.kw_cue()
+        if word == "test"
+            return TokenKind.kw_test()
+        if word == "implements"
+            return TokenKind.kw_implements()
+        if word == "adds"
+            return TokenKind.kw_adds()
+        if word == "is"
+            return TokenKind.kw_is()
+        if word == "as"
+            return TokenKind.kw_as()
+        if word == "from"
+            return TokenKind.kw_from()
+        if word == "has"
+            return TokenKind.kw_has()
+        if word == "body"
+            return TokenKind.kw_body()
+        if word == "shared"
+            return TokenKind.kw_shared()
+        if word == "invariant"
+            return TokenKind.kw_invariant()
+        if word == "where"
+            return TokenKind.kw_where()
+        if word == "abstract"
+            return TokenKind.kw_abstract()
+        if word == "extern"
+            return TokenKind.kw_extern()
+        if word == "internal"
+            return TokenKind.kw_internal()
+        if word == "public"
+            return TokenKind.kw_public()
+        if word == "private"
+            return TokenKind.kw_private()
+        if word == "protected"
+            return TokenKind.kw_protected()
+        if word == "readonly"
+            return TokenKind.kw_readonly()
+        if word == "bool"
+            return TokenKind.kw_bool()
+        if word == "char"
+            return TokenKind.kw_char()
+        if word == "int"
+            return TokenKind.kw_int()
+        if word == "uint"
+            return TokenKind.kw_uint()
+        if word == "float"
+            return TokenKind.kw_float()
+        if word == "same"
+            return TokenKind.kw_same()
+        if word == "require"
+            return TokenKind.kw_require()
+        if word == "ensure"
+            return TokenKind.kw_ensure()
+        if word == "old"
+            return TokenKind.kw_old()
+        if word == "implies"
+            return TokenKind.kw_implies()
+        if word == "assert"
+            return TokenKind.kw_assert()
+        if word == "branch"
+            return TokenKind.kw_branch()
+        if word == "on"
+            return TokenKind.kw_on()
+        if word == "expect"
+            return TokenKind.kw_expect()
+        if word == "if"
+            return TokenKind.kw_if()
+        if word == "else"
+            return TokenKind.kw_else()
+        if word == "lock"
+            return TokenKind.kw_lock()
+        if word == "while"
+            return TokenKind.kw_while()
+        if word == "post"
+            return TokenKind.kw_post()
+        if word == "for"
+            return TokenKind.kw_for()
+        if word == "break"
+            return TokenKind.kw_break()
+        if word == "continue"
+            return TokenKind.kw_continue()
+        if word == "pass"
+            return TokenKind.kw_pass()
+        if word == "print"
+            return TokenKind.kw_print()
+        if word == "stop"
+            return TokenKind.kw_stop()
+        if word == "trace"
+            return TokenKind.kw_trace()
+        if word == "return"
+            return TokenKind.kw_return()
+        if word == "yield"
+            return TokenKind.kw_yield()
+        if word == "defer"
+            return TokenKind.kw_defer()
+        if word == "errdefer"
+            return TokenKind.kw_errdefer()
+        if word == "this"
+            return TokenKind.kw_this()
+        if word == "to"
+            return TokenKind.kw_to()
+        if word == "and"
+            return TokenKind.kw_and()
+        if word == "or"
+            return TokenKind.kw_or()
+        if word == "not"
+            return TokenKind.kw_not()
+        if word == "any"
+            return TokenKind.kw_any()
+        if word == "all"
+            return TokenKind.kw_all()
+        if word == "in"
+            return TokenKind.kw_in()
+        if word == "orelse"
+            return TokenKind.kw_orelse()
+        if word == "catch"
+            return TokenKind.kw_catch()
+        if word == "true"
+            return TokenKind.kw_true()
+        if word == "false"
+            return TokenKind.kw_false()
+        if word == "nil"
+            return TokenKind.kw_nil()
+        if word == "vari"
+            return TokenKind.kw_vari()
+        if word == "aspect"
+            return TokenKind.kw_aspect()
+        if word == "weaves"
+            return TokenKind.kw_weaves()
+        if word == "error"
+            return TokenKind.kw_error()
+        if word == "raise"
+            return TokenKind.kw_raise()
+        if word == "throws"
+            return TokenKind.kw_throws()
+        if word == "try"
+            return TokenKind.kw_try()
+        if word == "capture"
+            return TokenKind.kw_capture()
+        if word == "with"
+            return TokenKind.kw_with()
+        if word == "except"
+            return TokenKind.kw_except()
+        if word == "union"
+            return TokenKind.kw_union()
+        if word == "arena"
+            return TokenKind.kw_arena()
+        if word == "guard"
+            return TokenKind.kw_guard()
+        return nil

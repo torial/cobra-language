@@ -213,6 +213,22 @@ These fail WITH A COMPILER ERROR — that IS the test passing:
 - **Risk of current heuristic:** A user struct with a field named `len` whose type can't be inferred cross-module will silently get `.items.len` emitted — producing a Zig compile error (not a silent wrong answer), so the bug is detectable.
 - **Found by:** Self-hosting Phase 1 (`selfhost/lexer_test.zbr`).
 
+### BUG-018: Top-level `def` referenced inside class method set `uses_self = true` — FIXED 2026-04-10
+- **Status:** Fixed 2026-04-10
+- **Was:** `refsInExpr` set `uses_self = true` for ANY `.method` symbol, including top-level `def` functions (LANG-001). When a class method body called a top-level function (e.g., `opName(o)` inside `Calc.describe`), `uses_self` was incorrectly True, so the compiler omitted `_ = self;`. Zig then reported "unused function parameter" for `self`.
+- **Fix:** `refsInExpr` now checks `sym.decl.method.is_top_level`; top-level methods do NOT set `uses_self`. Only instance method references (where the call is emitted as `self.method()`) mark self as used.
+- **Found by:** Running full test suite after restoring Phase 1 self-hosting changes. `test/branch_inline_return_test.zbr` → `describe` called the top-level `opName`.
+
+---
+
+### BUG-019: `fn_ref` assignment in `genAssign` owns its own `;\n` terminator
+- **Severity:** Low
+- **Status:** Open
+- **Target:** 0.5 (cleanup)
+- **Symptom:** The `fn_ref_emitted` block inside `genAssign`'s `else` branch short-circuits with its own `try g.w.writeAll(";\n"); return;` instead of falling through to the shared `try g.w.writeAll(";\n")` at the bottom of the function. This asymmetry means that if any post-processing is ever added after the shared terminator (e.g., debug annotations, error redirects), the fn-ref path silently skips it.
+- **Fix:** Restructure so `fn_ref_emitted` sets a flag and falls through to the shared terminator. Alternatively, extract the `;\n` + return pattern into a small helper so all early-exit paths are consistent.
+- **Found by:** Post-implementation review of fn-ref reassignment (`pred = isDigit` → `pred = &isDigit`).
+
 ---
 
 *Last updated: 2026-04-10*

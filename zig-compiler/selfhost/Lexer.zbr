@@ -1,0 +1,803 @@
+# Zebra source tokenizer -- self-hosted implementation.
+#
+# Converts a UTF-8 source string into a List(Token).
+# Methods annotated `throws` raise a string describing the error on failure.
+#
+# Usage:
+#   var toks = Lexer.tokenize(src)
+
+use Token exposing TokenKind
+
+# -- Module-level character classifiers -----------------------------------------
+#
+# Defined at module scope (not inside Lexer) so they can be used as first-class
+# function references — e.g., a future `spanWhile(pos, isAlpha)` helper can
+# receive `isAlpha` directly without wrapping it in a lambda.
+
+shared def isDigit(c as char) as bool
+    branch c
+        on c'0'..c'9'
+            return true
+        else
+            return false
+
+shared def isHexDigit(c as char) as bool
+    branch c
+        on c'0'..c'9'
+            return true
+        on c'a'..c'f'
+            return true
+        on c'A'..c'F'
+            return true
+        else
+            return false
+
+shared def isAlpha(c as char) as bool
+    branch c
+        on c'a'..c'z'
+            return true
+        on c'A'..c'Z'
+            return true
+        else
+            return false
+
+shared def isIdentContinue(c as char) as bool
+    return isAlpha(c) or isDigit(c) or c == c'_'
+
+# -------------------------------------------------------------------------------
+
+union LineKind
+    empty
+    whitespace_only
+    comment_only
+    has_content
+
+class Lexer
+    var src         as str
+    var pos         as int
+    var line        as int
+    var lineStart   as int
+    var indentDepth as int
+    var blockDepth  as int
+    var out         as List(Token.Token)
+
+    cue init()
+        src         = ""
+        pos         = 0
+        line        = 1
+        lineStart   = 0
+        indentDepth = 0
+        blockDepth  = 0
+        out         = List()
+
+    shared def tokenize(source as str) as List(Token.Token) throws
+        var lex = Lexer()
+        lex.src = source
+        lex.run()?
+        return lex.out
+
+    # -- Low-level helpers ---------------------------------------------------
+
+    def col() as int
+        return pos - lineStart + 1
+
+    def peek() as char
+        if pos < src.len
+            return src[pos]
+        return c'\x00'
+
+    def peek1() as char
+        if pos + 1 < src.len
+            return src[pos + 1]
+        return c'\x00'
+
+    def peekAt(offset as int) as char
+        if pos + offset < src.len
+            return src[pos + offset]
+        return c'\x00'
+
+    def advanceNewline()
+        pos       = pos + 1
+        line      = line + 1
+        lineStart = pos
+
+    def emit(kind as TokenKind, text as str, ln as int, cl as int)
+        out.add(Token.Token(kind, text, ln, cl))
+
+    # -- Line classification -------------------------------------------------
+
+    def classifyLine() as LineKind
+        var i = pos
+        if i >= src.len or src[i] == c'\n'
+            return LineKind.empty()
+        var hasWs = false
+        while i < src.len and (src[i] == c' ' or src[i] == c'\t')
+            hasWs = true
+            i = i + 1
+        if i >= src.len or src[i] == c'\n'
+            if hasWs
+                return LineKind.whitespace_only()
+            return LineKind.empty()
+        if src[i] == c'#'
+            return LineKind.comment_only()
+        return LineKind.has_content()
+
+    # -- Indentation ---------------------------------------------------------
+
+    def processIndentation() throws
+        var ln     = line
+        var tabs   = 0
+        var spaces = 0
+        while pos < src.len
+            var c = src[pos]
+            if c == c'\t'
+                tabs = tabs + 1
+                pos  = pos + 1
+            else if c == c' '
+                spaces = spaces + 1
+                pos    = pos + 1
+            else
+                break
+        if tabs > 0 and spaces > 0
+            raise "MixedIndentation"
+        var level = 0
+        if spaces > 0
+            if spaces % 4 <> 0
+                raise "SpaceIndentNotMultipleOfFour"
+            level = spaces / 4
+        else
+            level = tabs
+        while level > indentDepth
+            emit(TokenKind.indent(), "", ln, 1)
+            indentDepth = indentDepth + 1
+        while level < indentDepth
+            emit(TokenKind.dedent(), "", ln, 1)
+            indentDepth = indentDepth - 1
+
+    # -- Block comment  /# ... #/ --------------------------------------------
+
+    def scanBlockComment() throws
+        pos        = pos + 2
+        blockDepth = blockDepth + 1
+        while pos < src.len and blockDepth > 0
+            if src[pos] == c'/' and pos + 1 < src.len and src[pos + 1] == c'#'
+                pos        = pos + 2
+                blockDepth = blockDepth + 1
+            else if src[pos] == c'#' and pos + 1 < src.len and src[pos + 1] == c'/'
+                pos        = pos + 2
+                blockDepth = blockDepth - 1
+            else if src[pos] == c'\n'
+                advanceNewline()
+            else
+                pos = pos + 1
+        if blockDepth > 0
+            raise "UnterminatedBlockComment"
+
+    # -- @ prefix -----------------------------------------------------------
+
+    def scanAt(ln as int, cl as int) throws
+        var c1 = peek1()
+        if c1 == c'['
+            pos = pos + 2
+            emit(TokenKind.at_lbracket(), "@[", ln, cl)
+            return
+        if isAlpha(c1) or c1 == c'_'
+            pos = pos + 1
+            var start = pos
+            while pos < src.len and isIdentContinue(src[pos])
+                pos = pos + 1
+            emit(TokenKind.at_id(), src[start - 1..pos], ln, cl)
+            return
+        raise "UnexpectedCharacter"
+
+    # -- Identifiers, keywords, string prefixes ------------------------------
+
+    def scanIdentOrKeyword(ln as int, cl as int) throws
+        var start = pos
+        while pos < src.len and isIdentContinue(src[pos])
+            pos = pos + 1
+        var word = src[start..pos]
+
+        # c'  c"  char literals
+        if word.len == 1 and word[0] == c'c'
+            var q = peek()
+            if q == c'\'' or q == c'"'
+                scanCharLiteral(q, start, ln, cl)?
+                return
+
+        # r'  r"  raw strings
+        if word.len == 1 and word[0] == c'r'
+            var q = peek()
+            if q == c'\'' or q == c'"'
+                var kind = TokenKind.string_raw_single()
+                if q == c'"'
+                    kind = TokenKind.string_raw_double()
+                scanSimpleString(q, start, kind, ln, cl)?
+                return
+
+        # ns'  ns"  no-substitution strings
+        if word.len == 2 and word[0] == c'n' and word[1] == c's'
+            var q = peek()
+            if q == c'\'' or q == c'"'
+                var kind = TokenKind.string_nosub_single()
+                if q == c'"'
+                    kind = TokenKind.string_nosub_double()
+                scanSimpleString(q, start, kind, ln, cl)?
+                return
+
+        # zig'  zig"  backend literals
+        if word == "zig"
+            var q = peek()
+            if q == c'\'' or q == c'"'
+                var kind = TokenKind.zig_single()
+                if q == c'"'
+                    kind = TokenKind.zig_double()
+                scanSimpleString(q, start, kind, ln, cl)?
+                return
+
+        # Sized type names: int8, uint16, float32, etc.
+        if word.len > 3 and word[0] == c'i' and word[1] == c'n' and word[2] == c't' and isDigit(word[3])
+            emit(TokenKind.int_size(), word, ln, cl)
+            return
+        if word.len > 4 and word[0] == c'u' and word[1] == c'i' and word[2] == c'n' and word[3] == c't' and isDigit(word[4])
+            emit(TokenKind.uint_size(), word, ln, cl)
+            return
+        if word.len > 5 and word[0] == c'f' and word[1] == c'l' and word[2] == c'o' and word[3] == c'a' and word[4] == c't' and isDigit(word[5])
+            emit(TokenKind.float_size(), word, ln, cl)
+            return
+
+        # `to?` operator
+        if word == "to" and peek() == c'?'
+            pos = pos + 1
+            emit(TokenKind.toq(), src[start..pos], ln, cl)
+            return
+
+        # Keyword or identifier
+        var kw = Token.Keywords.lookup(word)
+        if kw <> nil
+            emit(kw to!, word, ln, cl)
+            return
+
+        # open_call: identifier immediately followed by (
+        if peek() == c'('
+            pos = pos + 1
+            emit(TokenKind.open_call(), word, ln, cl)
+            return
+
+        emit(TokenKind.id(), word, ln, cl)
+
+    # -- Char literals  c'x'  c"x" ------------------------------------------
+
+    def scanCharLiteral(q as char, start as int, ln as int, cl as int) throws
+        pos = pos + 1
+        while pos < src.len
+            var c = src[pos]
+            if c == c'\\'
+                pos = pos + 2
+                continue
+            if c == q
+                pos = pos + 1
+                break
+            if c == c'\n'
+                raise "UnterminatedCharLiteral"
+            pos = pos + 1
+        var kind = TokenKind.char_lit_single()
+        if q == c'"'
+            kind = TokenKind.char_lit_double()
+        emit(kind, src[start..pos], ln, cl)
+
+    # -- Simple strings (raw, nosub, zig) ------------------------------------
+
+    def scanSimpleString(q as char, start as int, kind as TokenKind, ln as int, cl as int) throws
+        pos = pos + 1
+        while pos < src.len
+            var c = src[pos]
+            if c == c'\\'
+                pos = pos + 2
+                continue
+            if c == q
+                pos = pos + 1
+                break
+            if c == c'\n'
+                raise "UnterminatedString"
+            pos = pos + 1
+        emit(kind, src[start..pos], ln, cl)
+
+    # -- Interpolated and plain strings --------------------------------------
+
+    def scanString(q as char, ln as int, cl as int) throws
+        if q == c'"' and peek1() == c'"' and peekAt(2) == c'"'
+            scanDocString(ln, cl)?
+            return
+
+        var openPos  = pos
+        pos = pos + 1
+
+        var hasInterp = false
+        var segStart  = pos
+        var segLn     = line
+
+        while pos < src.len
+            var c = src[pos]
+
+            if c == c'$' and peek1() == c'{'
+                var segText = src[segStart..pos]
+                if not hasInterp
+                    var kind = TokenKind.string_start_single()
+                    if q == c'"'
+                        kind = TokenKind.string_start_double()
+                    emit(kind, src[openPos..pos], ln, cl)
+                    hasInterp = true
+                else
+                    var kind = TokenKind.string_part_single()
+                    if q == c'"'
+                        kind = TokenKind.string_part_double()
+                    emit(kind, segText, segLn, segStart - lineStart + 1)
+                pos = pos + 2
+                scanInterpExpr()?
+                segStart = pos
+                segLn    = line
+                continue
+
+            if c == q
+                var segText = src[segStart..pos]
+                pos = pos + 1
+                if not hasInterp
+                    var kind = TokenKind.string_single()
+                    if q == c'"'
+                        kind = TokenKind.string_double()
+                    emit(kind, src[openPos..pos], ln, cl)
+                else
+                    var kind = TokenKind.string_stop_single()
+                    if q == c'"'
+                        kind = TokenKind.string_stop_double()
+                    emit(kind, segText, segLn, segStart - lineStart + 1)
+                return
+
+            if c == c'\n'
+                raise "UnterminatedString"
+            if c == c'\\'
+                pos = pos + 2
+                continue
+            pos = pos + 1
+
+        raise "UnterminatedString"
+
+    # -- Interpolation expression scanner ------------------------------------
+
+    def scanInterpExpr() throws
+        var depth = 1
+        while depth > 0
+            if pos >= src.len
+                raise "UnterminatedInterpolation"
+            var c = src[pos]
+            if c == c' ' or c == c'\t'
+                pos = pos + 1
+                continue
+            if c == c'{'
+                var ln = line
+                var cl = col()
+                pos    = pos + 1
+                emit(TokenKind.lcurly(), "{", ln, cl)
+                depth  = depth + 1
+                continue
+            if c == c'}'
+                var ln = line
+                var cl = col()
+                pos    = pos + 1
+                depth  = depth - 1
+                if depth == 0
+                    emit(TokenKind.rcurly_special(), "}", ln, cl)
+                else
+                    emit(TokenKind.rcurly(), "}", ln, cl)
+                continue
+            if c == c':'
+                var specStart = pos
+                var specLn    = line
+                var specCl    = col()
+                pos = pos + 1
+                while pos < src.len and src[pos] <> c'}' and src[pos] <> c'\n'
+                    pos = pos + 1
+                if pos < src.len and src[pos] == c'}'
+                    emit(TokenKind.string_part_format(), src[specStart..pos], specLn, specCl)
+                    continue
+                pos = specStart
+            scanToken()?
+
+    # -- Doc strings  """...""" ----------------------------------------------
+
+    def scanDocString(ln as int, cl as int) throws
+        var start = pos
+        pos = pos + 3
+
+        while pos < src.len and (src[pos] == c' ' or src[pos] == c'\t')
+            pos = pos + 1
+
+        if pos < src.len and src[pos] <> c'\n'
+            while pos + 2 < src.len
+                if src[pos] == c'"' and src[pos + 1] == c'"' and src[pos + 2] == c'"'
+                    pos = pos + 3
+                    emit(TokenKind.doc_string_line(), src[start..pos], ln, cl)
+                    return
+                pos = pos + 1
+            raise "UnterminatedString"
+
+        if pos < src.len and src[pos] == c'\n'
+            advanceNewline()
+        while pos < src.len
+            var p = pos
+            while p < src.len and (src[p] == c' ' or src[p] == c'\t')
+                p = p + 1
+            if p + 2 < src.len and src[p] == c'"' and src[p + 1] == c'"' and src[p + 2] == c'"'
+                pos = p + 3
+                emit(TokenKind.doc_string_line(), src[start..pos], ln, cl)
+                return
+            while pos < src.len and src[pos] <> c'\n'
+                pos = pos + 1
+            if pos < src.len
+                advanceNewline()
+
+        raise "UnterminatedString"
+
+    # -- Numeric literals ----------------------------------------------------
+
+    def scanNumericLiteral(ln as int, cl as int) throws
+        var start = pos
+
+        if src[pos] == c'0' and pos + 1 < src.len and src[pos + 1] == c'x'
+            pos = pos + 2
+            while pos < src.len and isHexDigit(src[pos])
+                pos = pos + 1
+            if peek() == c'_'
+                var suffixStart = pos
+                pos = pos + 1
+                if peek() == c'u'
+                    pos = pos + 1
+                    while pos < src.len and isDigit(src[pos])
+                        pos = pos + 1
+                    emit(TokenKind.hex_lit_unsign(), src[start..pos], ln, cl)
+                    return
+                while pos < src.len and isDigit(src[pos])
+                    pos = pos + 1
+                if pos > suffixStart + 1
+                    emit(TokenKind.hex_lit_explicit(), src[start..pos], ln, cl)
+                    return
+                pos = suffixStart
+            emit(TokenKind.hex_lit(), src[start..pos], ln, cl)
+            return
+
+        while pos < src.len and (isDigit(src[pos]) or src[pos] == c'_')
+            pos = pos + 1
+
+        var hasDot = peek() == c'.' and isDigit(peekAt(1))
+        if hasDot
+            pos = pos + 1
+            while pos < src.len and (isDigit(src[pos]) or src[pos] == c'_')
+                pos = pos + 1
+
+        var sc  = peek()
+        var sc1 = peek1()
+
+        if sc == c'_' and sc1 == c'd' and not isIdentContinue(peekAt(2))
+            pos = pos + 2
+            emit(TokenKind.decimal_lit(), src[start..pos], ln, cl)
+            return
+
+        if sc == c'_' and sc1 == c'n' and not isIdentContinue(peekAt(2))
+            pos = pos + 2
+            emit(TokenKind.number_lit(), src[start..pos], ln, cl)
+            return
+
+        if (sc == c'_' and sc1 == c'f') or sc == c'f'
+            if sc == c'_'
+                pos = pos + 1
+            pos = pos + 1
+            if (peek() == c'3' and peekAt(1) == c'2') or (peek() == c'6' and peekAt(1) == c'4')
+                pos = pos + 2
+            var kind = TokenKind.float_lit()
+            if not hasDot
+                kind = TokenKind.float_lit_exp()
+            emit(kind, src[start..pos], ln, cl)
+            return
+
+        if (sc == c'_' and (sc1 == c'i' or sc1 == c'u')) or sc == c'i' or sc == c'u'
+            if sc == c'_'
+                pos = pos + 1
+            pos = pos + 1
+            while pos < src.len and isDigit(src[pos])
+                pos = pos + 1
+            emit(TokenKind.integer_lit_explicit(), src[start..pos], ln, cl)
+            return
+
+        if hasDot
+            emit(TokenKind.fractional_lit(), src[start..pos], ln, cl)
+        else
+            emit(TokenKind.integer_lit(), src[start..pos], ln, cl)
+
+    # -- Operators and punctuation -------------------------------------------
+
+    def scanOperator(ln as int, cl as int) throws
+        var c  = peek()
+        var c1 = peek1()
+
+        # Three-character compound operators
+        if pos + 2 < src.len
+            var c2 = src[pos + 2]
+            if c == c'/' and c1 == c'/' and c2 == c'='
+                pos = pos + 3
+                emit(TokenKind.slashslash_equals(), "//=", ln, cl)
+                return
+            if c == c'*' and c1 == c'*' and c2 == c'='
+                pos = pos + 3
+                emit(TokenKind.starstar_equals(), "**=", ln, cl)
+                return
+            if c == c'<' and c1 == c'<' and c2 == c'='
+                pos = pos + 3
+                emit(TokenKind.double_lt_equals(), "<<=", ln, cl)
+                return
+            if c == c'>' and c1 == c'>' and c2 == c'='
+                pos = pos + 3
+                emit(TokenKind.double_gt_equals(), ">>=", ln, cl)
+                return
+
+        # Two-character compound operators
+        if c == c'+' and c1 == c'+'
+            pos = pos + 2
+            emit(TokenKind.plusplus(), "++", ln, cl)
+            return
+        if c == c'+' and c1 == c'='
+            pos = pos + 2
+            emit(TokenKind.plus_equals(), "+=", ln, cl)
+            return
+        if c == c'-' and c1 == c'>'
+            pos = pos + 2
+            emit(TokenKind.arrow(), "->", ln, cl)
+            return
+        if c == c'-' and c1 == c'-'
+            pos = pos + 2
+            emit(TokenKind.minusminus(), "--", ln, cl)
+            return
+        if c == c'-' and c1 == c'='
+            pos = pos + 2
+            emit(TokenKind.minus_equals(), "-=", ln, cl)
+            return
+        if c == c'*' and c1 == c'*'
+            pos = pos + 2
+            emit(TokenKind.starstar(), "**", ln, cl)
+            return
+        if c == c'*' and c1 == c'='
+            pos = pos + 2
+            emit(TokenKind.star_equals(), "*=", ln, cl)
+            return
+        if c == c'/' and c1 == c'/'
+            pos = pos + 2
+            emit(TokenKind.slashslash(), "//", ln, cl)
+            return
+        if c == c'/' and c1 == c'='
+            pos = pos + 2
+            emit(TokenKind.slash_equals(), "/=", ln, cl)
+            return
+        if c == c'%' and c1 == c'%'
+            pos = pos + 2
+            emit(TokenKind.percentpercent(), "%%", ln, cl)
+            return
+        if c == c'%' and c1 == c'='
+            pos = pos + 2
+            emit(TokenKind.percent_equals(), "%=", ln, cl)
+            return
+        if c == c'=' and c1 == c'='
+            pos = pos + 2
+            emit(TokenKind.eq(), "==", ln, cl)
+            return
+        if c == c'<' and c1 == c'>'
+            pos = pos + 2
+            emit(TokenKind.ne(), "<>", ln, cl)
+            return
+        if c == c'<' and c1 == c'='
+            pos = pos + 2
+            emit(TokenKind.le(), "<=", ln, cl)
+            return
+        if c == c'<' and c1 == c'<'
+            pos = pos + 2
+            emit(TokenKind.double_lt(), "<<", ln, cl)
+            return
+        if c == c'>' and c1 == c'='
+            pos = pos + 2
+            emit(TokenKind.ge(), ">=", ln, cl)
+            return
+        if c == c'>' and c1 == c'>'
+            pos = pos + 2
+            emit(TokenKind.double_gt(), ">>", ln, cl)
+            return
+        if c == c'&' and c1 == c'='
+            pos = pos + 2
+            emit(TokenKind.ampersand_equals(), "&=", ln, cl)
+            return
+        if c == c'|' and c1 == c'='
+            pos = pos + 2
+            emit(TokenKind.vertical_bar_equals(), "|=", ln, cl)
+            return
+        if c == c'^' and c1 == c'='
+            pos = pos + 2
+            emit(TokenKind.caret_equals(), "^=", ln, cl)
+            return
+        if c == c'?' and c1 == c'='
+            pos = pos + 2
+            emit(TokenKind.question_equals(), "?=", ln, cl)
+            return
+        if c == c'!' and c1 == c'='
+            pos = pos + 2
+            emit(TokenKind.bang_equals(), "!=", ln, cl)
+            return
+        if c == c'.' and c1 == c'.'
+            pos = pos + 2
+            emit(TokenKind.dotdot(), "..", ln, cl)
+            return
+
+        # Single-character operators
+        pos = pos + 1
+        if c == c'+'
+            emit(TokenKind.plus(), "+", ln, cl)
+            return
+        if c == c'-'
+            emit(TokenKind.minus(), "-", ln, cl)
+            return
+        if c == c'*'
+            emit(TokenKind.star(), "*", ln, cl)
+            return
+        if c == c'/'
+            emit(TokenKind.slash(), "/", ln, cl)
+            return
+        if c == c'%'
+            emit(TokenKind.percent(), "%", ln, cl)
+            return
+        if c == c'='
+            emit(TokenKind.assign(), "=", ln, cl)
+            return
+        if c == c'<'
+            emit(TokenKind.lt(), "<", ln, cl)
+            return
+        if c == c'>'
+            emit(TokenKind.gt(), ">", ln, cl)
+            return
+        if c == c'&'
+            emit(TokenKind.ampersand(), "&", ln, cl)
+            return
+        if c == c'|'
+            emit(TokenKind.vertical_bar(), "|", ln, cl)
+            return
+        if c == c'^'
+            emit(TokenKind.caret(), "^", ln, cl)
+            return
+        if c == c'~'
+            emit(TokenKind.tilde(), "~", ln, cl)
+            return
+        if c == c'?'
+            emit(TokenKind.question(), "?", ln, cl)
+            return
+        if c == c'!'
+            emit(TokenKind.bang(), "!", ln, cl)
+            return
+        if c == c'.'
+            emit(TokenKind.dot(), ".", ln, cl)
+            return
+        if c == c':'
+            emit(TokenKind.colon(), ":", ln, cl)
+            return
+        if c == c';'
+            emit(TokenKind.semi(), ";", ln, cl)
+            return
+        if c == c','
+            emit(TokenKind.comma(), ",", ln, cl)
+            return
+        if c == c'('
+            emit(TokenKind.lparen(), "(", ln, cl)
+            return
+        if c == c')'
+            emit(TokenKind.rparen(), ")", ln, cl)
+            return
+        if c == c'['
+            emit(TokenKind.lbracket(), "[", ln, cl)
+            return
+        if c == c']'
+            emit(TokenKind.rbracket(), "]", ln, cl)
+            return
+        if c == c'{'
+            emit(TokenKind.lcurly(), "{", ln, cl)
+            return
+        if c == c'}'
+            emit(TokenKind.rcurly(), "}", ln, cl)
+            return
+        raise "UnexpectedCharacter"
+
+    # -- Token dispatch (branch on leading char) -----------------------------
+
+    def scanToken() throws
+        var c  = src[pos]
+        var ln = line
+        var cl = col()
+        branch c
+            on c'0'..c'9'
+                scanNumericLiteral(ln, cl)?
+            on c'@'
+                scanAt(ln, cl)?
+            on c'a'..c'z'
+                scanIdentOrKeyword(ln, cl)?
+            on c'A'..c'Z'
+                scanIdentOrKeyword(ln, cl)?
+            on c'_'
+                scanIdentOrKeyword(ln, cl)?
+            on c'\''
+                scanString(c, ln, cl)?
+            on c'"'
+                scanString(c, ln, cl)?
+            else
+                scanOperator(ln, cl)?
+
+    # -- Main tokenization loop ----------------------------------------------
+
+    def run() throws
+        var atLineStart = true
+        while pos < src.len
+            if atLineStart
+                atLineStart = false
+                var lk = classifyLine()
+                branch lk
+                    on LineKind.empty
+                        var ln = line
+                        var cl = col()
+                        advanceNewline()
+                        emit(TokenKind.eol(), "\n", ln, cl)
+                        atLineStart = true
+                        continue
+                    on LineKind.whitespace_only
+                        while pos < src.len and src[pos] <> c'\n'
+                            pos = pos + 1
+                        if pos < src.len
+                            advanceNewline()
+                        atLineStart = true
+                        continue
+                    on LineKind.comment_only
+                        while pos < src.len and src[pos] <> c'\n'
+                            pos = pos + 1
+                        if pos < src.len
+                            advanceNewline()
+                        atLineStart = true
+                        continue
+                    on LineKind.has_content
+                        processIndentation()?
+
+            var c = src[pos]
+
+            if c == c' ' or c == c'\t'
+                pos = pos + 1
+                continue
+
+            if c == c'\n'
+                var ln = line
+                var cl = col()
+                advanceNewline()
+                emit(TokenKind.eol(), "\n", ln, cl)
+                atLineStart = true
+                continue
+
+            if c == c'#'
+                while pos < src.len and src[pos] <> c'\n'
+                    pos = pos + 1
+                continue
+
+            if c == c'/' and peek1() == c'#'
+                scanBlockComment()?
+                continue
+
+            scanToken()?
+
+        if not atLineStart
+            emit(TokenKind.eol(), "", line, col())
+
+        var eofCol = col()
+        var eofLn  = line
+        while indentDepth > 0
+            emit(TokenKind.dedent(), "", eofLn, eofCol)
+            indentDepth = indentDepth - 1
+        emit(TokenKind.eof(), "", eofLn, eofCol)

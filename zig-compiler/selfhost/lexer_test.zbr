@@ -1,0 +1,148 @@
+# Phase 1 test: Token + Lexer
+
+use Token exposing TokenKind
+use Lexer
+
+class LexerTest
+    shared
+        def testKeyword()
+            try
+                var toks = Lexer.tokenize("class")
+                assert toks.len == 3, "keyword: expected 3 tokens, got " + toks.len.toString()
+                print "testKeyword: OK"
+            catch |e|
+                print "testKeyword FAILED: " + e.message
+
+        def testIdentifier()
+            try
+                var toks = Lexer.tokenize("fooBar")
+                assert toks.len == 3, "identifier: expected 3 tokens"
+                assert toks.at(0).text == "fooBar", "identifier: text mismatch"
+                print "testIdentifier: OK"
+            catch |e|
+                print "testIdentifier FAILED: " + e.message
+
+        def testClass()
+            try
+                var src as str = "class Foo\n    def bar\n        return 1"
+                var toks = Lexer.tokenize(src)
+                assert toks.len >= 10, "class: expected >= 10 tokens, got " + toks.len.toString()
+                assert toks.at(0).text == "class", "class: first token should be 'class'"
+                assert toks.at(1).text == "Foo", "class: second should be 'Foo'"
+                print "testClass: OK (" + toks.len.toString() + " tokens)"
+            catch |e|
+                print "testClass FAILED: " + e.message
+
+        def testIndentation()
+            try
+                var src as str = "a\n    b\n        c\n    d\ne"
+                var toks = Lexer.tokenize(src)
+                assert toks.len >= 12, "indentation: expected >= 12 tokens, got " + toks.len.toString()
+                print "testIndentation: OK (" + toks.len.toString() + " tokens)"
+            catch |e|
+                print "testIndentation FAILED: " + e.message
+
+        def testLineComment()
+            try
+                var src as str = "x # this is a comment\ny"
+                var toks = Lexer.tokenize(src)
+                assert toks.len == 5, "comment: expected 5 tokens, got " + toks.len.toString()
+                assert toks.at(0).text == "x", "comment: first token should be 'x'"
+                assert toks.at(2).text == "y", "comment: third should be 'y'"
+                print "testLineComment: OK"
+            catch |e|
+                print "testLineComment FAILED: " + e.message
+
+        def testOperators()
+            try
+                var src as str = "a + b * c"
+                var toks = Lexer.tokenize(src)
+                assert toks.len == 7, "operators: expected 7 tokens, got " + toks.len.toString()
+                assert toks.at(1).text == "+", "operators: token 1 should be '+'"
+                assert toks.at(3).text == "*", "operators: token 3 should be '*'"
+                print "testOperators: OK"
+            catch |e|
+                print "testOperators FAILED: " + e.message
+
+        def testIntLiteral()
+            try
+                var src as str = "42"
+                var toks = Lexer.tokenize(src)
+                assert toks.len == 3, "int: expected 3 tokens, got " + toks.len.toString()
+                assert toks.at(0).text == "42", "int: text mismatch"
+                print "testIntLiteral: OK"
+            catch |e|
+                print "testIntLiteral FAILED: " + e.message
+
+        def testOpenCall()
+            try
+                var src as str = "foo()"
+                var toks = Lexer.tokenize(src)
+                assert toks.len == 4, "open_call: expected 4 tokens, got " + toks.len.toString()
+                assert toks.at(0).text == "foo", "open_call: text should be 'foo'"
+                print "testOpenCall: OK"
+            catch |e|
+                print "testOpenCall FAILED: " + e.message
+
+        def testSourcePositions()
+            try
+                var src as str = "x\ny"
+                var toks = Lexer.tokenize(src)
+                assert toks.at(0).line == 1, "position: first token on line 1"
+                assert toks.at(0).col  == 1, "position: first token at col 1"
+                assert toks.at(2).line == 2, "position: 'y' on line 2"
+                print "testSourcePositions: OK"
+            catch |e|
+                print "testSourcePositions FAILED: " + e.message
+
+        def testTokenKinds()
+            # Verify that branch range dispatch in scanToken correctly classifies chars
+            try
+                var toks = Lexer.tokenize("abc 123")
+                var idKind   = toks.at(0).kind
+                var intKind  = toks.at(1).kind
+                branch idKind
+                    on TokenKind.id
+                        print "testTokenKinds id: OK"
+                    else
+                        print "testTokenKinds FAILED: expected id kind"
+                branch intKind
+                    on TokenKind.integer_lit
+                        print "testTokenKinds int: OK"
+                    else
+                        print "testTokenKinds FAILED: expected integer_lit kind"
+            catch |e|
+                print "testTokenKinds FAILED: " + e.message
+
+        def testExposing()
+            # Verify the `exposing` keyword is tokenized correctly
+            try
+                var toks = Lexer.tokenize("use Foo exposing Bar")
+                assert toks.at(2).text == "exposing", "exposing: token text mismatch"
+                branch toks.at(2).kind
+                    on TokenKind.kw_exposing
+                        print "testExposing: OK"
+                    else
+                        print "testExposing FAILED: wrong kind for 'exposing'"
+            catch |e|
+                print "testExposing FAILED: " + e.message
+
+        def main
+            print "=== Lexer Phase 1 Tests ==="
+            testKeyword()
+            testIdentifier()
+            testClass()
+            testIndentation()
+            testLineComment()
+            testOperators()
+            testIntLiteral()
+            testOpenCall()
+            testSourcePositions()
+            testTokenKinds()
+            testExposing()
+            print "=== Tests complete ==="
+
+class Main
+    shared
+        def main
+            LexerTest.main()
