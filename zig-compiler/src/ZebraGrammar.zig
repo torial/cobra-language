@@ -956,6 +956,10 @@ const stmt_rules: []const Rule = &.{
     .{ .lhs = .BranchOnClause, .rhs = &.{ t(.kw_on), n(.Expr), t(.kw_return), n(.Expr), t(.eol) } },
     // Union binding form: on Expr as id eol Block  (for discriminated union dispatch)
     .{ .lhs = .BranchOnClause, .rhs = &.{ t(.kw_on), n(.Expr), t(.kw_as), t(.id), t(.eol), n(.Block) } },
+    // Guarded binding form: on Expr as id if Expr eol Block
+    .{ .lhs = .BranchOnClause, .rhs = &.{ t(.kw_on), n(.Expr), t(.kw_as), t(.id), t(.kw_if), n(.Expr), t(.eol), n(.Block) } },
+    // Guarded non-binding form: on ExprListNE if Expr eol Block
+    .{ .lhs = .BranchOnClause, .rhs = &.{ t(.kw_on), n(.ExprListNE), t(.kw_if), n(.Expr), t(.eol), n(.Block) } },
     .{ .lhs = .BranchElseOpt,  .rhs = &.{} }, // ε
     .{ .lhs = .BranchElseOpt,  .rhs = &.{ t(.kw_else), t(.eol), n(.Block) } },
     // Inline else: else, stmt

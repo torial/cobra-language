@@ -575,7 +575,18 @@ fn cloneInterface(src: *const TypeChecker.ModuleInterface, alloc: std.mem.Alloca
             try boxed_variants.put(k, v);
         }
     }
-    return .{ .methods = methods, .fields = fields, .types = types, .throws_methods = throws_methods, .boxed_variants = boxed_variants };
+    var variant_payload_types = std.StringHashMap([]const u8).init(alloc);
+    errdefer variant_payload_types.deinit();
+    {
+        var it = src.variant_payload_types.iterator();
+        while (it.next()) |e| {
+            const k = try alloc.dupe(u8, e.key_ptr.*);
+            errdefer alloc.free(k);
+            const v = try alloc.dupe(u8, e.value_ptr.*);
+            try variant_payload_types.put(k, v);
+        }
+    }
+    return .{ .methods = methods, .fields = fields, .types = types, .throws_methods = throws_methods, .boxed_variants = boxed_variants, .variant_payload_types = variant_payload_types };
 }
 
 /// Compile a .zbr file to the corresponding .zig file, first recursively
@@ -608,11 +619,12 @@ fn compileZbrToZig(
         if (iface_cache.get(zbr_path)) |cached| return try cloneInterface(&cached, alloc);
         // Genuine cycle (A → B → A): return an empty interface to break the loop.
         return TypeChecker.ModuleInterface{
-            .methods        = std.StringHashMap(TypeChecker.Type).init(alloc),
-            .fields         = std.StringHashMap(TypeChecker.Type).init(alloc),
-            .types          = std.StringHashMap(bool).init(alloc),
-            .throws_methods = std.StringHashMap(void).init(alloc),
-            .boxed_variants = std.StringHashMap([]const u8).init(alloc),
+            .methods              = std.StringHashMap(TypeChecker.Type).init(alloc),
+            .fields               = std.StringHashMap(TypeChecker.Type).init(alloc),
+            .types                = std.StringHashMap(bool).init(alloc),
+            .throws_methods       = std.StringHashMap(void).init(alloc),
+            .boxed_variants       = std.StringHashMap([]const u8).init(alloc),
+            .variant_payload_types = std.StringHashMap([]const u8).init(alloc),
         };
     }
 

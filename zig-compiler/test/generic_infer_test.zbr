@@ -1,0 +1,22 @@
+class Container
+    var items as List(str)
+    var flags as List(bool)
+    cue init()
+        items = List()
+        flags = List()
+    def add(s as str, flag as bool)
+        items.add(s)
+        flags.add(flag)
+    def first() as str
+        return items.at(0)
+    def firstFlag() as bool
+        return flags.at(0)
+
+class Main
+    shared def main()
+        var c = Container()
+        c.add("hello", true)
+        c.add("world", false)
+        assert c.first()     == "hello"
+        assert c.firstFlag() == true
+        print "generic_infer_test: all OK"

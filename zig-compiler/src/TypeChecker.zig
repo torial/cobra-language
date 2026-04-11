@@ -337,6 +337,12 @@ pub const ModuleInterface = struct {
     /// cross-module union variants:
     ///   `box: { const _p = try _allocator.create(T); _p.* = val; break :box _p; }`
     boxed_variants: std.StringHashMap([]const u8),
+    /// Union variant payload struct names: "UnionName.variantName" → struct type name.
+    /// Populated for variants whose payload is a named struct/class (or ^StructName).
+    /// Used by the TypeChecker to type branch-binding variables for cross-module unions:
+    ///   `on Parser.PNode.module_ as m` → m has type cross_module{ "Parser", "PModule" }
+    /// This makes `m.field` member accesses type-checkable against the module interface.
+    variant_payload_types: std.StringHashMap([]const u8),
 
     pub fn deinit(self: *ModuleInterface) void {
         const alloc = self.methods.allocator;
@@ -357,6 +363,11 @@ pub const ModuleInterface = struct {
         var bvv = self.boxed_variants.valueIterator();
         while (bvv.next()) |v| alloc.free(v.*);
         self.boxed_variants.deinit();
+        var vpk = self.variant_payload_types.keyIterator();
+        while (vpk.next()) |k| alloc.free(k.*);
+        var vpv = self.variant_payload_types.valueIterator();
+        while (vpv.next()) |v| alloc.free(v.*);
+        self.variant_payload_types.deinit();
     }
 };
 
@@ -380,20 +391,23 @@ pub fn extractModuleInterface(
     errdefer throws_methods.deinit();
     var boxed_variants = std.StringHashMap([]const u8).init(alloc);
     errdefer boxed_variants.deinit();
+    var variant_payload_types = std.StringHashMap([]const u8).init(alloc);
+    errdefer variant_payload_types.deinit();
 
-    try extractFromDecls(module.decls, resolve, alloc, &methods, &fields, &types, &throws_methods, &boxed_variants);
-    return .{ .methods = methods, .fields = fields, .types = types, .throws_methods = throws_methods, .boxed_variants = boxed_variants };
+    try extractFromDecls(module.decls, resolve, alloc, &methods, &fields, &types, &throws_methods, &boxed_variants, &variant_payload_types);
+    return .{ .methods = methods, .fields = fields, .types = types, .throws_methods = throws_methods, .boxed_variants = boxed_variants, .variant_payload_types = variant_payload_types };
 }
 
 fn extractFromDecls(
-    decls:           []const Ast.Decl,
-    resolve:         *const Resolver.ResolveResult,
-    alloc:           Allocator,
-    methods:         *std.StringHashMap(Type),
-    fields:          *std.StringHashMap(Type),
-    types:           *std.StringHashMap(bool),
-    throws_methods:  *std.StringHashMap(void),
-    boxed_variants:  *std.StringHashMap([]const u8),
+    decls:                []const Ast.Decl,
+    resolve:              *const Resolver.ResolveResult,
+    alloc:                Allocator,
+    methods:              *std.StringHashMap(Type),
+    fields:               *std.StringHashMap(Type),
+    types:                *std.StringHashMap(bool),
+    throws_methods:       *std.StringHashMap(void),
+    boxed_variants:       *std.StringHashMap([]const u8),
+    variant_payload_types: *std.StringHashMap([]const u8),
 ) !void {
     for (decls) |decl| switch (decl) {
         .class  => |c| {
@@ -413,24 +427,38 @@ fn extractFromDecls(
         .union_ => |u| {
             const key = try alloc.dupe(u8, u.name);
             try types.put(key, true); // true = is a union (skipped in sole-type import heuristic)
-            // Record any variants whose payload is ^T (ref_to) so CodeGen can
-            // emit the labeled-block boxing expression for cross-module construction.
+            // Record variant payload type names for principled branch-binding inference.
+            // Also record ^T variants for CodeGen's labeled-block boxing.
             for (u.variants) |v| {
-                if (v.payload) |pl| switch (pl) {
-                    .ref_to => |inner| switch (inner.*) {
-                        .named => |nr| {
-                            const bv_key = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ u.name, v.name });
-                            errdefer alloc.free(bv_key);
-                            const bv_val = try alloc.dupe(u8, nr.name);
-                            try boxed_variants.put(bv_key, bv_val);
+                if (v.payload) |pl| {
+                    // Unwrap ^T if heap-boxed; record the inner named type.
+                    const inner_ref: *const Ast.TypeRef = switch (pl) {
+                        .ref_to => |inner| blk: {
+                            // Also record in boxed_variants (^T boxing for CodeGen).
+                            switch (inner.*) {
+                                .named => |nr| {
+                                    const bv_key = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ u.name, v.name });
+                                    errdefer alloc.free(bv_key);
+                                    const bv_val = try alloc.dupe(u8, nr.name);
+                                    try boxed_variants.put(bv_key, bv_val);
+                                },
+                                else => {},
+                            }
+                            break :blk inner;
                         },
-                        else => {},
-                    },
-                    else => {},
-                };
+                        else => &pl,
+                    };
+                    // Record payload struct name for branch-binding type inference.
+                    if (inner_ref.* == .named) {
+                        const vp_key = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ u.name, v.name });
+                        errdefer alloc.free(vp_key);
+                        const vp_val = try alloc.dupe(u8, inner_ref.named.name);
+                        try variant_payload_types.put(vp_key, vp_val);
+                    }
+                }
             }
         },
-        .namespace => |ns| try extractFromDecls(ns.decls, resolve, alloc, methods, fields, types, throws_methods, boxed_variants),
+        .namespace => |ns| try extractFromDecls(ns.decls, resolve, alloc, methods, fields, types, throws_methods, boxed_variants, variant_payload_types),
         else => {},
     };
 }
@@ -815,7 +843,7 @@ const TypeChecker = struct {
             .extend    => |n| try tc.checkExtend(n),
             .method    => |n| try tc.checkMethod(n),
             .property  => |n| try tc.checkProperty(n),
-            .var_      => |n| try tc.checkVarDecl(n),
+            .var_      => |n| try tc.checkVarDecl(n, false),
             .init      => |n| try tc.checkInit(n),
             .union_    => {},  // no body to type-check (variants are types, not expressions)
             .sig_      => {},  // type alias — no body to type-check
@@ -860,7 +888,7 @@ const TypeChecker = struct {
         switch (decl) {
             .method   => |n| try tc.checkMethod(n),
             .property => |n| try tc.checkProperty(n),
-            .var_     => |n| try tc.checkVarDecl(n),
+            .var_     => |n| try tc.checkVarDecl(n, false),
             .init     => |n| try tc.checkInit(n),
             else      => {},
         }
@@ -896,7 +924,24 @@ const TypeChecker = struct {
 
     // ── Variable / field declaration ──────────────────────────────────────────
 
-    fn checkVarDecl(tc: TypeChecker, n: *Ast.DeclVar) anyerror!void {
+    fn checkVarDecl(tc: TypeChecker, n: *Ast.DeclVar, is_local: bool) anyerror!void {
+        // Collection types require explicit initialization for local variables.
+        // `var l as List(T)` with no `=` is a compile error to prevent the subtle
+        // "declaration looks like a constructor call but leaves field unset" footgun.
+        // Class fields are exempt: they're initialized in `cue init()`.
+        if (is_local and n.init == null) {
+            if (n.type_) |tr| {
+                if (tr == .generic) {
+                    const gn = tr.generic.name;
+                    if (std.mem.eql(u8, gn, "List") or std.mem.eql(u8, gn, "HashMap")) {
+                        try tc.emitError(n.span,
+                            "'{s}(...)' requires explicit initialization; use 'var {s} = {s}()()'",
+                            .{ gn, n.name, gn });
+                        return;
+                    }
+                }
+            }
+        }
         if (n.init) |init_expr| {
             const actual = try tc.inferExpr(init_expr);
             if (n.type_) |*tr| {
@@ -1062,7 +1107,7 @@ const TypeChecker = struct {
                                 if (result_err_type) |t| try tc.narrowed_types.put(bname, t);
                             } else {
                                 // Union variant payload: on Shape.circle as r → r has the payload type.
-                                // Look up the variant symbol in the subject union's scope.
+                                // ① Same-module union: look up the variant symbol directly.
                                 if (subj_type == .named) {
                                     const union_sym = subj_type.named;
                                     if (union_sym.kind == .union_) {
@@ -1080,9 +1125,50 @@ const TypeChecker = struct {
                                         }
                                     }
                                 }
+                                // ② Cross-module union: the subject is a `.named` symbol whose
+                                //    kind is `.module` (the exposed type alias).  Look up the
+                                //    variant payload struct name from the imported module's
+                                //    `variant_payload_types` table and construct a cross_module type.
+                                //    This is the principled fix for the for-in heuristic: once
+                                //    `m` has type `.cross_module`, `m.field` accesses can use
+                                //    the module's `fields` table.
+                                if (subj_type == .named) {
+                                    const sym = subj_type.named;
+                                    if (sym.kind == .module) {
+                                        // Find which module this type belongs to.
+                                        const mod_alias = sym.decl.use.path[std.mem.lastIndexOfScalar(u8, sym.decl.use.path, '.') orelse 0 ..];
+                                        const type_name = sym.name;
+                                        const lookup_key = std.fmt.allocPrint(tc.map_alloc, "{s}.{s}", .{ type_name, variant }) catch continue;
+                                        defer tc.map_alloc.free(lookup_key);
+                                        if (tc.imported_modules) |imp| {
+                                            // Find the module by alias (iterate since we only have path).
+                                            var it = imp.iterator();
+                                            while (it.next()) |entry| {
+                                                if (entry.value_ptr.variant_payload_types.get(lookup_key)) |payload_struct_name| {
+                                                    // Determine the actual module alias for this imported module.
+                                                    // entry.key_ptr.* is the module alias (e.g. "Parser").
+                                                    const actual_mod = blk: {
+                                                        // Check if this module exports the union type_name.
+                                                        if (entry.value_ptr.types.contains(type_name)) break :blk entry.key_ptr.*;
+                                                        break :blk null;
+                                                    };
+                                                    if (actual_mod) |mod| {
+                                                        _ = mod_alias; // the path-based alias is less reliable
+                                                        try tc.narrowed_types.put(bname, .{ .cross_module = .{
+                                                            .module    = mod,
+                                                            .type_name = payload_struct_name,
+                                                        }});
+                                                    }
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
+                    if (on.guard) |guard| _ = try tc.inferExpr(guard);
                     try tc.checkStmts(on.body);
                     if (on.binding) |bname| _ = tc.narrowed_types.remove(bname);
                 }
@@ -1131,7 +1217,7 @@ const TypeChecker = struct {
             .print    => |s| { for (s.args) |a| _ = try tc.inferExpr(a); },
             .yield    => |s| _ = try tc.inferExpr(s.value),
             .assign   => |s| try tc.checkAssign(s),
-            .var_     => |n| try tc.checkVarDecl(n),
+            .var_     => |n| try tc.checkVarDecl(n, true),
             .expr     => |e| _ = try tc.inferExpr(e),
             .contract => |s| { for (s.exprs) |e| _ = try tc.inferExpr(e); },
             .defer_   => |s| try tc.checkStmt(s.body),

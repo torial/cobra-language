@@ -398,6 +398,8 @@ pub const BranchOn = struct {
     body: []const Stmt,
     /// For union dispatch: `on Shape.circle as radius` — binding name for the payload.
     binding: ?[]const u8 = null,
+    /// Optional guard: `on Expr as id if condition` — body only runs when condition is true.
+    guard: ?*Expr = null,
 };
 
 pub const StmtBranch = struct {

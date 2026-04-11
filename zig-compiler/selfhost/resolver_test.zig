@@ -1723,7 +1723,7 @@ pub const Main = struct {
 // zbr:selfhost/resolver_test.zbr:130
             var t = ResolverTest.init();
 // zbr:selfhost/resolver_test.zbr:131
-            t.run() catch |_tc_17a3e593af0| { _try_err_3b30 = _tc_17a3e593af0; break :_try_blk_3b30; };
+            t.run() catch |_tc_1d642063af0| { _try_err_3b30 = _tc_1d642063af0; break :_try_blk_3b30; };
             break :_try_blk_3b30;
         }
         if (_try_err_3b30 != null) {

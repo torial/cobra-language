@@ -7438,6 +7438,9 @@ const Generator = struct {
         // Detect union dispatch: any on-clause has a binding name.
         const is_union = for (s.on) |on| { if (on.binding != null) break true; } else false;
 
+        // Detect whether any on-clause has a guard expression.
+        const has_guard = for (s.on) |on| { if (on.guard != null) break true; } else false;
+
         // Detect string dispatch: any on-value is a string literal.
         // Zig cannot switch on []const u8 — lower to if / else-if chains instead.
         const is_string = blk: {
@@ -7468,13 +7471,17 @@ const Generator = struct {
                 for (on.values, 0..) |v, vi| {
                     if (vi > 0) try bg.w.writeAll(" or ");
                     try bg.w.print("std.mem.eql(u8, {s}, ", .{tmp});
-                    // Strip the string literal quotes for eql comparison.
                     if (v.* == .string_lit) {
                         try bg.genExpr(v);
                     } else {
-                        try bg.genExpr(v); // int or other literals
+                        try bg.genExpr(v);
                     }
                     try bg.w.writeAll(")");
+                }
+                // AND in the guard for this clause.
+                if (on.guard) |guard| {
+                    try bg.w.writeAll(" and ");
+                    try bg.genExpr(guard);
                 }
                 try bg.w.writeAll(") {\n");
                 try bg.indented().genStmts(on.body);
@@ -7490,6 +7497,153 @@ const Generator = struct {
             }
             try g.writeIndent();
             try g.w.writeAll("}\n");
+            return;
+        }
+
+        // ── Guarded dispatch (any on-clause has `if condition`) ──────────────
+        // Zig switch prongs cannot have guards, so we lower to sequential ifs.
+        // Each `if (!_bd and pattern)` check: if the pattern matches but the
+        // guard fails, _bd stays false and the next clause can match.
+        // Emitted flat (no wrapping block) so `if (!_bd) unreachable` at the end
+        // is visible to Zig's return-path analysis.
+        if (has_guard) {
+            const bv = try std.fmt.allocPrint(g.alloc, "_bv_{x}", .{@intFromPtr(s)});
+            defer g.alloc.free(bv);
+            const bd = try std.fmt.allocPrint(g.alloc, "_bd_{x}", .{@intFromPtr(s)});
+            defer g.alloc.free(bd);
+            try g.writeIndent();
+            try g.w.print("const {s} = ", .{bv});
+            try g.genExpr(s.expr);
+            try g.w.writeAll(";\n");
+            try g.writeIndent();
+            try g.w.print("var {s} = false;\n", .{bd});
+            for (s.on) |on| {
+                try g.writeIndent();
+                try g.w.print("if (!{s}", .{bd});
+                if (is_union) {
+                    // Union: check the tag, extract payload, then check guard.
+                    if (on.values.len == 1) {
+                        const v = on.values[0];
+                        const tag_name: []const u8 = if (v.* == .member)
+                            v.member.member
+                        else if (v.* == .call and v.call.callee.* == .member)
+                            v.call.callee.member.member
+                        else "";
+                        if (tag_name.len > 0) {
+                            try g.w.print(" and {s} == .{s}", .{ bv, tag_name });
+                        }
+                    }
+                    try g.w.writeAll(") {\n");
+                    if (on.binding) |bname| {
+                        // Extract the payload before checking the guard.
+                        try g.indented().writeIndent();
+                        try g.indented().w.print("const {s} = {s}.{s};\n", .{ bname, bv, on.values[0].member.member });
+                        // Suppress unused-const Zig warning when the body doesn't
+                        // reference the binding.  Only emit when there is no guard:
+                        // if a guard is present it already uses bname, and Zig would
+                        // report "pointless discard" if we also emitted `_ = bname;`.
+                        if (on.guard == null) {
+                            try g.indented().writeIndent();
+                            try g.indented().w.print("_ = {s};\n", .{bname});
+                        }
+                        if (on.guard) |guard| {
+                            try g.indented().writeIndent();
+                            try g.indented().w.writeAll("if (");
+                            try g.indented().genExpr(guard);
+                            try g.indented().w.writeAll(") {\n");
+                            try g.indented().writeIndent();
+                            try g.indented().w.print("{s} = true;\n", .{bd});
+                            try g.indented().indented().genStmts(on.body);
+                            try g.indented().writeIndent();
+                            try g.indented().w.writeAll("}\n");
+                        } else {
+                            try g.indented().writeIndent();
+                            try g.indented().w.print("{s} = true;\n", .{bd});
+                            try g.indented().indented().genStmts(on.body);
+                        }
+                    } else {
+                        if (on.guard) |guard| {
+                            try g.indented().writeIndent();
+                            try g.indented().w.writeAll("if (");
+                            try g.indented().genExpr(guard);
+                            try g.indented().w.writeAll(") {\n");
+                            try g.indented().writeIndent();
+                            try g.indented().w.print("{s} = true;\n", .{bd});
+                            try g.indented().indented().genStmts(on.body);
+                            try g.indented().writeIndent();
+                            try g.indented().w.writeAll("}\n");
+                        } else {
+                            try g.indented().writeIndent();
+                            try g.indented().w.print("{s} = true;\n", .{bd});
+                            try g.indented().indented().genStmts(on.body);
+                        }
+                    }
+                } else {
+                    // Non-union (integer / enum): AND the values condition.
+                    if (on.values.len > 0) {
+                        try g.w.writeAll(" and (");
+                        for (on.values, 0..) |v, vi| {
+                            if (vi > 0) try g.w.writeAll(" or ");
+                            try g.w.print("{s} == ", .{bv});
+                            if (v.* == .member) {
+                                try g.w.print(".{s}", .{v.member.member});
+                            } else {
+                                try g.genExpr(v);
+                            }
+                        }
+                        try g.w.writeAll(")");
+                    }
+                    try g.w.writeAll(") {\n");
+                    if (on.guard) |guard| {
+                        try g.indented().writeIndent();
+                        try g.indented().w.writeAll("if (");
+                        try g.indented().genExpr(guard);
+                        try g.indented().w.writeAll(") {\n");
+                        try g.indented().writeIndent();
+                        try g.indented().w.print("{s} = true;\n", .{bd});
+                        try g.indented().indented().genStmts(on.body);
+                        try g.indented().writeIndent();
+                        try g.indented().w.writeAll("}\n");
+                    } else {
+                        try g.indented().writeIndent();
+                        try g.indented().w.print("{s} = true;\n", .{bd});
+                        try g.indented().indented().genStmts(on.body);
+                    }
+                }
+                try g.writeIndent();
+                try g.w.writeAll("}\n");
+            }
+            if (s.else_) |eb| {
+                try g.writeIndent();
+                try g.w.print("if (!{s}) {{\n", .{bd});
+                try g.indented().genStmts(eb);
+                try g.writeIndent();
+                try g.w.writeAll("}\n");
+            } else {
+                // No else clause: emit `if (!_bd) unreachable` so Zig's control
+                // flow analysis sees this path is unreachable (avoids "implicitly
+                // returns" on functions where every pattern arm returns a value).
+                try g.writeIndent();
+                try g.w.print("if (!{s}) unreachable;\n", .{bd});
+                // When every on-clause body ends with an explicit return, Zig still
+                // thinks the function can "fall off the end" after the `if (!_bd)`
+                // check because it sees `_bd == true` as a live path.  In that case
+                // add a bare `unreachable;` so the control-flow graph is closed.
+                const all_arms_return = blk: {
+                    for (s.on) |on| {
+                        if (on.body.len == 0) break :blk false;
+                        switch (on.body[on.body.len - 1]) {
+                            .return_ => {},
+                            else    => break :blk false,
+                        }
+                    }
+                    break :blk true;
+                };
+                if (all_arms_return) {
+                    try g.writeIndent();
+                    try g.w.writeAll("unreachable;\n");
+                }
+            }
             return;
         }
 
@@ -8392,10 +8546,19 @@ const Generator = struct {
     fn lookupParams(g: Generator, e: *Ast.ExprCall) ?[]const Ast.Param {
         if (e.callee.* == .ident) {
             if (g.resolve.exprs.get(&e.callee.ident)) |sym| {
-                return switch (sym.decl) {
-                    .method => |m| m.params,
-                    else    => null,
-                };
+                switch (sym.decl) {
+                    .method => |m| return m.params,
+                    // Constructor call: ClassName(name: val, ...) — find cue init params.
+                    .class  => |c| {
+                        for (c.members) |mem| if (mem == .init) return mem.init.params;
+                        return null;
+                    },
+                    .struct_ => |s| {
+                        for (s.members) |mem| if (mem == .init) return mem.init.params;
+                        return null;
+                    },
+                    else => return null,
+                }
             }
         }
         if (e.callee.* == .member) {
@@ -8669,10 +8832,14 @@ const Generator = struct {
                     }
                     if (has_cue_init) {
                         try g.w.print("{s}.init(", .{class_name});
-                        for (e.args, 0..) |a, i| {
-                            if (i > 0) try g.w.writeAll(", ");
-                            try g.genExpr(a.value);
-                        }
+                        // Resolve init params for named-arg reordering support.
+                        const init_params: ?[]const Ast.Param = blk: {
+                            for (members) |m| {
+                                if (m == .init) break :blk m.init.params;
+                            }
+                            break :blk null;
+                        };
+                        try g.genArgs(init_params, e.args);
                         try g.w.writeAll(")");
                     } else if (sym.kind == .struct_) {
                         // Structs without `cue init`: emit a struct literal.

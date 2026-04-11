@@ -2179,7 +2179,7 @@ pub const Main = struct {
 // zbr:selfhost/parser_test.zbr:259
             var t = ParserTest.init();
 // zbr:selfhost/parser_test.zbr:260
-            t.run() catch |_tc_23455f061b0| { _try_err_61f0 = _tc_23455f061b0; break :_try_blk_61f0; };
+            t.run() catch |_tc_277bdb461b0| { _try_err_61f0 = _tc_277bdb461b0; break :_try_blk_61f0; };
             break :_try_blk_61f0;
         }
         if (_try_err_61f0 != null) {

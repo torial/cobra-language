@@ -1,0 +1,45 @@
+union Shape
+    circle as float   # radius
+    square as float   # side
+    point
+
+class Main
+    shared
+        def checkShape(s as Shape) as str
+            branch s
+                on Shape.circle as r if r > 5.0
+                    return "big circle"
+                on Shape.circle as r
+                    return "small circle"
+                on Shape.square as side if side > 10.0
+                    return "big square"
+                on Shape.square as side
+                    return "small square"
+                on Shape.point
+                    return "point"
+
+        def main
+            # --- non-binding guard: on value if condition ---
+            var x = 7
+            branch x
+                on 7 if x > 5
+                    print "seven big"
+                on 7
+                    print "seven small"
+                else
+                    print "other"
+
+            # Guard fails, falls through to next matching clause
+            var y = 7
+            branch y
+                on 7 if y > 100
+                    print "seven huge"
+                on 7
+                    print "seven ok"
+
+            # --- binding guard: on Variant as name if condition ---
+            print Main.checkShape(Shape.circle(8.0))
+            print Main.checkShape(Shape.circle(3.0))
+            print Main.checkShape(Shape.square(12.0))
+            print Main.checkShape(Shape.square(4.0))
+            print Main.checkShape(Shape.point())

@@ -408,6 +408,8 @@ const Printer = struct {
             try p.nl(); try p.ind();
             try p.w("(on", .{});
             for (arm.values) |v| { try p.w(" ", .{}); try p.printExpr(v.*); }
+            if (arm.binding) |b| try p.w(" as {s}", .{b});
+            if (arm.guard)   |g| { try p.w(" if ", .{}); try p.printExpr(g.*); }
             try p.printBody(arm.body);
             try p.w(")", .{});
         }

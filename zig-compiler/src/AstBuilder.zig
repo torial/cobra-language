@@ -1227,10 +1227,12 @@ const Builder = struct {
     }
 
     fn buildBranchOnClause(b: Builder, node: TN) anyerror!Ast.BranchOn {
-        // on ExprListNE eol Block       — value list form
-        // on ExprListNE , Stmt          — inline form
-        // on Expr return Expr eol       — short return form (kids.len == 5)
-        // on Expr as id eol Block       — union binding form (kids.len == 6)
+        // on ExprListNE eol Block           — value list form                (4 kids)
+        // on ExprListNE , Stmt              — inline form                    (4 kids)
+        // on Expr return Expr eol           — short return form              (5 kids)
+        // on Expr as id eol Block           — union binding form             (6 kids, kids[2]=kw_as)
+        // on ExprListNE if Expr eol Block   — guarded non-binding form       (6 kids, kids[2]=kw_if)
+        // on Expr as id if Expr eol Block   — guarded binding form           (8 kids)
         const kids = ch(node);
 
         // Detect short-return form: on Expr kw_return Expr eol (5 children)
@@ -1247,7 +1249,22 @@ const Builder = struct {
             };
         }
 
-        // Detect union binding form: kids[2] is kw_as
+        // Detect guarded binding form: on Expr as id if Expr eol Block (8 kids)
+        if (kids.len == 8 and isLeafKind(kids[2], .kw_as) and isLeafKind(kids[4], .kw_if)) {
+            const expr    = try b.box(Ast.Expr, try b.buildExpr(kids[1]));
+            const binding = leafText(kids[3], b.tokens);
+            const guard   = try b.box(Ast.Expr, try b.buildExpr(kids[5]));
+            const body    = try b.buildBlock(kids[7]);
+            return .{
+                .span    = spanOf(node, b.tokens),
+                .values  = try b.arena.dupe(*Ast.Expr, &.{expr}),
+                .body    = body,
+                .binding = binding,
+                .guard   = guard,
+            };
+        }
+
+        // Detect union binding form: kids[2] is kw_as (6 kids, no guard)
         if (kids.len == 6 and isLeafKind(kids[2], .kw_as)) {
             const expr    = try b.box(Ast.Expr, try b.buildExpr(kids[1]));
             const binding = leafText(kids[3], b.tokens);
@@ -1257,6 +1274,19 @@ const Builder = struct {
                 .values  = try b.arena.dupe(*Ast.Expr, &.{expr}),
                 .body    = body,
                 .binding = binding,
+            };
+        }
+
+        // Detect guarded non-binding form: on ExprListNE if Expr eol Block (6 kids, kids[2]=kw_if)
+        if (kids.len == 6 and isLeafKind(kids[2], .kw_if)) {
+            const values  = try b.buildExprListNE(kids[1]);
+            const guard   = try b.box(Ast.Expr, try b.buildExpr(kids[3]));
+            const body    = try b.buildBlock(kids[5]);
+            return .{
+                .span   = spanOf(node, b.tokens),
+                .values = values,
+                .body   = body,
+                .guard  = guard,
             };
         }
 
