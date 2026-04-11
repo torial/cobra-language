@@ -169,3 +169,74 @@ Yes, for `^T` union variants. The implicit arena allocates correctly, but the te
 ### Net verdict: easier or harder than the Zig version?
 
 **Easier for type declarations, harder for recursive types with allocation.** Structs and plain enums were faster to write in Zebra than Zig — less ceremony. The recursive `TypeRef` union and the `Decl` union (with `^DeclXxx` heap-boxing) required the most thought: understanding which field names are keywords, how `^T` boxing works, and which constructors require the caller to be `throws`. Phase 2 surfaced 3 new compiler bugs (branch/on call-expr pattern, struct `cue init` type-tag stamping, `boxed_variants` clone in `cloneInterface`) and identified 3 missing language features.
+
+---
+
+## Phase 3: Grammar / Parser (`parser.zbr`)
+**Completed:** 2026-04-11
+**Lines of Zebra / Lines of Zig (approximate):** ~910 Zebra vs ~2900 Zig (Parser.zig generated)
+
+### Where Zebra felt better than Zig
+
+**Recursive descent reads like the grammar.** `parseAddSub` calls `parseMulDiv`, loops on `+`/`-`, and wraps the result in `PNode.expr_binary`. In Zig the same logic is identical in structure, but the types are noisier: `*const [N:0]u8` for string literals, explicit `try` on every allocation, `anyerror!PNode` signatures. Zebra's signal-to-noise ratio was noticeably better for grammar rules.
+
+**`throws` propagation across self-calls.** Every parsing method is `throws`. In Zebra, `const decl = .parseDecl()` automatically propagates the error union without a `try` prefix — the compiler knows `.parseDecl()` throws because it's a self-method call and resolves it via the method table. In Zig this would be `const decl = try self.parseDecl()`. Over ~40 methods and hundreds of call sites, the reduction in noise is real.
+
+**`branch` on `PNode` is the test harness.** The parser test (`parser_test.zbr`) is essentially a series of nested `branch` statements dispatching on the result tree. This is exactly what recursive AST traversal looks like — and it reads as clearly as the grammar itself. Writing the tests confirmed that the language handles deep union dispatch well.
+
+**`List(PNode)` as a first-class value.** Building a list, passing it into a struct, returning it — all without allocator plumbing at each step. The `var stmts as List(PNode)` → `stmts.add(s)` → `PMethod(name, stmts, ...)` pattern is the heart of every parsing method and it was frictionless.
+
+### Where Zebra felt worse or missing
+
+**`var l as List(PNode)` without init is a latent danger.** The pattern `var l as List(PNode)` (no init) initializes to an empty ArrayList, which is correct and necessary. But the similarity to `var x as int` (= undefined) is misleading. It would be clearer to require `var l = List(PNode)()` even for empty initialization, making the construction explicit.
+
+**Struct constructor repetition.** `PMethod(name, params, ret_type, throws_, is_shared, stmts)` appears in one place (parseMethodDecl), but it still has 6 positional args. Named fields at construction time (`PMethod(name: name, stmts: stmts)`) would be safer and more readable. This is on the deferred features list.
+
+**No way to write a `match` guard.** Several parser checks want `on PNode.expr_int if condition: ...`. Without guards, the `branch` must dispatch first, then `assert` inside the arm — two steps where one would do.
+
+### Did `branch` / union dispatch do its job?
+
+Emphatically yes. The test file is 267 lines of nested `branch` statements covering 10 distinct parser test cases, and the structure maps directly to the grammar. The hardest moment was confirming that `b.left.at(0)` returned the right variant — which was initially wrong due to a CodeGen bug (see below), not a `branch` semantics issue.
+
+### Error propagation (`?` / Result) — did it read naturally?
+
+Yes, with one notable pattern: the entire parser wraps each method call in `?` propagation via `.parseX()?` or just `.parseX()` (since all methods throw and the implicit `try` handles it). The test file's outer `try ... catch |e|` block is the only place errors surface to the user. Propagation through 40 layers of recursion is invisible.
+
+### Allocator model — did it get in the way?
+
+**Yes — and it exposed a compiler bug.** The most complex debugging in this project so far:
+
+In `parseAddSub`, the pattern is:
+```
+var l as List(PNode)
+l.add(left)
+var r as List(PNode)
+r.add(right)
+left = PNode.expr_binary(PBinary(op, l, r))
+```
+
+`PBinary` copies `l` and `r` by value (sharing their `items.ptr`). The CodeGen emitted `defer l.deinit(_allocator)` for local List variables not detected as "returned." This called `Allocator.free` on `l`'s buffer — which **poisons the buffer with 0xAA bytes via `@memset`** before calling `rawFree`. Since `_p.left.items.ptr` still pointed to the same buffer, `b.left.items[0]` read garbage (appearing as `stmt_return` due to the 0xAA tag byte pattern).
+
+**Root cause chain:** CodeGen's `analyzeEscapes` detects lists that appear directly in `return` expressions. It does NOT detect the pattern "list is passed into a struct constructor which is then assigned to another variable which is then returned." So `l` was not marked escaped, `defer l.deinit` was emitted, `Allocator.free` poisoned the shared buffer.
+
+**Fix:** Remove ALL `defer l.deinit(_allocator)` emissions from `genLocalVar`. Since all Zebra programs use an arena allocator, individual deinit calls are both unnecessary (the arena frees at program exit) and harmful (buffer poisoning via `Allocator.free`'s `@memset`). This is the correct model: in an arena-only program, you never call `deinit` on individual collections.
+
+**Lesson:** The arena model is sound, but the CodeGen must not emit individual deinit calls even as "cleanup." Any call to `Allocator.free` on arena memory is a semantic error waiting to happen.
+
+### Missing language features discovered
+
+1. **Named struct construction** — `PMethod(name: nm, stmts: stmts)` instead of positional. Already on the deferred list.
+2. **`branch` guards** — `on Variant.x if condition:` to avoid two-step dispatch + assert.
+3. **`var l = List(PNode)()` required for empty init** — make the empty-collection case explicit rather than type-annotation-only.
+
+### Surprise wins
+
+**The parser is shorter than the Zig version by a factor of 3.** ~910 Zebra lines produces ~2900 lines of generated Zig. Most of the expansion is allocator threading, `try` keywords, and verbose type annotations. The Zebra version contains essentially no boilerplate — just the grammar.
+
+**`use Parser exposing PNode` is clean.** The test file imports `PNode` directly into scope: `branch decls.at(0) on PNode.class_ as c`. No module-prefix clutter in the 267-line test. The `exposing` feature from Phase 1 pays dividends here.
+
+**9/9 tests passed on first clean run** (after the CodeGen bug fix). Once the `defer deinit` removal was applied, every parser test passed without further changes. The parser itself was correct — the only failure was a CodeGen artifact.
+
+### Net verdict: easier or harder than the Zig version?
+
+**Noticeably easier.** The grammar itself wrote cleanly in ~60% of the lines. The test harness was pleasant — nested `branch` dispatches are readable and exhaustive. The only hard part was the CodeGen bug hunt (took the majority of the phase's wall-clock time), which was invisible in the Zig version because Zig programmers would never emit a `defer deinit` on a buffer they'd already passed to a struct. Phase 3 surfaced 1 major compiler bug (arena + Allocator.free poisoning) and 3 minor missing features. Compiler bug count across all phases: Phase 1 = 8, Phase 2 = 3, Phase 3 = 1.

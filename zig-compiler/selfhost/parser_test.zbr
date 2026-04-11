@@ -1,0 +1,262 @@
+# Phase 3 test: Grammar / Parser
+# Self-hosting validation — verifies that parser.zbr produces correct PNode trees.
+#
+# Strategy: parse small, focused Zebra snippets and branch-dispatch on the
+# resulting PNode to verify structure. All assertions use `branch ... on variant`
+# because PNode is a union type.
+
+use Token exposing TokenKind
+use Lexer
+use Parser exposing PNode
+
+class ParserTest
+    def run() throws
+        .testUseDecl()
+        .testEmptyClass()
+        .testClassWithField()
+        .testClassWithMethod()
+        .testReturnStmt()
+        .testIfStmt()
+        .testExprArith()
+        .testExprComparison()
+        .testMethodCall()
+        .testVarStmt()
+        print "parser_test: all assertions passed"
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def parseModule(src as str) as PNode throws
+        return Parser.Parser.parse(src)
+
+    def moduleDecls(src as str) as List(PNode) throws
+        const root = .parseModule(src)
+        branch root
+            on PNode.module_ as m
+                return m.decls
+            else
+                raise "expected module_, got something else"
+
+    # ── Tests ─────────────────────────────────────────────────────────────────
+
+    def testUseDecl() throws
+        const decls = .moduleDecls("use Foo\n")
+        assert decls.len == 1, "use: expected 1 decl, got " + decls.len.toString()
+        branch decls.at(0)
+            on PNode.use_ as path
+                assert path == "Foo", "use: expected path 'Foo', got '" + path + "'"
+            else
+                assert false, "use: expected use_ variant"
+        print "testUseDecl: OK"
+
+    def testEmptyClass() throws
+        const decls = .moduleDecls("class Empty\n")
+        assert decls.len == 1, "empty class: expected 1 decl"
+        branch decls.at(0)
+            on PNode.class_ as c
+                assert c.name == "Empty", "empty class: name mismatch, got '" + c.name + "'"
+                assert c.members.len == 0, "empty class: expected 0 members"
+            else
+                assert false, "empty class: expected class_ variant"
+        print "testEmptyClass: OK"
+
+    def testClassWithField() throws
+        const src = "class Point\n    var x as int\n    var y as int\n"
+        const decls = .moduleDecls(src)
+        assert decls.len == 1, "field class: expected 1 decl"
+        branch decls.at(0)
+            on PNode.class_ as c
+                assert c.name == "Point", "field class: name mismatch"
+                assert c.members.len == 2, "field class: expected 2 members, got " + c.members.len.toString()
+                branch c.members.at(0)
+                    on PNode.field_ as f
+                        assert f.name == "x", "field class: first field name mismatch"
+                        assert f.type_name == "int", "field class: first field type mismatch"
+                        assert not f.is_const, "field class: var field should not be const"
+                    else
+                        assert false, "field class: expected field_ for first member"
+            else
+                assert false, "field class: expected class_ variant"
+        print "testClassWithField: OK"
+
+    def testClassWithMethod() throws
+        const src = "class Calc\n    def double(n as int) as int\n        return n\n"
+        const decls = .moduleDecls(src)
+        assert decls.len == 1, "method class: expected 1 decl"
+        branch decls.at(0)
+            on PNode.class_ as c
+                assert c.name == "Calc", "method class: name mismatch"
+                assert c.members.len == 1, "method class: expected 1 member"
+                branch c.members.at(0)
+                    on PNode.method_ as m
+                        assert m.name == "double", "method class: method name mismatch, got '" + m.name + "'"
+                        assert not m.is_shared, "method class: should not be shared"
+                        assert not m.throws_, "method class: should not throw"
+                        assert m.stmts.len == 1, "method class: expected 1 stmt"
+                    else
+                        assert false, "method class: expected method_ for member"
+            else
+                assert false, "method class: expected class_ variant"
+        print "testClassWithMethod: OK"
+
+    def testReturnStmt() throws
+        const src = "class R\n    def fetch() as int\n        return 42\n"
+        const decls = .moduleDecls(src)
+        branch decls.at(0)
+            on PNode.class_ as c
+                branch c.members.at(0)
+                    on PNode.method_ as m
+                        assert m.stmts.len == 1, "return: expected 1 stmt"
+                        branch m.stmts.at(0)
+                            on PNode.stmt_return as ret
+                                assert ret.value.len == 1, "return: expected value"
+                                branch ret.value.at(0)
+                                    on PNode.expr_int as text
+                                        assert text == "42", "return: expected '42', got '" + text + "'"
+                                    else
+                                        assert false, "return: expected expr_int"
+                            else
+                                assert false, "return: expected stmt_return"
+                    else
+                        assert false, "return: expected method_"
+            else
+                assert false, "return: expected class_"
+        print "testReturnStmt: OK"
+
+    def testIfStmt() throws
+        const src = "class C\n    def check(x as int)\n        if x\n            pass\n"
+        const decls = .moduleDecls(src)
+        branch decls.at(0)
+            on PNode.class_ as c
+                branch c.members.at(0)
+                    on PNode.method_ as m
+                        assert m.stmts.len == 1, "if: expected 1 stmt"
+                        branch m.stmts.at(0)
+                            on PNode.stmt_if as if_node
+                                assert if_node.cond.len == 1, "if: expected cond"
+                                assert if_node.then_stmts.len == 1, "if: expected 1 then stmt"
+                                assert if_node.else_stmts.len == 0, "if: expected 0 else stmts"
+                            else
+                                assert false, "if: expected stmt_if"
+                    else
+                        assert false, "if: expected method_"
+            else
+                assert false, "if: expected class_"
+        print "testIfStmt: OK"
+
+    def testExprArith() throws
+        # Parse `1 + 2` via a method return statement
+        const src = "class E\n    def calc() as int\n        return 1 + 2\n"
+        const decls = .moduleDecls(src)
+        branch decls.at(0)
+            on PNode.class_ as c
+                branch c.members.at(0)
+                    on PNode.method_ as m
+                        branch m.stmts.at(0)
+                            on PNode.stmt_return as ret
+                                branch ret.value.at(0)
+                                    on PNode.expr_binary as b
+                                        assert b.op == "+", "arith: expected '+', got '" + b.op + "'"
+                                        assert b.left.len == 1, "arith: left missing"
+                                        assert b.right.len == 1, "arith: right missing"
+                                        branch b.left.at(0)
+                                            on PNode.expr_int as t
+                                                assert t == "1", "arith: left should be '1'"
+                                            else
+                                                assert false, "arith: left should be expr_int"
+                                        branch b.right.at(0)
+                                            on PNode.expr_int as t
+                                                assert t == "2", "arith: right should be '2'"
+                                            else
+                                                assert false, "arith: right should be expr_int"
+                                    else
+                                        assert false, "arith: expected expr_binary"
+                            else
+                                assert false, "arith: expected stmt_return"
+                    else
+                        assert false, "arith: expected method_"
+            else
+                assert false, "arith: expected class_"
+        print "testExprArith: OK"
+
+    def testExprComparison() throws
+        # Parse `x == 0` comparison
+        const src = "class C\n    def check(x as int) as bool\n        return x == 0\n"
+        const decls = .moduleDecls(src)
+        branch decls.at(0)
+            on PNode.class_ as c
+                branch c.members.at(0)
+                    on PNode.method_ as m
+                        branch m.stmts.at(0)
+                            on PNode.stmt_return as ret
+                                branch ret.value.at(0)
+                                    on PNode.expr_binary as b
+                                        assert b.op == "==", "cmp: expected '==', got '" + b.op + "'"
+                                    else
+                                        assert false, "cmp: expected expr_binary"
+                            else
+                                assert false, "cmp: expected stmt_return"
+                    else
+                        assert false, "cmp: expected method_"
+            else
+                assert false, "cmp: expected class_"
+        print "testExprComparison: OK"
+
+    def testMethodCall() throws
+        # Parse `print x.toString()` — verifies it parses as stmt_expr.
+        # Note: cannot branch on the stmt_expr *payload* because that variant holds
+        # ^PNode (heap pointer), and branching on a *PNode is not yet supported.
+        # Verifying the stmt variant is sufficient for Phase 3 smoke-testing.
+        const src = "class C\n    def show(x as int)\n        print x.toString()\n"
+        const decls = .moduleDecls(src)
+        branch decls.at(0)
+            on PNode.class_ as c
+                branch c.members.at(0)
+                    on PNode.method_ as m
+                        assert m.stmts.len == 1, "call: expected 1 stmt"
+                        branch m.stmts.at(0)
+                            on PNode.stmt_expr
+                                pass  # confirmed: expression statement parsed correctly
+                            else
+                                assert false, "call: expected stmt_expr"
+                    else
+                        assert false, "call: expected method_"
+            else
+                assert false, "call: expected class_"
+        print "testMethodCall: OK"
+
+    def testVarStmt() throws
+        # Parse `var count as int = 0`
+        const src = "class C\n    def init_count()\n        var count as int = 0\n"
+        const decls = .moduleDecls(src)
+        branch decls.at(0)
+            on PNode.class_ as c
+                branch c.members.at(0)
+                    on PNode.method_ as m
+                        assert m.stmts.len == 1, "var: expected 1 stmt"
+                        branch m.stmts.at(0)
+                            on PNode.stmt_var as v
+                                assert v.name == "count", "var: name mismatch, got '" + v.name + "'"
+                                assert v.type_name == "int", "var: type mismatch, got '" + v.type_name + "'"
+                                assert not v.is_const, "var: should not be const"
+                                assert v.init_expr.len == 1, "var: expected init expr"
+                                branch v.init_expr.at(0)
+                                    on PNode.expr_int as t
+                                        assert t == "0", "var: init should be '0'"
+                                    else
+                                        assert false, "var: init should be expr_int"
+                            else
+                                assert false, "var: expected stmt_var"
+                    else
+                        assert false, "var: expected method_"
+            else
+                assert false, "var: expected class_"
+        print "testVarStmt: OK"
+
+class Main
+    shared
+        def main
+            try
+                var t = ParserTest()
+                t.run()?
+            catch |e|
+                print "FAILED: " + e.message

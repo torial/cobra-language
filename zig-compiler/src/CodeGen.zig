@@ -4313,16 +4313,11 @@ const Generator = struct {
                         try g.w.writeAll(" = ");
                         try g.genStdlibInit(gtr);
                         try g.w.writeAll(";\n");
-                        // Emit cleanup defer unless this var is returned (caller takes ownership).
-                        const is_returned_ctor = if (g.returned_names) |rn| rn.contains(n.name) else false;
-                        if (!is_returned_ctor) {
-                            try g.writeIndent();
-                            if (std.mem.eql(u8, gtr.name, "List")) {
-                                try g.w.print("defer {s}.deinit(_allocator);\n", .{n.name});
-                            } else {
-                                try g.w.print("defer {s}.deinit();\n", .{n.name});
-                            }
-                        }
+                        // No defer deinit: all Zebra programs use an arena allocator.
+                        // Individual deinit calls are unnecessary (the arena frees everything
+                        // at once) and harmful: Allocator.free poisons the buffer with 0xAA
+                        // before rawFree, corrupting any struct that still holds a pointer to
+                        // the same buffer (e.g. a List passed into a PBinary constructor).
                         return;
                     }
                 }
@@ -4347,15 +4342,14 @@ const Generator = struct {
             }
         }
 
-        // List/HashMap vars need `var` only when a deinit will be emitted, because
-        // deinit takes *Self (mutable pointer). Borrowed vars (.at() / .fetch() init)
-        // and returned vars don't get a deinit, so they can stay `const`.
+        // List/HashMap owning vars must be `var` so that mutation methods (add/put)
+        // can take *Self. Borrowed vars (.at() / .fetch() init) and returned vars
+        // are const — they are not mutated through the local binding.
         const eff_kw: []const u8 = blk: {
             if (n.type_) |tr| {
                 if (tr == .generic) {
                     const gn = tr.generic.name;
                     if (std.mem.eql(u8, gn, "List") or std.mem.eql(u8, gn, "HashMap")) {
-                        // Same "is_borrowed" check as the deinit-emission path below.
                         const is_borrowed_kw: bool = if (n.init) |e| b2: {
                             if (e.* == .call and e.call.callee.* == .member) {
                                 const m = e.call.callee.member.member;
@@ -4423,39 +4417,33 @@ const Generator = struct {
                 try g.w.print(" catch |_e| {{ {s} = _e; break :{s}; }}", .{ ev, lbl });
             }
         } else {
-            try g.w.writeAll(" = undefined");
+            // For List(T) / HashMap(K,V) declared with no init expression, emit an
+            // empty initializer instead of `undefined`.  `undefined` produces a
+            // crash on the first `add`/`put` call because the ArrayList backing
+            // pointer is garbage.  This is the "var decls as List(PNode)" pattern
+            // used throughout the self-hosting parser.
+            const is_empty_list_or_map: bool = blk: {
+                if (n.type_) |tr| {
+                    if (tr == .generic) {
+                        const gn = tr.generic.name;
+                        break :blk std.mem.eql(u8, gn, "List") or std.mem.eql(u8, gn, "HashMap");
+                    }
+                }
+                break :blk false;
+            };
+            if (is_empty_list_or_map) {
+                try g.w.writeAll(" = ");
+                try g.genStdlibInit(n.type_.?.generic);
+            } else {
+                try g.w.writeAll(" = undefined");
+            }
         }
         try g.w.writeAll(";\n");
         // List/HashMap vars initialized from non-constructor exprs (e.g. File.readLines,
-        // buildNgrams) need deinit — the constructor path already returns early above.
-        // Exception: collection element accesses (.at(), .fetch()) borrow the element
-        // without taking ownership — deiniting them would double-free the original.
-        if (n.type_) |tr| {
-            if (tr == .generic) {
-                const gtr = tr.generic;
-                const is_list_or_map = std.mem.eql(u8, gtr.name, "List") or
-                                       std.mem.eql(u8, gtr.name, "HashMap");
-                if (is_list_or_map) {
-                    // Detect borrowed (non-owning) inits: list.at(i) or map.fetch(k)
-                    const is_borrowed: bool = if (n.init) |e| blk: {
-                        if (e.* == .call and e.call.callee.* == .member) {
-                            const m = e.call.callee.member.member;
-                            break :blk std.mem.eql(u8, m, "at") or std.mem.eql(u8, m, "fetch");
-                        }
-                        break :blk false;
-                    } else false;
-                    const is_returned = if (g.returned_names) |rn| rn.contains(n.name) else false;
-                    if (!is_returned and !is_borrowed) {
-                        try g.writeIndent();
-                        if (std.mem.eql(u8, gtr.name, "List")) {
-                            try g.w.print("defer {s}.deinit(_allocator);\n", .{n.name});
-                        } else {
-                            try g.w.print("defer {s}.deinit();\n", .{n.name});
-                        }
-                    }
-                }
-            }
-        }
+        // No defer deinit for List/HashMap: the arena allocator owns all memory and
+        // frees everything at program exit. Individual deinit calls are harmful because
+        // Allocator.free poisons the freed buffer with 0xAA via @memset before calling
+        // rawFree — corrupting any struct that still holds a pointer to the same buffer.
         // Allocated string vars (concat, format) need explicit free —
         // unless the variable is returned from this function (caller takes ownership).
         if (n.init) |e| {
