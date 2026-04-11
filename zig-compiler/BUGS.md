@@ -231,6 +231,31 @@ These fail WITH A COMPILER ERROR — that IS the test passing:
 
 ---
 
+### BUG-020: `branch/on` call-expr pattern emitted wrong Zig — FIXED 2026-04-10
+- **Status:** Fixed 2026-04-10
+- **Was:** `on SomeUnion.variant() as x` in a `branch` on-clause is parsed as a call expression (callee = member `SomeUnion.variant`, args = []). `genBranch` only handled the `.member` case for union switch patterns, so a call expression fell through to `genExpr(v)`, which emitted the union constructor form `SomeUnion{ .variant = {} }` — a struct literal, not a valid Zig switch pattern.
+- **Fix:** Added `else if (v.* == .call and v.call.callee.* == .member)` branch in `genBranch`'s union pattern path, extracting `v.call.callee.member.member` as the variant name and emitting `.variant_name`.
+- **Also fixed:** Non-union `on PlainEnum.member` (no parens, `is_union = false`) was calling `genExpr(v)` for a `.member` node. Added `else if (v.* == .member)` in the non-union path to emit `.member_name` — correct Zig enum switch syntax.
+- **Found by:** Self-hosting Phase 2 (`selfhost/ast_test.zbr`) — `on ast.TypeRef.nilable() as inner_ref` and `on ast.BinaryOp.add`.
+
+---
+
+### BUG-021: Struct `cue init` stamped `_type_tag` (class-only field) — FIXED 2026-04-10
+- **Status:** Fixed 2026-04-10
+- **Was:** `genInit` always emitted `self._type_tag = _ttag_StructName` as the first line of any `cue init` body. Structs have no `_type_tag` field (only classes do); the emitted assignment caused a Zig compile error (`no field named '_type_tag' in struct 'StructName'`).
+- **Fix:** Added `is_struct_owner: bool = false` field to Generator. `genStruct` uses `var sg = g.withOwner(n.name)` (already done) and then sets `sg.is_struct_owner = true`. `genInit` wraps the `_type_tag` stamp in `if (!g.is_struct_owner)`.
+- **Found by:** Self-hosting Phase 2 (`selfhost/ast.zbr`) — first struct with an explicit `cue init`.
+
+---
+
+### BUG-022: `boxed_variants` not cloned in `cloneInterface` — FIXED 2026-04-10
+- **Status:** Fixed 2026-04-10
+- **Was:** `cloneInterface` in `main.zig` cloned `types`, `throws_methods`, and `exposed_unions` from a `ModuleInterface` but not the new `boxed_variants` map (added for `^T` union payload boxing). Re-imported modules received an empty/uninitialized `boxed_variants`, so cross-module `^T` union construction silently skipped the boxing expression and emitted the raw value — producing a Zig type-mismatch error (`expected '*T', found 'T'`).
+- **Fix:** Added full key/value clone loop for `boxed_variants` in `cloneInterface`. Also added `boxed_variants = std.StringHashMap([]const u8).init(alloc)` to the empty stub interface used for circular-import detection.
+- **Found by:** Self-hosting Phase 2 (`selfhost/ast.zbr`) — cross-module `TypeRef.nilable` construction.
+
+---
+
 *Last updated: 2026-04-10*
 
 ---
