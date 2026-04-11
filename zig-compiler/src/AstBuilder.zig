@@ -104,6 +104,7 @@ const Builder = struct {
             .EnumDecl      => .{ .enum_     = try b.box(Ast.DeclEnum,      try b.buildEnumDecl(decl_node)) },
             .ExtendDecl    => .{ .extend    = try b.box(Ast.DeclExtend,    try b.buildExtendDecl(decl_node)) },
             .DeclUnion     => .{ .union_    = try b.box(Ast.DeclUnion,      try b.buildDeclUnion(decl_node)) },
+            .SigDecl       => .{ .sig_      = try b.box(Ast.DeclSig,        try b.buildSigDecl(decl_node)) },
             .MethodDecl    => blk: {
                 var m = try b.buildMethodDecl(decl_node);
                 m.is_top_level = true;
@@ -1503,6 +1504,18 @@ const Builder = struct {
         };
     }
 
+    fn buildSigDecl(b: Builder, node: TN) anyerror!Ast.DeclSig {
+        // kw_sig open_call ParamList rparen ReturnAnnotOpt eol
+        // open_call = "Name(" with the `(` already stripped by the tokenizer.
+        const kids = ch(node);
+        return .{
+            .span        = spanOf(node, b.tokens),
+            .name        = leafText(kids[1], b.tokens),
+            .params      = try b.buildParamList(kids[2]),
+            .return_type = try b.buildReturnAnnotOpt(kids[4]),
+        };
+    }
+
     fn buildDeclUnion(b: Builder, node: TN) anyerror!Ast.DeclUnion {
         // ModList kw_union id eol indent UnionVariantList dedent
         const kids = ch(node);
@@ -2417,7 +2430,7 @@ fn setShared(d: *Ast.Decl) void {
         .mixin    => |n| n.mods.shared = true,
         .enum_    => |n| n.mods.shared = true,
         .union_   => |n| n.mods.shared = true,
-        .use, .namespace, .extend => {}, // no mods field
+        .use, .namespace, .extend, .sig_ => {}, // no mods field
     }
 }
 

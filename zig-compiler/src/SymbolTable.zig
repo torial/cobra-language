@@ -76,6 +76,8 @@ pub const SymbolKind = enum {
     module,
     /// Generic type parameter (e.g., `T` in `class Stack(T)`).
     type_param,
+    /// Named function-type alias (`sig Name(params) as RetType`).
+    sig_,
 };
 
 // ── Declaration reference ─────────────────────────────────────────────────────
@@ -110,6 +112,8 @@ pub const DeclRef = union(enum) {
     /// Generic type parameter placeholder (e.g., `T` in `class Stack(T)`).
     /// Stores the span of the type-param name token for error reporting.
     type_param:    Ast.Span,
+    /// Named function-type alias.
+    sig_:          *Ast.DeclSig,
 };
 
 // ── Symbol ────────────────────────────────────────────────────────────────────

@@ -124,6 +124,7 @@ const Binder = struct {
             .var_      => |n| try b.declareVar_(n, scope),
             .init      => {},  // constructors have no name to declare
             .union_    => |n| try b.declareUnion(n, scope),
+            .sig_      => |n| try b.declareSig(n, scope),
         }
     }
 
@@ -220,6 +221,12 @@ const Binder = struct {
             if (try inner.define(v.name, vsym)) |_|
                 try b.emitDuplicateError(v.span, v.name);
         }
+    }
+
+    fn declareSig(b: Binder, n: *Ast.DeclSig, scope: *Scope) anyerror!void {
+        const sym = try b.table.newSymbol(n.name, .sig_, .{ .sig_ = n });
+        if (try scope.define(n.name, sym)) |_|
+            try b.emitDuplicateError(n.span, n.name);
     }
 
     fn declareUse(b: Binder, n: *Ast.DeclUse, scope: *Scope) anyerror!void {

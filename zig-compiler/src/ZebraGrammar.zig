@@ -236,6 +236,7 @@ pub const NT = enum {
 
     // ── Discriminated union types ──────────────────────────────────────────
     DeclUnion,          // union Name eol indent UnionVariantList dedent
+    SigDecl,            // sig Name(ParamList) as TypeRef eol  — named function-type alias
     UnionVariantList,   // one or more variants
     UnionVariant,       // id eol  |  id as TypeRef eol
 
@@ -291,6 +292,7 @@ const program_rules: []const Rule = &.{
     .{ .lhs = .TopDecl,     .rhs = &.{ n(.AspectDecl) } },
     .{ .lhs = .TopDecl,     .rhs = &.{ n(.WeaveDecl) } },
     .{ .lhs = .TopDecl,     .rhs = &.{ n(.DeclUnion) } },
+    .{ .lhs = .TopDecl,     .rhs = &.{ n(.SigDecl) } },
     .{ .lhs = .TopDecl,     .rhs = &.{ n(.MethodDecl) } }, // top-level free function
 };
 
@@ -1339,6 +1341,12 @@ const lambda_stmt_rules: []const Rule = &.{
 //     rect as Rect
 //     point              — variant with no payload
 
+const sig_rules: []const Rule = &.{
+    // sig Name(params) as RetType eol  — named function-type alias (delegate)
+    // Name( is one open_call token (identifier immediately followed by `(`).
+    .{ .lhs = .SigDecl, .rhs = &.{ t(.kw_sig), t(.open_call), n(.ParamList), t(.rparen), n(.ReturnAnnotOpt), t(.eol) } },
+};
+
 const union_rules: []const Rule = &.{
     .{ .lhs = .DeclUnion, .rhs = &.{
         n(.ModList), t(.kw_union), t(.id), t(.eol),
@@ -1419,4 +1427,5 @@ const rules: []const Rule = program_rules ++
     capture_rules ++
     lambda_stmt_rules ++
     union_rules ++
+    sig_rules ++
     except_rules;

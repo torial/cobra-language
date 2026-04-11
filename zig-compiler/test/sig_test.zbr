@@ -1,0 +1,52 @@
+sig CharPred(c as char) as bool
+
+shared def isAlpha(c as char) as bool
+    return (c >= c'a' and c <= c'z') or (c >= c'A' and c <= c'Z')
+
+shared def isDigit(c as char) as bool
+    return c >= c'0' and c <= c'9'
+
+shared def isAlphaNum(c as char) as bool
+    return isAlpha(c) or isDigit(c)
+
+# Scan src from pos while pred holds; return end index.
+shared def spanWhile(src as String, pos as int, pred as CharPred) as int
+    var i = pos
+    while i < src.len and pred(src[i])
+        i = i + 1
+    return i
+
+class SigTest
+    def run()
+        # Pass a bare fn-ref to a sig-typed parameter
+        var word = "hello123"
+        var alpha_end = spanWhile(word, 0, isAlpha)
+        assert alpha_end == 5
+
+        var alnum_end = spanWhile(word, 0, isAlphaNum)
+        assert alnum_end == 8
+
+        # Store a sig-typed variable with explicit annotation
+        var pred as CharPred = isDigit
+        assert pred(c'7')
+        assert not pred(c'z')
+
+        # Reassign the sig-typed variable
+        pred = isAlpha
+        assert pred(c'z')
+        assert not pred(c'7')
+
+        # Pass the variable itself to sig-typed param
+        pred = isAlpha
+        var end1 = spanWhile("abc123", 0, pred)
+        assert end1 == 3
+
+        pred = isDigit
+        var end2 = spanWhile("123abc", 0, pred)
+        assert end2 == 3
+
+class Main
+    shared def main()
+        var t = SigTest()
+        t.run()
+        print "sig_test: all OK"

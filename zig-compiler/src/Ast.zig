@@ -60,6 +60,16 @@ pub const Decl = union(enum) {
     init: *DeclInit,
     extend: *DeclExtend,
     union_: *DeclUnion,
+    sig_: *DeclSig,
+};
+
+/// `sig Name(params) as RetType` — named function-type alias (delegate).
+/// Declares a reusable function-pointer type; emits `const Name = *const fn(T) R` in Zig.
+pub const DeclSig = struct {
+    span: Span,
+    name: []const u8,
+    params: []const Param,
+    return_type: ?TypeRef,
 };
 
 /// `use Foo.Bar` — module import directive.

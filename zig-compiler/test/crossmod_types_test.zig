@@ -1352,6 +1352,114 @@ fn _log_err(msg: []const u8) void   { _log_emit("ERR",   3, msg); }
 fn _log_set_level(l: u8) void { _log_level = l; }
 fn _log_set_output_stderr(v: bool) void { _log_to_stderr = v; }
 fn _log_timestamp(v: bool) void { _log_timestamps = v; }
+const UriResult = struct {
+    scheme: []const u8,
+    host:   []const u8,
+    path:   []const u8,
+    query:  []const u8,
+    port:   i64,
+};
+fn _uri_parse(url: []const u8) UriResult {
+    const _u = std.Uri.parse(url) catch return UriResult{ .scheme="", .host="", .path="", .query="", .port=0 };
+    const _host: []const u8 = if (_u.host) |h| switch (h) {
+        .raw => |r| r, .percent_encoded => |p| p,
+    } else "";
+    const _path: []const u8 = switch (_u.path) {
+        .raw => |r| r, .percent_encoded => |p| p,
+    };
+    const _query: []const u8 = if (_u.query) |q| switch (q) {
+        .raw => |r| r, .percent_encoded => |p| p,
+    } else "";
+    return UriResult{
+        .scheme = _u.scheme,
+        .host   = _host,
+        .path   = _path,
+        .query  = _query,
+        .port   = if (_u.port) |p| @intCast(p) else 0,
+    };
+}
+fn _compress_gzip(_: []const u8) []const u8 { return ""; }
+fn _compress_gunzip(data: []const u8) ?[]const u8 {
+    var _in = std.Io.Reader.fixed(data);
+    var _window: [std.compress.flate.max_window_len]u8 = undefined;
+    var _decomp = std.compress.flate.Decompress.init(&_in, .gzip, &_window);
+    return _decomp.reader.allocRemaining(_allocator, .unlimited) catch null;
+}
+fn _mime_from_ext(ext: []const u8) []const u8 {
+    const _map = [_]struct { []const u8, []const u8 }{
+        .{ ".html",  "text/html" },          .{ ".htm",   "text/html" },
+        .{ ".css",   "text/css" },
+        .{ ".js",    "text/javascript" },    .{ ".mjs",   "text/javascript" },
+        .{ ".ts",    "text/typescript" },
+        .{ ".json",  "application/json" },
+        .{ ".xml",   "application/xml" },
+        .{ ".txt",   "text/plain" },
+        .{ ".csv",   "text/csv" },
+        .{ ".md",    "text/markdown" },
+        .{ ".png",   "image/png" },
+        .{ ".jpg",   "image/jpeg" },         .{ ".jpeg",  "image/jpeg" },
+        .{ ".gif",   "image/gif" },
+        .{ ".svg",   "image/svg+xml" },
+        .{ ".ico",   "image/x-icon" },
+        .{ ".webp",  "image/webp" },
+        .{ ".pdf",   "application/pdf" },
+        .{ ".zip",   "application/zip" },
+        .{ ".gz",    "application/gzip" },
+        .{ ".tar",   "application/x-tar" },
+        .{ ".mp3",   "audio/mpeg" },
+        .{ ".mp4",   "video/mp4" },
+        .{ ".wav",   "audio/wav" },
+        .{ ".ogg",   "audio/ogg" },
+        .{ ".webm",  "video/webm" },
+        .{ ".wasm",  "application/wasm" },
+        .{ ".ttf",   "font/ttf" },
+        .{ ".woff",  "font/woff" },
+        .{ ".woff2", "font/woff2" },
+    };
+    for (_map) |e| if (std.mem.eql(u8, e[0], ext)) return e[1];
+    return "application/octet-stream";
+}
+fn _mime_to_ext(mime: []const u8) []const u8 {
+    const _map = [_]struct { []const u8, []const u8 }{
+        .{ "text/html",        ".html" },
+        .{ "text/css",         ".css"  },
+        .{ "text/javascript",  ".js"   },
+        .{ "text/plain",       ".txt"  },
+        .{ "text/csv",         ".csv"  },
+        .{ "text/markdown",    ".md"   },
+        .{ "application/json", ".json" },
+        .{ "application/xml",  ".xml"  },
+        .{ "application/pdf",  ".pdf"  },
+        .{ "application/zip",  ".zip"  },
+        .{ "application/gzip", ".gz"   },
+        .{ "application/wasm", ".wasm" },
+        .{ "image/png",        ".png"  },
+        .{ "image/jpeg",       ".jpg"  },
+        .{ "image/gif",        ".gif"  },
+        .{ "image/svg+xml",    ".svg"  },
+        .{ "image/webp",       ".webp" },
+        .{ "audio/mpeg",       ".mp3"  },
+        .{ "audio/wav",        ".wav"  },
+        .{ "video/mp4",        ".mp4"  },
+    };
+    for (_map) |e| if (std.mem.eql(u8, e[0], mime)) return e[1];
+    return "";
+}
+const TimerHandle = struct {
+    _start_ns: i128,
+    pub fn elapsed(self: *const TimerHandle) f64 {
+        const _ns: i128 = std.time.nanoTimestamp() - self._start_ns;
+        return @as(f64, @floatFromInt(_ns)) / 1_000_000.0;
+    }
+    pub fn elapsedMicros(self: *const TimerHandle) i64 {
+        const _ns: i128 = std.time.nanoTimestamp() - self._start_ns;
+        return @intCast(@divFloor(_ns, 1000));
+    }
+    pub fn reset(self: *TimerHandle) void {
+        self._start_ns = std.time.nanoTimestamp();
+    }
+};
+fn _timer_start() TimerHandle { return .{ ._start_ns = std.time.nanoTimestamp() }; }
 const crossmod_types_lib = @import("crossmod_types_lib.zig");
 pub const Segment = struct {
     _type_tag: u64 = _ttag_Segment,

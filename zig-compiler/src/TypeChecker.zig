@@ -133,6 +133,12 @@ pub const Type = union(enum) {
     /// The referenced symbol is stored for later arity/type checking.
     fn_ref: *const Symbol,
 
+    // ── Named function-type alias (sig) ───────────────────────────────────────
+    /// A `sig`-typed parameter or variable: the type is a named delegate alias.
+    /// Produced when a local/param has a TypeRef that resolves to a `sig_` symbol.
+    /// Stores the DeclSig so `inferCall` can recover the return type.
+    fn_sig: *const Ast.DeclSig,
+
     // ── Special ───────────────────────────────────────────────────────────────
     /// Cannot determine type: upstream error or unsupported construct.
     /// Suppresses further cascading errors.
@@ -197,6 +203,7 @@ pub const Type = union(enum) {
                 else => false,
             },
             .fn_ref         => |sa| switch (b) { .fn_ref => |sb| sa == sb, else => false },
+            .fn_sig         => |da| switch (b) { .fn_sig => |db| da == db, else => false },
             .unknown        => b == .unknown,
         };
     }
@@ -228,6 +235,10 @@ pub const Type = union(enum) {
         if (to == .optional) return isAssignable(from, to.optional.*);
         // Any fn_ref is assignable to any fn_ref (same-arity compatibility deferred to runtime)
         if (from == .fn_ref and to == .fn_ref) return true;
+        // fn_ref is assignable to fn_sig (the sig provides the typed context; Zig enforces arity)
+        if (from == .fn_ref and to == .fn_sig) return true;
+        // fn_sig is assignable to fn_sig (e.g. passing a sig-typed local to a sig-typed param)
+        if (from == .fn_sig and to == .fn_sig) return true;
         return eql(from, to);
     }
 
@@ -271,6 +282,7 @@ pub const Type = union(enum) {
             .tuple          => "tuple",
             .cross_module   => |cm| cm.type_name,
             .fn_ref         => |s| s.name,
+            .fn_sig         => |d| d.name,
             .unknown        => "<unknown>",
         };
     }
@@ -484,6 +496,10 @@ pub const TypeCheckResult = struct {
     /// propagation.  Populated during type-checking by looking at the inner ident's
     /// DECLARED type (pre nil-narrowing) to distinguish `Foo? → .?` from `Result → try`.
     optional_unwraps: std.AutoHashMap(*const Ast.Expr, void),
+    /// Set of argument expressions that must be prefixed with `&` in Zig because they
+    /// are fn_ref function names being passed into a fn_sig (delegate) parameter.
+    /// Populated by inferCall when a fn_ref arg matches a sig-typed parameter.
+    fn_ref_args: std.AutoHashMap(*const Ast.Expr, void),
 
     pub fn hasErrors(self: TypeCheckResult) bool {
         for (self.diags) |d| if (d.kind == .err) return true;
@@ -497,6 +513,7 @@ pub const TypeCheckResult = struct {
         self.getter_methods.deinit();
         self.ext_methods.deinit();
         self.optional_unwraps.deinit();
+        self.fn_ref_args.deinit();
     }
 };
 
@@ -630,6 +647,7 @@ pub fn typeCheckPass3(
 ) anyerror!TypeCheckResult {
     var expr_types      = std.AutoHashMap(*const Ast.Expr, Type).init(map_alloc);
     var optional_unwraps = std.AutoHashMap(*const Ast.Expr, void).init(map_alloc);
+    var fn_ref_args      = std.AutoHashMap(*const Ast.Expr, void).init(map_alloc);
     var loop_var_types  = std.StringHashMap(Type).init(map_alloc);
     defer loop_var_types.deinit();
     var list_elem_types = std.StringHashMap(Type).init(map_alloc);
@@ -660,6 +678,7 @@ pub fn typeCheckPass3(
         .ext_methods      = &ext_methods,
         .imported_modules = imported_modules,
         .optional_unwraps = &optional_unwraps,
+        .fn_ref_args      = &fn_ref_args,
     };
 
     try tc.checkModule(module);
@@ -671,6 +690,7 @@ pub fn typeCheckPass3(
         .getter_methods   = getter_methods,
         .ext_methods      = ext_methods,
         .optional_unwraps = optional_unwraps,
+        .fn_ref_args      = fn_ref_args,
     };
 }
 
@@ -714,6 +734,8 @@ const TypeChecker = struct {
     /// `.try_` nodes confirmed to be optional-unwraps (inner declared type is nilable).
     /// Shared across TypeChecker copies; written by inferExprInner for `.try_`.
     optional_unwraps: *std.AutoHashMap(*const Ast.Expr, void),
+    /// Arg expressions that must be prefixed with `&` in Zig — fn_ref passed into fn_sig param.
+    fn_ref_args: *std.AutoHashMap(*const Ast.Expr, void),
 
     fn withReturn(tc: TypeChecker, ret: Type) TypeChecker {
         var c = tc; c.return_type = ret; return c;
@@ -766,6 +788,7 @@ const TypeChecker = struct {
             .var_      => |n| try tc.checkVarDecl(n),
             .init      => |n| try tc.checkInit(n),
             .union_    => {},  // no body to type-check (variants are types, not expressions)
+            .sig_      => {},  // type alias — no body to type-check
         }
     }
 
@@ -1530,6 +1553,27 @@ const TypeChecker = struct {
 
     fn inferCall(tc: TypeChecker, e: *Ast.ExprCall) anyerror!Type {
         for (e.args) |arg| _ = try tc.inferExpr(arg.value);
+        // Mark fn_ref arguments that are passed to fn_sig parameters so CodeGen
+        // can prepend `&` to coerce a function value to a function pointer.
+        if (e.callee.* == .ident) {
+            if (tc.resolve.exprs.get(&e.callee.ident)) |callee_sym| {
+                if (callee_sym.kind == .method) {
+                    const params = callee_sym.decl.method.params;
+                    for (e.args, 0..) |arg, i| {
+                        if (i >= params.len) break;
+                        const arg_t = tc.expr_types.get(arg.value) orelse continue;
+                        if (arg_t != .fn_ref) continue;
+                        const p = params[i];
+                        if (p.type_) |*pt| {
+                            const param_t = tc.typeFromRef(pt);
+                            if (param_t == .fn_sig) {
+                                try tc.fn_ref_args.put(arg.value, {});
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Generic construction: Stack(int)(42) — callee ident resolves to a generic class.
         // type_args.len > 0 is the discriminator set by AstBuilder.buildGenericConstruct.
@@ -1605,6 +1649,11 @@ const TypeChecker = struct {
                             const decl = ref_sym.decl.method;
                             return tc.typeFromOptRef(if (decl.return_type) |*rt| rt else null);
                         }
+                    }
+                    // If the callee is a fn_sig-typed local/param, return the sig's return type.
+                    if (sym_type == .fn_sig) {
+                        const sig_decl = sym_type.fn_sig;
+                        return tc.typeFromOptRef(if (sig_decl.return_type) |*rt| rt else null);
                     }
                     return sym_type;
                 }
@@ -2348,6 +2397,7 @@ const TypeChecker = struct {
             .union_variant => .unknown, // TODO: resolve to parent union type
             .module        => .unknown, // imported module — cross-file types not yet resolved
             .type_param    => .unknown, // generic type parameter — concrete type determined at instantiation
+            .sig_          => .{ .fn_sig = sym.decl.sig_ }, // sig used as a value (rare; for symmetry)
         };
     }
 
@@ -2386,7 +2436,11 @@ const TypeChecker = struct {
                         }
                         break :blk2 .unknown;
                     },
-                    .symbol  => |s| if (s.kind == .type_param) .unknown else .{ .named = s },
+                    .symbol  => |s| switch (s.kind) {
+                        .type_param => .unknown,
+                        .sig_       => .{ .fn_sig = s.decl.sig_ }, // named delegate type
+                        else        => .{ .named = s },
+                    },
                 };
             },
             .nilable => |inner| blk: {

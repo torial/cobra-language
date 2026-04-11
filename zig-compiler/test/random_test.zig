@@ -1260,12 +1260,12 @@ fn _random_seed(s: i64) void {
     _rng_ready = true;
 }
 const ArgResult = struct {
-    _raw: [][]const u8,
+    _raw: []const []const u8,
     pub fn flag(self: ArgResult, long: []const u8, short: []const u8) bool {
         for (self._raw) |a| { if (std.mem.eql(u8, a, long)) return true; if (std.mem.eql(u8, a, short)) return true; }
         return false;
     }
-    pub fn has(self: ArgResult, name_: []const u8) bool {
+    pub fn contains(self: ArgResult, name_: []const u8) bool {
         for (self._raw) |a| { if (std.mem.eql(u8, a, name_)) return true; }
         return false;
     }
@@ -1294,18 +1294,17 @@ const ArgResult = struct {
     pub fn usage(_: ArgResult) []const u8 { return "Usage: program [options]"; }
 };
 fn _arg_parse() ArgResult {
-    const argv = std.process.argsAlloc(_allocator) catch return ArgResult{ ._raw = &.{} };
-    return ArgResult{ ._raw = if (argv.len > 1) argv[1..] else &.{} };
+    const _argv = std.process.argsAlloc(_allocator) catch return ArgResult{ ._raw = &.{} };
+    const _raw_slice = if (_argv.len > 1) _argv[1..] else _argv[0..0];
+    var _out = _allocator.alloc([]const u8, _raw_slice.len) catch return ArgResult{ ._raw = &.{} };
+    for (_raw_slice, 0..) |a, i| _out[i] = a;
+    return ArgResult{ ._raw = _out };
 }
 fn _term_is_tty() bool {
-    const cfg = std.io.tty.detectConfig(std.io.getStdOut());
+    const cfg = std.io.tty.detectConfig(std.fs.File.stdout());
     return cfg != .no_color;
 }
-fn _term_width() i64 {
-    // Query terminal width via TIOCGWINSZ ioctl where available;
-    // fall back to 80 on Windows or when piped.
-    return 80;
-}
+fn _term_width() i64 { return 80; }
 fn _term_height() i64 { return 24; }
 fn _term_ansi(color: []const u8) []const u8 {
     if (std.mem.eql(u8, color, "red"))     return "\x1b[31m";
@@ -1320,13 +1319,13 @@ fn _term_ansi(color: []const u8) []const u8 {
     return "";
 }
 fn _term_print(msg: []const u8, color: []const u8, newline: bool) void {
-    const out = std.io.getStdOut().writer();
+    const _f = std.fs.File.stdout();
     if (_term_is_tty() and color.len > 0) {
-        out.print("{s}{s}\x1b[0m", .{ _term_ansi(color), msg }) catch {};
+        _f.deprecatedWriter().print("{s}{s}\x1b[0m", .{ _term_ansi(color), msg }) catch {};
     } else {
-        out.writeAll(msg) catch {};
+        _f.deprecatedWriter().writeAll(msg) catch {};
     }
-    if (newline) out.writeByte('\n') catch {};
+    if (newline) _f.deprecatedWriter().writeByte('\n') catch {};
 }
 var _log_level: u8 = 1;        // default: info
 var _log_timestamps: bool = true;
@@ -1339,11 +1338,11 @@ fn _log_ts() []const u8 {
 }
 fn _log_emit(level_str: []const u8, level_num: u8, msg: []const u8) void {
     if (level_num < _log_level) return;
-    const w = if (_log_to_stderr) std.io.getStdErr().writer() else std.io.getStdOut().writer();
+    const _lw = if (_log_to_stderr) std.fs.File.stderr().deprecatedWriter() else std.fs.File.stdout().deprecatedWriter();
     if (_log_timestamps) {
-        w.print("[{s:<5} {s}] {s}\n", .{ level_str, _log_ts(), msg }) catch {};
+        _lw.print("[{s:<5} {s}] {s}\n", .{ level_str, _log_ts(), msg }) catch {};
     } else {
-        w.print("[{s:<5}] {s}\n", .{ level_str, msg }) catch {};
+        _lw.print("[{s:<5}] {s}\n", .{ level_str, msg }) catch {};
     }
 }
 fn _log_debug(msg: []const u8) void { _log_emit("DEBUG", 0, msg); }
@@ -1353,6 +1352,114 @@ fn _log_err(msg: []const u8) void   { _log_emit("ERR",   3, msg); }
 fn _log_set_level(l: u8) void { _log_level = l; }
 fn _log_set_output_stderr(v: bool) void { _log_to_stderr = v; }
 fn _log_timestamp(v: bool) void { _log_timestamps = v; }
+const UriResult = struct {
+    scheme: []const u8,
+    host:   []const u8,
+    path:   []const u8,
+    query:  []const u8,
+    port:   i64,
+};
+fn _uri_parse(url: []const u8) UriResult {
+    const _u = std.Uri.parse(url) catch return UriResult{ .scheme="", .host="", .path="", .query="", .port=0 };
+    const _host: []const u8 = if (_u.host) |h| switch (h) {
+        .raw => |r| r, .percent_encoded => |p| p,
+    } else "";
+    const _path: []const u8 = switch (_u.path) {
+        .raw => |r| r, .percent_encoded => |p| p,
+    };
+    const _query: []const u8 = if (_u.query) |q| switch (q) {
+        .raw => |r| r, .percent_encoded => |p| p,
+    } else "";
+    return UriResult{
+        .scheme = _u.scheme,
+        .host   = _host,
+        .path   = _path,
+        .query  = _query,
+        .port   = if (_u.port) |p| @intCast(p) else 0,
+    };
+}
+fn _compress_gzip(_: []const u8) []const u8 { return ""; }
+fn _compress_gunzip(data: []const u8) ?[]const u8 {
+    var _in = std.Io.Reader.fixed(data);
+    var _window: [std.compress.flate.max_window_len]u8 = undefined;
+    var _decomp = std.compress.flate.Decompress.init(&_in, .gzip, &_window);
+    return _decomp.reader.allocRemaining(_allocator, .unlimited) catch null;
+}
+fn _mime_from_ext(ext: []const u8) []const u8 {
+    const _map = [_]struct { []const u8, []const u8 }{
+        .{ ".html",  "text/html" },          .{ ".htm",   "text/html" },
+        .{ ".css",   "text/css" },
+        .{ ".js",    "text/javascript" },    .{ ".mjs",   "text/javascript" },
+        .{ ".ts",    "text/typescript" },
+        .{ ".json",  "application/json" },
+        .{ ".xml",   "application/xml" },
+        .{ ".txt",   "text/plain" },
+        .{ ".csv",   "text/csv" },
+        .{ ".md",    "text/markdown" },
+        .{ ".png",   "image/png" },
+        .{ ".jpg",   "image/jpeg" },         .{ ".jpeg",  "image/jpeg" },
+        .{ ".gif",   "image/gif" },
+        .{ ".svg",   "image/svg+xml" },
+        .{ ".ico",   "image/x-icon" },
+        .{ ".webp",  "image/webp" },
+        .{ ".pdf",   "application/pdf" },
+        .{ ".zip",   "application/zip" },
+        .{ ".gz",    "application/gzip" },
+        .{ ".tar",   "application/x-tar" },
+        .{ ".mp3",   "audio/mpeg" },
+        .{ ".mp4",   "video/mp4" },
+        .{ ".wav",   "audio/wav" },
+        .{ ".ogg",   "audio/ogg" },
+        .{ ".webm",  "video/webm" },
+        .{ ".wasm",  "application/wasm" },
+        .{ ".ttf",   "font/ttf" },
+        .{ ".woff",  "font/woff" },
+        .{ ".woff2", "font/woff2" },
+    };
+    for (_map) |e| if (std.mem.eql(u8, e[0], ext)) return e[1];
+    return "application/octet-stream";
+}
+fn _mime_to_ext(mime: []const u8) []const u8 {
+    const _map = [_]struct { []const u8, []const u8 }{
+        .{ "text/html",        ".html" },
+        .{ "text/css",         ".css"  },
+        .{ "text/javascript",  ".js"   },
+        .{ "text/plain",       ".txt"  },
+        .{ "text/csv",         ".csv"  },
+        .{ "text/markdown",    ".md"   },
+        .{ "application/json", ".json" },
+        .{ "application/xml",  ".xml"  },
+        .{ "application/pdf",  ".pdf"  },
+        .{ "application/zip",  ".zip"  },
+        .{ "application/gzip", ".gz"   },
+        .{ "application/wasm", ".wasm" },
+        .{ "image/png",        ".png"  },
+        .{ "image/jpeg",       ".jpg"  },
+        .{ "image/gif",        ".gif"  },
+        .{ "image/svg+xml",    ".svg"  },
+        .{ "image/webp",       ".webp" },
+        .{ "audio/mpeg",       ".mp3"  },
+        .{ "audio/wav",        ".wav"  },
+        .{ "video/mp4",        ".mp4"  },
+    };
+    for (_map) |e| if (std.mem.eql(u8, e[0], mime)) return e[1];
+    return "";
+}
+const TimerHandle = struct {
+    _start_ns: i128,
+    pub fn elapsed(self: *const TimerHandle) f64 {
+        const _ns: i128 = std.time.nanoTimestamp() - self._start_ns;
+        return @as(f64, @floatFromInt(_ns)) / 1_000_000.0;
+    }
+    pub fn elapsedMicros(self: *const TimerHandle) i64 {
+        const _ns: i128 = std.time.nanoTimestamp() - self._start_ns;
+        return @intCast(@divFloor(_ns, 1000));
+    }
+    pub fn reset(self: *TimerHandle) void {
+        self._start_ns = std.time.nanoTimestamp();
+    }
+};
+fn _timer_start() TimerHandle { return .{ ._start_ns = std.time.nanoTimestamp() }; }
 pub const RandomTest = struct {
     _type_tag: u64 = _ttag_RandomTest,
     pub fn main() void {

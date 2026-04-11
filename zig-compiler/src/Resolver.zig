@@ -143,6 +143,7 @@ const Resolver = struct {
             .var_      => |n| try r.walkVarDecl(n, scope),
             .init      => |n| try r.walkInit(n, scope),
             .union_    => |n| try r.walkUnion(n, scope),
+            .sig_      => {}, // type alias — no body to resolve
         }
     }
 

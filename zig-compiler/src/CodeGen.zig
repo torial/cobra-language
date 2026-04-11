@@ -3138,7 +3138,24 @@ const Generator = struct {
             .var_      => |n| try g.genTopVar(n),
             .init      => {},   // top-level constructor makes no sense
             .union_    => |n| try g.genUnion(n),
+            .sig_      => |n| try g.genSig(n),
         }
+    }
+
+    // ── sig ───────────────────────────────────────────────────────────────────
+
+    fn genSig(g: Generator, n: *Ast.DeclSig) anyerror!void {
+        // Emit: `const Name = *const fn(T1, T2) R;`
+        // This makes `Name` a usable Zig type alias for the function pointer type.
+        try g.writeIndent();
+        try g.w.print("const {s} = *const fn(", .{n.name});
+        for (n.params, 0..) |p, i| {
+            if (i > 0) try g.w.writeAll(", ");
+            if (p.type_) |tr| try g.genType(tr) else try g.w.writeAll("anytype");
+        }
+        try g.w.writeAll(") ");
+        if (n.return_type) |rt| try g.genType(rt) else try g.w.writeAll("void");
+        try g.w.writeAll(";\n");
     }
 
     // ── use ───────────────────────────────────────────────────────────────────
@@ -4324,6 +4341,11 @@ const Generator = struct {
         }
         if (n.init) |e| {
             try g.w.writeAll(" = ");
+            // fn_ref init into a sig-typed var: `var pred as CharPred = isAlpha`
+            // → emit `&isAlpha` so Zig gets a function pointer.
+            if (tc_init_type == .fn_ref and n.type_ != null) {
+                try g.w.writeAll("&");
+            }
             try g.genExpr(e);
             // Inside a try/catch block, if the initializer is a call to a `throws` method
             // (including cross-module calls like `Lexer.tokenize(...)`), redirect the error
@@ -8316,7 +8338,7 @@ const Generator = struct {
         if (!has_named) {
             for (args, 0..) |a, i| {
                 if (i > 0) try g.w.writeAll(", ");
-                try g.genExpr(a.value);
+                try g.genArgExpr(a.value);
             }
             return;
         }
@@ -8339,9 +8361,9 @@ const Generator = struct {
             for (resolved, 0..) |maybe_expr, i| {
                 if (i > 0) try g.w.writeAll(", ");
                 if (maybe_expr) |expr| {
-                    try g.genExpr(expr);
+                    try g.genArgExpr(expr);
                 } else if (i < ps.len and ps[i].default != null) {
-                    try g.genExpr(ps[i].default.?);
+                    try g.genArgExpr(ps[i].default.?);
                 } else {
                     try g.w.writeAll("undefined"); // missing required arg
                 }
@@ -8350,9 +8372,20 @@ const Generator = struct {
             // No param info — emit positionally in order written.
             for (args, 0..) |a, i| {
                 if (i > 0) try g.w.writeAll(", ");
-                try g.genExpr(a.value);
+                try g.genArgExpr(a.value);
             }
         }
+    }
+
+    /// Emit a single argument expression, prepending `&` when the expression is
+    /// a bare fn_ref (function name) being passed to a fn_sig-typed parameter.
+    fn genArgExpr(g: Generator, expr: *const Ast.Expr) anyerror!void {
+        if (g.tc) |tc| {
+            if (tc.fn_ref_args.contains(expr)) {
+                try g.w.writeAll("&");
+            }
+        }
+        try g.genExpr(expr);
     }
 
     fn genCall(g: Generator, e: *Ast.ExprCall) anyerror!void {
@@ -9653,7 +9686,7 @@ fn printFmt(tc: ?*const TypeChecker.TypeCheckResult, catch_var: []const u8, expr
         .tuple,
         .generic_named,
         .cross_module,
-        .fn_ref                        => "{any}",
+        .fn_ref, .fn_sig               => "{any}",
     };
 }
 
