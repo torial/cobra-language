@@ -8,11 +8,15 @@
 
 use Token exposing TokenKind
 
-# -- Module-level character classifiers -----------------------------------------
+# -- Named function-type alias for character predicates -------------------------
 #
-# Defined at module scope (not inside Lexer) so they can be used as first-class
-# function references — e.g., a future `spanWhile(pos, isAlpha)` helper can
-# receive `isAlpha` directly without wrapping it in a lambda.
+# `sig CharPred` lets module-level classifier functions be passed directly to
+# `scanWhile` without wrapping them in lambdas.  Any `shared def f(c as char)
+# as bool` at module scope is assignment-compatible with `CharPred`.
+
+sig CharPred(c as char) as bool
+
+# -- Module-level character classifiers -----------------------------------------
 
 shared def isDigit(c as char) as bool
     branch c
@@ -20,6 +24,9 @@ shared def isDigit(c as char) as bool
             return true
         else
             return false
+
+shared def isDigitOrUnder(c as char) as bool
+    return isDigit(c) or c == c'_'
 
 shared def isHexDigit(c as char) as bool
     branch c
@@ -104,6 +111,12 @@ class Lexer
     def emit(kind as TokenKind, text as str, ln as int, cl as int)
         out.add(Token.Token(kind, text, ln, cl))
 
+    # Advance `pos` as long as `pred` holds on the current character.
+    # Uses the `CharPred` sig so any module-level classifier can be passed directly.
+    def scanWhile(pred as CharPred)
+        while pos < src.len and pred(src[pos])
+            pos = pos + 1
+
     # -- Line classification -------------------------------------------------
 
     def classifyLine() as LineKind
@@ -184,8 +197,7 @@ class Lexer
         if isAlpha(c1) or c1 == c'_'
             pos = pos + 1
             var start = pos
-            while pos < src.len and isIdentContinue(src[pos])
-                pos = pos + 1
+            scanWhile(isIdentContinue)
             emit(TokenKind.at_id(), src[start - 1..pos], ln, cl)
             return
         raise "UnexpectedCharacter"
@@ -194,8 +206,7 @@ class Lexer
 
     def scanIdentOrKeyword(ln as int, cl as int) throws
         var start = pos
-        while pos < src.len and isIdentContinue(src[pos])
-            pos = pos + 1
+        scanWhile(isIdentContinue)
         var word = src[start..pos]
 
         # c'  c"  char literals
@@ -446,19 +457,16 @@ class Lexer
 
         if src[pos] == c'0' and pos + 1 < src.len and src[pos + 1] == c'x'
             pos = pos + 2
-            while pos < src.len and isHexDigit(src[pos])
-                pos = pos + 1
+            scanWhile(isHexDigit)
             if peek() == c'_'
                 var suffixStart = pos
                 pos = pos + 1
                 if peek() == c'u'
                     pos = pos + 1
-                    while pos < src.len and isDigit(src[pos])
-                        pos = pos + 1
+                    scanWhile(isDigit)
                     emit(TokenKind.hex_lit_unsign(), src[start..pos], ln, cl)
                     return
-                while pos < src.len and isDigit(src[pos])
-                    pos = pos + 1
+                scanWhile(isDigit)
                 if pos > suffixStart + 1
                     emit(TokenKind.hex_lit_explicit(), src[start..pos], ln, cl)
                     return
@@ -466,14 +474,12 @@ class Lexer
             emit(TokenKind.hex_lit(), src[start..pos], ln, cl)
             return
 
-        while pos < src.len and (isDigit(src[pos]) or src[pos] == c'_')
-            pos = pos + 1
+        scanWhile(isDigitOrUnder)
 
         var hasDot = peek() == c'.' and isDigit(peekAt(1))
         if hasDot
             pos = pos + 1
-            while pos < src.len and (isDigit(src[pos]) or src[pos] == c'_')
-                pos = pos + 1
+            scanWhile(isDigitOrUnder)
 
         var sc  = peek()
         var sc1 = peek1()
@@ -504,8 +510,7 @@ class Lexer
             if sc == c'_'
                 pos = pos + 1
             pos = pos + 1
-            while pos < src.len and isDigit(src[pos])
-                pos = pos + 1
+            scanWhile(isDigit)
             emit(TokenKind.integer_lit_explicit(), src[start..pos], ln, cl)
             return
 
