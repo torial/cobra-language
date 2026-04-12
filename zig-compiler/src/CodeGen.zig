@@ -6141,12 +6141,13 @@ const Generator = struct {
             return true;
         }
         if (std.mem.eql(u8, method, "remove")) {
-            // list.remove(i) → _ = list.orderedRemove(i)
+            // list.remove(i) → _ = list.orderedRemove(@as(usize, @intCast(i)))
+            // Index is i64 in Zebra; orderedRemove takes usize.
             try g.w.writeAll("_ = ");
             try g.genExpr(obj);
-            try g.w.writeAll(".orderedRemove(");
+            try g.w.writeAll(".orderedRemove(@as(usize, @intCast(");
             if (args.len > 0) try g.genExpr(args[0].value);
-            try g.w.writeAll(")");
+            try g.w.writeAll(")))");
             return true;
         }
         if (std.mem.eql(u8, method, "clear")) {

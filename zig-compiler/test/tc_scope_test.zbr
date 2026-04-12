@@ -1,0 +1,96 @@
+# tc_scope_test.zbr -- smoke test for tc_scope.zbr
+# Verifies TcScope push/pop, define, hasLocal/getLocal, hasSymbol/lookup.
+
+use tc_types exposing TcType, TcTypes
+use tc_scope exposing TcScope, TcScopeKind, TcSymbol, TcSymKind
+
+class Main
+    shared
+        def main
+            # 1. Empty scope chain
+            var sc = TcScope()
+            assert sc.depth() == 0
+            print "1. empty scope OK"
+
+            # 2. push/pop and depth tracking
+            sc.push(TcScopeKind.module_)
+            assert sc.depth() == 1
+            assert sc.currentKind() == TcScopeKind.module_
+            sc.push(TcScopeKind.type_)
+            assert sc.depth() == 2
+            assert sc.currentKind() == TcScopeKind.type_
+            sc.push(TcScopeKind.method_)
+            assert sc.depth() == 3
+            assert sc.currentKind() == TcScopeKind.method_
+            sc.pop()
+            assert sc.depth() == 2
+            assert sc.currentKind() == TcScopeKind.type_
+            sc.pop()
+            sc.pop()
+            assert sc.depth() == 0
+            print "2. push/pop depth OK"
+
+            # 3. define and hasLocal
+            sc.push(TcScopeKind.module_)
+            var sym_a = TcSymbol("MyClass", TcSymKind.class_, TcType.unknown_())
+            assert sc.define("MyClass", sym_a)
+            assert sc.hasLocal("MyClass")
+            assert not sc.hasLocal("Missing")
+            # duplicate define returns false
+            assert not sc.define("MyClass", sym_a)
+            print "3. define/hasLocal OK"
+
+            # 4. getLocal
+            var got = sc.getLocal("MyClass")
+            assert got.name == "MyClass"
+            assert got.kind == TcSymKind.class_
+            print "4. getLocal OK"
+
+            # 5. hasSymbol / lookup across frames
+            var sym_x = TcSymbol("x", TcSymKind.local, TcType.int_())
+            sc.push(TcScopeKind.method_)
+            assert sc.define("x", sym_x)
+            # inner frame sees x
+            assert sc.hasSymbol("x")
+            assert sc.hasSymbol("MyClass")
+            # outer symbol not local
+            assert not sc.hasLocal("MyClass")
+            # lookup returns innermost match
+            var lx = sc.lookup("x")
+            assert lx.name == "x"
+            assert lx.kind == TcSymKind.local
+            var lc = sc.lookup("MyClass")
+            assert lc.name == "MyClass"
+            assert lc.kind == TcSymKind.class_
+            print "5. cross-frame lookup OK"
+
+            # 6. shadowing: inner x hides outer x
+            sc.push(TcScopeKind.block_)
+            var sym_x2 = TcSymbol("x", TcSymKind.local, TcType.string_())
+            assert sc.define("x", sym_x2)
+            var lx2 = sc.lookup("x")
+            assert TcTypes.eql(lx2.type_, TcType.string_())
+            sc.pop()
+            # after pop, original x visible again
+            var lx3 = sc.lookup("x")
+            assert TcTypes.eql(lx3.type_, TcType.int_())
+            print "6. shadowing OK"
+
+            # 7. pop removes symbols
+            sc.pop()   # pop method frame (removes x)
+            assert not sc.hasSymbol("x")
+            assert sc.hasSymbol("MyClass")   # module frame still live
+            sc.pop()   # pop module frame
+            assert not sc.hasSymbol("MyClass")
+            assert sc.depth() == 0
+            print "7. pop removes symbols OK"
+
+            # 8. re-use after full pop
+            sc.push(TcScopeKind.module_)
+            var sym_b = TcSymbol("int", TcSymKind.class_, TcType.int_())
+            assert sc.define("int", sym_b)
+            assert sc.hasLocal("int")
+            sc.pop()
+            print "8. reuse after pop OK"
+
+            print "tc_scope_test: all OK"

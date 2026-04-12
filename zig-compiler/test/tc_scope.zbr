@@ -1,0 +1,150 @@
+# tc_scope.zbr -- TcScope: lexical scope chain for the Zebra type-checker.
+#
+# Mirrors SymbolTable.zig's Scope/SymbolTable but uses Zebra-native types:
+# str keys, TcSymKind enum, and TcType from tc_types.zbr.
+#
+# Parent chain is implemented as a flat parallel-array stack inside TcScope
+# rather than linked parent pointers (which would require a recursive class
+# reference, not supported in Zebra).
+#
+# Layout:
+#   _names   -- flat list of all symbol names across all live frames
+#   _syms    -- parallel list of TcSymbol values
+#   _limits  -- start index in _names for each live frame (pushed per scope)
+#   _kinds   -- TcScopeKind for each live frame (parallel to _limits)
+#
+# Lookup walks _names from the end (innermost frame) toward 0 (outermost).
+
+use tc_types exposing TcType
+
+# -- TcScopeKind ---------------------------------------------------------------
+# The kind of lexical region a scope frame represents.
+# Mirrors SymbolTable.ScopeKind (subset used by the TC).
+
+enum TcScopeKind
+    module_
+    type_
+    method_
+    block_
+
+# -- TcSymKind -----------------------------------------------------------------
+# Symbol classification for type-checking purposes.
+# Mirrors SymbolTable.SymbolKind (restricted subset).
+
+enum TcSymKind
+    class_
+    interface_
+    struct_
+    mixin_
+    enum_
+    union_
+    method
+    var_
+    param
+    local
+    enum_member
+    union_variant
+    type_param
+    sig_
+
+# -- TcSymbol ------------------------------------------------------------------
+# A resolved symbol with its inferred or declared type.
+
+struct TcSymbol
+    var name  as str
+    var kind  as TcSymKind
+    var type_ as TcType
+    cue init(n as str, k as TcSymKind, t as TcType)
+        name  = n
+        kind  = k
+        type_ = t
+
+# -- TcScope -------------------------------------------------------------------
+# Scope chain implemented as a flat parallel-array stack.
+# One instance is created per compilation unit; push/pop manage nesting.
+
+class TcScope
+    var _names  as List(str)
+    var _syms   as List(TcSymbol)
+    var _limits as List(int)
+    var _kinds  as List(TcScopeKind)
+    cue init()
+        _names  = List(str)()
+        _syms   = List(TcSymbol)()
+        _limits = List(int)()
+        _kinds  = List(TcScopeKind)()
+
+    # Enter a new nested scope (e.g. class body, method body, block).
+    def push(kind as TcScopeKind)
+        _limits.add(_names.count())
+        _kinds.add(kind)
+
+    # Leave the innermost scope; all symbols defined in it become invisible.
+    def pop()
+        var frame_start = _limits.at(_limits.count() - 1)
+        while _names.count() > frame_start
+            _names.remove(_names.count() - 1)
+            _syms.remove(_syms.count() - 1)
+        _limits.remove(_limits.count() - 1)
+        _kinds.remove(_kinds.count() - 1)
+
+    # Number of live frames (0 means the scope chain is empty).
+    def depth() as int
+        return _limits.count()
+
+    # Kind of the innermost (current) frame.
+    def currentKind() as TcScopeKind
+        return _kinds.at(_kinds.count() - 1)
+
+    # Define a symbol in the current (innermost) frame.
+    # Returns true if added; false if the name is already in the current frame.
+    def define(name as str, sym as TcSymbol) as bool
+        var frame_start = _limits.at(_limits.count() - 1)
+        var i = _names.count() - 1
+        while i >= frame_start
+            if _names.at(i) == name
+                return false
+            i = i - 1
+        _names.add(name)
+        _syms.add(sym)
+        return true
+
+    # True if name is defined in the innermost frame only (redeclaration check).
+    def hasLocal(name as str) as bool
+        var frame_start = _limits.at(_limits.count() - 1)
+        var i = _names.count() - 1
+        while i >= frame_start
+            if _names.at(i) == name
+                return true
+            i = i - 1
+        return false
+
+    # Retrieve the symbol from the innermost frame.
+    # Call only when hasLocal() returned true; returns a sentinel otherwise.
+    def getLocal(name as str) as TcSymbol
+        var frame_start = _limits.at(_limits.count() - 1)
+        var i = _names.count() - 1
+        while i >= frame_start
+            if _names.at(i) == name
+                return _syms.at(i)
+            i = i - 1
+        return TcSymbol("", TcSymKind.local, TcType.unknown_())
+
+    # True if name is visible from any frame (inner-to-outer walk).
+    def hasSymbol(name as str) as bool
+        var i = _names.count() - 1
+        while i >= 0
+            if _names.at(i) == name
+                return true
+            i = i - 1
+        return false
+
+    # Walk inner-to-outer; return the first matching symbol.
+    # Call only when hasSymbol() returned true; returns a sentinel otherwise.
+    def lookup(name as str) as TcSymbol
+        var i = _names.count() - 1
+        while i >= 0
+            if _names.at(i) == name
+                return _syms.at(i)
+            i = i - 1
+        return TcSymbol("", TcSymKind.local, TcType.unknown_())
