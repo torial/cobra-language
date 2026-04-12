@@ -1,0 +1,167 @@
+# Phase 7 probe: validate Generator struct design patterns for the CodeGen port.
+#
+# Key design questions answered here:
+# 1. struct except with 10+ fields (incl. optional str?) — does it work?
+# 2. Class instance (reference type) as shared state across struct copies — confirmed
+# 3. Writer CLASS (not StringBuilder VALUE) enables shared output across context forks
+# 4. Optional str fields with `to!` unwrap in assertions
+# 5. Indentation via int field in struct
+
+# Writer: wraps StringBuilder as a CLASS so all Generator copies share the same buffer.
+# This is the Zebra equivalent of Zig's `w: std.io.AnyWriter` fat pointer.
+class Writer
+    var buf as StringBuilder
+
+    cue init()
+        buf = StringBuilder()
+
+    def append(s as str)
+        buf.append(s)
+
+    def result as str
+        return buf.build()
+
+class SharedState
+    var count as int
+
+    cue init()
+        count = 0
+
+    def increment
+        count += 1
+
+struct Generator
+    var w         as Writer       # shared output (class = reference type)
+    var state     as SharedState  # shared counter (class = reference type)
+    var owner     as str
+    var indent    as int
+    var in_method as bool
+    var is_struct as bool
+    var try_label as str?
+    var catch_var as str
+    var source    as str
+
+    cue init(w as Writer, state as SharedState, owner as str, indent as int, in_method as bool, is_struct as bool, try_label as str?, catch_var as str, source as str)
+        this.w         = w
+        this.state     = state
+        this.owner     = owner
+        this.indent    = indent
+        this.in_method = in_method
+        this.is_struct = is_struct
+        this.try_label = try_label
+        this.catch_var = catch_var
+        this.source    = source
+
+    def withOwner(new_owner as str) as Generator
+        var g = this except
+            owner = new_owner
+        return g
+
+    def withIndent as Generator
+        var g = this except
+            indent = indent + 1
+        return g
+
+    def withMethod as Generator
+        var g = this except
+            in_method = true
+        return g
+
+    def withTryLabel(label as str, err_var as str) as Generator
+        var g = this except
+            try_label = label
+            catch_var = err_var
+        return g
+
+    def emit(s as str)
+        w.append(s)
+
+    def emitIndented(s as str)
+        var i = 0
+        while i < indent
+            w.append("    ")
+            i += 1
+        w.append(s)
+        w.append("\n")
+
+class Main
+    shared
+        def main
+            test1SharedClassViaStructCopy()
+            test2ContextForkingWithSharedWriter()
+            test3OptionalStrField()
+            test4NestedIndentation()
+            print "selfhost_probe7: all OK"
+
+        def test1SharedClassViaStructCopy
+            var st  = SharedState()
+            var wr  = Writer()
+            var g1  = Generator(wr, st, "", 0, false, false, nil, "", "")
+            var g2  = g1.withOwner("Foo")
+            var g3  = g1.withOwner("Bar")
+
+            # All three generators share the same SharedState instance (class = pointer)
+            g1.state.increment()
+            g2.state.increment()
+            g3.state.increment()
+
+            assert g1.state.count == 3, "shared count via g1 should be 3"
+            assert g2.state.count == 3, "shared count via g2 should be 3"
+            assert g3.state.count == 3, "shared count via g3 should be 3"
+            print "test1 OK"
+
+        def test2ContextForkingWithSharedWriter
+            var wr   = Writer()
+            var st   = SharedState()
+            var base = Generator(wr, st, "", 0, false, false, nil, "", "src.zbr")
+            var g1   = base.withOwner("MyClass")
+            var g2   = g1.withMethod()
+            var g3a  = g2.withIndent()
+            var g3   = g3a.withIndent()
+
+            # All emit to the same Writer (class instance shared across struct copies)
+            base.emit("// module\n")
+            g1.emit("pub const MyClass = struct {\n")
+            g3.emitIndented("x: i64 = 0,")
+            g1.emit("};\n")
+
+            var out = wr.result()
+            assert out == "// module\npub const MyClass = struct {\n        x: i64 = 0,\n};\n", "output mismatch: '${out}'"
+            print "test2 OK"
+
+        def test3OptionalStrField
+            var wr = Writer()
+            var st = SharedState()
+            var g  = Generator(wr, st, "", 0, false, false, nil, "", "")
+
+            assert g.try_label == nil, "try_label should start nil"
+            assert g.catch_var == "", "catch_var should start empty"
+
+            var g2 = g.withTryLabel("blk_try", "_err")
+            assert g2.try_label to! == "blk_try", "try_label after withTryLabel"
+            assert g2.catch_var == "_err", "catch_var after withTryLabel"
+
+            # Original unchanged
+            assert g.try_label == nil, "g.try_label should still be nil"
+            print "test3 OK"
+
+        def test4NestedIndentation
+            var wr = Writer()
+            var st = SharedState()
+            var g  = Generator(wr, st, "Outer", 0, false, false, nil, "", "")
+
+            var g1  = g.withIndent()
+            var g2a = g1.withOwner("Inner")
+            var g2  = g2a.withIndent()
+
+            assert g.indent == 0
+            assert g1.indent == 1
+            assert g2.indent == 2
+
+            g.emitIndented("level0")
+            g1.emitIndented("level1")
+            g2.emitIndented("level2")
+
+            var out = wr.result()
+            assert out == "level0\n    level1\n        level2\n", "indentation mismatch: '${out}'"
+            print "test4 OK"

@@ -3673,7 +3673,15 @@ const Generator = struct {
         } else {
             try g.w.writeAll(n.name);
             try g.w.writeAll(": ");
-            if (n.type_) |tr| try g.genType(tr) else try g.w.writeAll("anytype");
+            // StringBuilder as struct field: emit the concrete type and default to empty.
+            if (n.type_) |tr| {
+                if (tr == .named and std.mem.eql(u8, tr.named.name, "StringBuilder")) {
+                    try g.w.writeAll("std.ArrayList(u8) = .{}");
+                    try g.w.writeAll(",\n");
+                    return;
+                }
+                try g.genType(tr);
+            } else try g.w.writeAll("anytype");
             if (n.init) |e| { try g.w.writeAll(" = "); try g.genExpr(e); }
             else try g.w.writeAll(" = undefined");
             try g.w.writeAll(",\n");
@@ -4339,21 +4347,23 @@ const Generator = struct {
         const needs_var_for_methods = (tc_init_type == .timer_handle);
         const kw: []const u8 = if (n.is_const or (!is_mutated and !needs_var_for_methods)) "const" else "var";
 
-        // StringBuilder constructor: `var sb as StringBuilder = StringBuilder()`
+        // StringBuilder constructor:
+        //   annotated form: `var sb as StringBuilder = StringBuilder()`
+        //   inferred form:  `var sb = StringBuilder()`  (no type annotation)
         if (n.init) |e| {
-            if (n.type_) |tr| {
-                if (tr == .named and std.mem.eql(u8, tr.named.name, "StringBuilder")) {
-                    if (e.* == .call and e.call.args.len == 0 and
-                        e.call.callee.* == .ident and
-                        std.mem.eql(u8, e.call.callee.ident.name, "StringBuilder"))
-                    {
-                        // Always var: ArrayList.appendSlice takes *Self.
-                        try g.w.print("var {s} = std.ArrayList(u8){{}};\n", .{n.name});
-                        try g.writeIndent();
-                        try g.w.print("defer {s}.deinit(_allocator);\n", .{n.name});
-                        return;
-                    }
-                }
+            const is_sb_ctor = e.* == .call and e.call.args.len == 0 and
+                e.call.callee.* == .ident and
+                std.mem.eql(u8, e.call.callee.ident.name, "StringBuilder");
+            const has_sb_type = if (n.type_) |tr|
+                tr == .named and std.mem.eql(u8, tr.named.name, "StringBuilder")
+            else
+                is_sb_ctor; // infer StringBuilder type from the constructor call alone
+            if (has_sb_type and is_sb_ctor) {
+                // Always var: ArrayList.appendSlice takes *Self.
+                try g.w.print("var {s} = std.ArrayList(u8){{}};\n", .{n.name});
+                try g.writeIndent();
+                try g.w.print("defer {s}.deinit(_allocator);\n", .{n.name});
+                return;
             }
         }
         // Stdlib constructor: `var x as List(T) = List()` or `HashMap(K,V) = HashMap()`
@@ -9033,6 +9043,12 @@ const Generator = struct {
                 try g.w.writeAll("_csv_writer_init()");
                 return;
             }
+            // StringBuilder() as an assignment RHS (e.g. class field init in `cue init`).
+            // Local `var` declarations are intercepted earlier in genLocalVar.
+            if (std.mem.eql(u8, name, "StringBuilder")) {
+                try g.w.writeAll("std.ArrayList(u8){}");
+                return;
+            }
         }
         // Constructor call for exposed class alias: `ExposedClass(args)` after
         // `use Mod exposing ExposedClass` → `ExposedClass.init(args)`.
@@ -10019,6 +10035,14 @@ const Generator = struct {
                 if (g.class_names.contains(n.name)) {
                     try g.w.writeAll("*");
                     try g.w.writeAll(n.name);
+                    return;
+                }
+                // StringBuilder as a struct field or typed local: emit std.ArrayList(u8).
+                // (Local var declarations with `= StringBuilder()` are handled in
+                //  genLocalVar; this branch covers struct-field declarations and
+                //  any other type-annotation context.)
+                if (std.mem.eql(u8, n.name, "StringBuilder")) {
+                    try g.w.writeAll("std.ArrayList(u8)");
                     return;
                 }
                 // Cross-module qualified type: "moduleAlias.TypeName".
