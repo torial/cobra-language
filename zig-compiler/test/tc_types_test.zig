@@ -1518,11 +1518,11 @@ pub const Main = struct {
 // zbr:test/tc_types_test.zbr:35
         std.debug.print("{s}\n", .{"3. named eql OK"});
 // zbr:test/tc_types_test.zbr:38
-        const opt_int = TcType{ .optional = _box_283c6510980: { const _bp_283c6510980 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_283c6510980.* = TcType{ .int_ = {} }; break :_box_283c6510980 _bp_283c6510980; } };
+        const opt_int = TcType{ .optional = _box_22a13500980: { const _bp_22a13500980 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_22a13500980.* = TcType{ .int_ = {} }; break :_box_22a13500980 _bp_22a13500980; } };
 // zbr:test/tc_types_test.zbr:39
-        const opt_int2 = TcType{ .optional = _box_283c6510bc0: { const _bp_283c6510bc0 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_283c6510bc0.* = TcType{ .int_ = {} }; break :_box_283c6510bc0 _bp_283c6510bc0; } };
+        const opt_int2 = TcType{ .optional = _box_22a13500bc0: { const _bp_22a13500bc0 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_22a13500bc0.* = TcType{ .int_ = {} }; break :_box_22a13500bc0 _bp_22a13500bc0; } };
 // zbr:test/tc_types_test.zbr:40
-        const opt_str = TcType{ .optional = _box_283c6510e00: { const _bp_283c6510e00 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_283c6510e00.* = TcType{ .string_ = {} }; break :_box_283c6510e00 _bp_283c6510e00; } };
+        const opt_str = TcType{ .optional = _box_22a13500e00: { const _bp_22a13500e00 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_22a13500e00.* = TcType{ .string_ = {} }; break :_box_22a13500e00 _bp_22a13500e00; } };
 // zbr:test/tc_types_test.zbr:41
         std.debug.assert(TcTypes.eql(opt_int, opt_int2));
 // zbr:test/tc_types_test.zbr:42
@@ -1530,9 +1530,9 @@ pub const Main = struct {
 // zbr:test/tc_types_test.zbr:43
         std.debug.assert((!TcTypes.eql(opt_int, TcType{ .int_ = {} })));
 // zbr:test/tc_types_test.zbr:45
-        const opt_opt_int = TcType{ .optional = _box_283c65117b0: { const _bp_283c65117b0 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_283c65117b0.* = TcType{ .optional = _box_283c6511728: { const _bp_283c6511728 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_283c6511728.* = TcType{ .int_ = {} }; break :_box_283c6511728 _bp_283c6511728; } }; break :_box_283c65117b0 _bp_283c65117b0; } };
+        const opt_opt_int = TcType{ .optional = _box_22a135017b0: { const _bp_22a135017b0 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_22a135017b0.* = TcType{ .optional = _box_22a13501728: { const _bp_22a13501728 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_22a13501728.* = TcType{ .int_ = {} }; break :_box_22a13501728 _bp_22a13501728; } }; break :_box_22a135017b0 _bp_22a135017b0; } };
 // zbr:test/tc_types_test.zbr:46
-        const opt_opt_int2 = TcType{ .optional = _box_283c6511af0: { const _bp_283c6511af0 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_283c6511af0.* = TcType{ .optional = _box_283c6511a68: { const _bp_283c6511a68 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_283c6511a68.* = TcType{ .int_ = {} }; break :_box_283c6511a68 _bp_283c6511a68; } }; break :_box_283c6511af0 _bp_283c6511af0; } };
+        const opt_opt_int2 = TcType{ .optional = _box_22a13501af0: { const _bp_22a13501af0 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_22a13501af0.* = TcType{ .optional = _box_22a13501a68: { const _bp_22a13501a68 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_22a13501a68.* = TcType{ .int_ = {} }; break :_box_22a13501a68 _bp_22a13501a68; } }; break :_box_22a13501af0 _bp_22a13501af0; } };
 // zbr:test/tc_types_test.zbr:47
         std.debug.assert(TcTypes.eql(opt_opt_int, opt_opt_int2));
 // zbr:test/tc_types_test.zbr:48
@@ -1616,13 +1616,13 @@ pub const Main = struct {
 // zbr:test/tc_types_test.zbr:95
         std.debug.assert((!TcTypes.isAssignable(TcType{ .bool_ = {} }, TcType{ .int_ = {} })));
 // zbr:test/tc_types_test.zbr:97
-        std.debug.assert(TcTypes.isAssignable(TcType{ .int_ = {} }, TcType{ .optional = _box_283c6584188: { const _bp_283c6584188 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_283c6584188.* = TcType{ .int_ = {} }; break :_box_283c6584188 _bp_283c6584188; } }));
+        std.debug.assert(TcTypes.isAssignable(TcType{ .int_ = {} }, TcType{ .optional = _box_22a135b4188: { const _bp_22a135b4188 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_22a135b4188.* = TcType{ .int_ = {} }; break :_box_22a135b4188 _bp_22a135b4188; } }));
 // zbr:test/tc_types_test.zbr:99
         std.debug.assert(TcTypes.isAssignable(opt_int, opt_int2));
 // zbr:test/tc_types_test.zbr:101
-        const nil_t = TcType{ .optional = _box_283c65845a0: { const _bp_283c65845a0 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_283c65845a0.* = TcType{ .void_ = {} }; break :_box_283c65845a0 _bp_283c65845a0; } };
+        const nil_t = TcType{ .optional = _box_22a135b45a0: { const _bp_22a135b45a0 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_22a135b45a0.* = TcType{ .void_ = {} }; break :_box_22a135b45a0 _bp_22a135b45a0; } };
 // zbr:test/tc_types_test.zbr:102
-        std.debug.assert(TcTypes.isAssignable(nil_t, TcType{ .optional = _box_283c65848f8: { const _bp_283c65848f8 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_283c65848f8.* = TcType{ .string_ = {} }; break :_box_283c65848f8 _bp_283c65848f8; } }));
+        std.debug.assert(TcTypes.isAssignable(nil_t, TcType{ .optional = _box_22a135b48f8: { const _bp_22a135b48f8 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_22a135b48f8.* = TcType{ .string_ = {} }; break :_box_22a135b48f8 _bp_22a135b48f8; } }));
 // zbr:test/tc_types_test.zbr:104
         std.debug.assert(TcTypes.isAssignable(TcType{ .fn_ref = "foo" }, TcType{ .fn_sig = "MySig" }));
 // zbr:test/tc_types_test.zbr:105
@@ -1640,9 +1640,9 @@ pub const Main = struct {
 // zbr:test/tc_types_test.zbr:113
         std.debug.assert(std.mem.eql(u8, TcTypes.typeName(TcType{ .unknown_ = {} }), "<unknown>"));
 // zbr:test/tc_types_test.zbr:114
-        std.debug.assert(std.mem.eql(u8, TcTypes.typeName(TcType{ .optional = _box_283c65860f8: { const _bp_283c65860f8 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_283c65860f8.* = TcType{ .int_ = {} }; break :_box_283c65860f8 _bp_283c65860f8; } }), "?int"));
+        std.debug.assert(std.mem.eql(u8, TcTypes.typeName(TcType{ .optional = _box_22a135b60f8: { const _bp_22a135b60f8 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_22a135b60f8.* = TcType{ .int_ = {} }; break :_box_22a135b60f8 _bp_22a135b60f8; } }), "?int"));
 // zbr:test/tc_types_test.zbr:115
-        std.debug.assert(std.mem.eql(u8, TcTypes.typeName(TcType{ .optional = _box_283c6586560: { const _bp_283c6586560 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_283c6586560.* = TcType{ .optional = _box_283c65864d8: { const _bp_283c65864d8 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_283c65864d8.* = TcType{ .string_ = {} }; break :_box_283c65864d8 _bp_283c65864d8; } }; break :_box_283c6586560 _bp_283c6586560; } }), "??String"));
+        std.debug.assert(std.mem.eql(u8, TcTypes.typeName(TcType{ .optional = _box_22a135b6560: { const _bp_22a135b6560 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_22a135b6560.* = TcType{ .optional = _box_22a135b64d8: { const _bp_22a135b64d8 = _allocator.create(tc_types.TcType) catch @panic("OOM"); _bp_22a135b64d8.* = TcType{ .string_ = {} }; break :_box_22a135b64d8 _bp_22a135b64d8; } }; break :_box_22a135b6560 _bp_22a135b6560; } }), "??String"));
 // zbr:test/tc_types_test.zbr:116
         const sym_point = TcSymRef.init("Point", TcSymbolKind.struct_);
 // zbr:test/tc_types_test.zbr:117
@@ -1689,8 +1689,8 @@ pub const Main = struct {
         std.debug.print("{s}\n", .{"tc_types_test: all OK"});
     }
 
-    pub fn init() Main {
-        var self: Main = undefined;
+    pub fn init() *Main {
+        const self = _allocator.create(Main) catch @panic("OOM");
         self._type_tag = _ttag_Main;
         return self;
     }

@@ -144,6 +144,11 @@ pub fn generate(
     defer exposed_unions.deinit();
     var exposed_classes = std.StringHashMap(void).init(alloc);
     defer exposed_classes.deinit();
+    var class_names = std.StringHashMap(void).init(alloc);
+    defer class_names.deinit();
+    // Pre-populate class_names from local class declarations so genType can emit
+    // `*ClassName` before genClass is called (e.g. for forward-reference fields).
+    for (module.decls) |decl| if (decl == .class) try class_names.put(decl.class.name, {});
 
     var uses_gui    = false;
     var has_exports = false;
@@ -163,6 +168,7 @@ pub fn generate(
         .union_decls      = &union_decls,
         .exposed_unions   = &exposed_unions,
         .exposed_classes  = &exposed_classes,
+        .class_names      = &class_names,
         .gui_backend      = gui_backend,
         .uses_gui_ptr     = &uses_gui,
         .native_uses      = native_uses,
@@ -989,10 +995,20 @@ fn scanMutationsInExpr(
                         const needs_var: bool = blk: {
                             if (tc_opt) |tc| {
                                 const obj_type = tc.expr_types.get(obj) orelse .unknown;
-                                // User-defined class or cross-module instance: conservative —
-                                // methods take *self, so ANY call may mutate the receiver.
-                                if (obj_type == .named or obj_type == .generic_named or
-                                    obj_type == .cross_module) break :blk true;
+                                // User-defined structs are value types — methods take *Self
+                                // so the receiver variable must be `var` (mutable address).
+                                // Classes and cross-module types are reference types (pointer):
+                                // a `const ptr: *ClassName` can call `*Self` methods without
+                                // `var` since the pointer itself is already the `*Self`.
+                                if (obj_type == .named) {
+                                    const sym = obj_type.named;
+                                    // Structs need var; classes do not.
+                                    if (sym.kind == .struct_ or sym.kind == .interface) break :blk true;
+                                    break :blk false;
+                                }
+                                if (obj_type == .generic_named) break :blk true; // conservative
+                                // cross_module: classes are pointers; no var needed for method call.
+                                if (obj_type == .cross_module) break :blk false;
                                 // Strings are immutable values in Zebra — no method
                                 // mutates a string in-place.  `reverse` is in the
                                 // allow-list for List (which is in-place), but
@@ -1141,6 +1157,11 @@ const Generator = struct {
     /// Populated lazily by `genUse` when the exposed name is a class (non-union) type.
     /// Allows `ClassName(args)` → `ClassName.init(args)` without a class symbol lookup.
     exposed_classes: *std.StringHashMap(void),
+    /// All class names visible in the current compilation unit — local classes
+    /// (populated in genClass) plus exposed cross-module classes (populated in genUse).
+    /// Used by genType to emit `*ClassName` (reference semantics) instead of `ClassName`.
+    /// Structs, enums, and unions are NOT in this set.
+    class_names: *std.StringHashMap(void),
     /// When non-null, we are inside a `try` block.  `raise` breaks the labeled
     /// block (name = try_block_label) and records the error into this variable
     /// instead of returning from the enclosing method.
@@ -3277,14 +3298,14 @@ const Generator = struct {
             const has_sole_same_named_type = blk: {
                 const imp = g.imported_modules orelse break :blk false;
                 const iface = imp.get(alias) orelse break :blk false;
-                // Count only non-union types (value == false).
+                // Count only non-union types.
                 var non_union_count: usize = 0;
                 var it = iface.types.valueIterator();
-                while (it.next()) |is_union| { if (!is_union.*) non_union_count += 1; }
+                while (it.next()) |kind| { if (kind.* != .union_) non_union_count += 1; }
                 if (non_union_count != 1) break :blk false;
                 // The sole non-union type must be named after the alias.
-                const is_union_ptr = iface.types.getPtr(alias) orelse break :blk false;
-                break :blk !is_union_ptr.*;
+                const kind_ptr = iface.types.getPtr(alias) orelse break :blk false;
+                break :blk kind_ptr.* != .union_;
             };
             if (has_sole_same_named_type) {
                 try g.w.print("const {s} = @import(\"{s}.zig\").{s};\n", .{ alias, import_rel, alias });
@@ -3306,11 +3327,14 @@ const Generator = struct {
                     }
                     // Track exposed union/class names for correct construction emit.
                     if (iface_opt) |iface| {
-                        if (iface.types.getPtr(exp_name)) |is_union_ptr| {
-                            if (is_union_ptr.*) {
-                                try g.exposed_unions.put(exp_name, alias);
-                            } else {
-                                try g.exposed_classes.put(exp_name, {});
+                        if (iface.types.getPtr(exp_name)) |kind_ptr| {
+                            switch (kind_ptr.*) {
+                                .union_  => try g.exposed_unions.put(exp_name, alias),
+                                .class   => {
+                                    try g.exposed_classes.put(exp_name, {});
+                                    try g.class_names.put(exp_name, {});  // reference type
+                                },
+                                .struct_, .enum_ => try g.exposed_classes.put(exp_name, {}),
                             }
                         }
                     }
@@ -3511,10 +3535,10 @@ const Generator = struct {
             }
             if (!has_init) {
                 try ig.writeIndent();
-                try ig.w.print("pub fn init() {s} {{\n", .{n.name});
+                try ig.w.print("pub fn init() *{s} {{\n", .{n.name});
                 const dig = ig.indented();
                 try dig.writeIndent();
-                try dig.w.print("var self: {s} = undefined;\n", .{n.name});
+                try dig.w.print("const self = _allocator.create({s}) catch @panic(\"OOM\");\n", .{n.name});
                 try dig.writeIndent();
                 try dig.w.print("self._type_tag = _ttag_{s};\n", .{n.name});
                 try dig.writeIndent();
@@ -4081,8 +4105,13 @@ const Generator = struct {
         }
         // Generic class init returns @This() (the anonymous struct from the comptime fn).
         // Non-generic init returns the named owner type.
+        // Classes (reference types) return a pointer (*ClassName); structs return by value.
         const self_type_name = if (g.is_generic) "@This()" else g.owner;
-        try g.w.print(") {s} {{\n", .{self_type_name});
+        if (g.is_struct_owner) {
+            try g.w.print(") {s} {{\n", .{self_type_name});
+        } else {
+            try g.w.print(") *{s} {{\n", .{self_type_name});
+        }
         const body = n.body orelse &[_]Ast.Stmt{};
         var refs = try collectRefs(body, g.resolve, g.alloc);
         defer refs.deinit();
@@ -4092,7 +4121,14 @@ const Generator = struct {
         defer cv_map.deinit();
         const bg = mg.indented().withMutated(&mut_set).withClosureVars(&cv_map);
         try bg.writeIndent();
-        try bg.w.print("var self: {s} = undefined;\n", .{self_type_name});
+        if (g.is_struct_owner) {
+            try bg.w.print("var self: {s} = undefined;\n", .{self_type_name});
+        } else {
+            // Classes: heap-allocate on the arena so every instance is accessed
+            // through a pointer.  Assignment copies the pointer (aliasing), not the
+            // struct value — this is the standard OO reference-semantics model.
+            try bg.w.print("const self = _allocator.create({s}) catch @panic(\"OOM\");\n", .{self_type_name});
+        }
         // Initialise the type-ID field so `expr is TypeName` works correctly.
         // Structs do NOT have a _type_tag field — skip for those.
         if (!g.is_struct_owner) {
@@ -8770,8 +8806,8 @@ const Generator = struct {
                     const is_xmod_union = blk: {
                         const imp = g.imported_modules orelse break :blk false;
                         const iface = imp.get(mod_alias) orelse break :blk false;
-                        const is_union_ptr = iface.types.getPtr(type_name) orelse break :blk false;
-                        break :blk is_union_ptr.*;
+                        const kind_ptr = iface.types.getPtr(type_name) orelse break :blk false;
+                        break :blk kind_ptr.* == .union_;
                     };
                     if (is_xmod_union) {
                         try g.w.print("{s}.{s}{{ .{s} = ", .{ mod_alias, type_name, variant });
@@ -9850,6 +9886,13 @@ const Generator = struct {
     fn genType(g: Generator, tr: Ast.TypeRef) anyerror!void {
         switch (tr) {
             .named       => |n| {
+                // Classes are reference types: emit `*ClassName` instead of `ClassName`.
+                // Structs, enums, unions, and primitives are value types (no pointer).
+                if (g.class_names.contains(n.name)) {
+                    try g.w.writeAll("*");
+                    try g.w.writeAll(n.name);
+                    return;
+                }
                 // Try static mapping first; fall back to dynamic sized-type emission
                 // for arbitrary-width types like int5, uint3, float7.
                 const zig = zigTypeName(n.name);

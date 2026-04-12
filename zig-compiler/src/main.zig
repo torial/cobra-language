@@ -552,7 +552,7 @@ fn cloneInterface(src: *const TypeChecker.ModuleInterface, alloc: std.mem.Alloca
         var it = src.fields.iterator();
         while (it.next()) |e| try fields.put(try alloc.dupe(u8, e.key_ptr.*), e.value_ptr.*);
     }
-    var types = std.StringHashMap(bool).init(alloc);
+    var types = std.StringHashMap(TypeChecker.TypeKind).init(alloc);
     errdefer types.deinit();
     {
         var it = src.types.iterator();
@@ -621,7 +621,7 @@ fn compileZbrToZig(
         return TypeChecker.ModuleInterface{
             .methods              = std.StringHashMap(TypeChecker.Type).init(alloc),
             .fields               = std.StringHashMap(TypeChecker.Type).init(alloc),
-            .types                = std.StringHashMap(bool).init(alloc),
+            .types                = std.StringHashMap(TypeChecker.TypeKind).init(alloc),
             .throws_methods       = std.StringHashMap(void).init(alloc),
             .boxed_variants       = std.StringHashMap([]const u8).init(alloc),
             .variant_payload_types = std.StringHashMap([]const u8).init(alloc),

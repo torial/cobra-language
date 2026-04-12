@@ -323,6 +323,11 @@ pub const Type = union(enum) {
 /// Exported type surface of a compiled Zebra module, carried across compilation
 /// boundaries so the root file's TypeChecker can resolve cross-module calls.
 ///
+/// Category of a top-level type exported by a module.
+/// Stored in `ModuleInterface.types` so CodeGen can distinguish class (reference
+/// semantics, emitted as `*T`) from struct/enum (value semantics, emitted as `T`).
+pub const TypeKind = enum { class, struct_, union_, enum_ };
+
 /// Keys use "ClassName.memberName" convention.  Only primitive return/field types
 /// are preserved (int, str, bool, etc.); user-defined types resolve to `.unknown`
 /// since Symbol pointers from the dep's arena cannot safely outlive it.
@@ -332,11 +337,10 @@ pub const ModuleInterface = struct {
     /// Field / property types: "ClassName.fieldName" → Type
     fields:  std.StringHashMap(Type),
     /// Exported type names: class, struct, enum, union names declared at top level.
-    /// Value is `true` when the type is a union (discriminated-union / variant type),
-    /// `false` for class/struct/enum.  Used by the Resolver to recognise cross-module
-    /// TypeRefs like `Ast.Expr`, and by CodeGen to decide whether to unwrap a sole
-    /// same-named type on import (unions are skipped in that count).
-    types:   std.StringHashMap(bool),
+    /// Used by the Resolver to recognise cross-module TypeRefs and by CodeGen to:
+    ///   - decide whether to unwrap a sole same-named type on import (unions are skipped)
+    ///   - emit `*ClassName` for class types (reference semantics) vs `StructName` (value)
+    types:   std.StringHashMap(TypeKind),
     /// Subset of `methods` keys for methods declared `throws`.
     /// Used by CodeGen to emit `catch` redirects when a cross-module throwing method
     /// is called inside a `try/catch` block's var initializer.
@@ -395,7 +399,7 @@ pub fn extractModuleInterface(
     errdefer methods.deinit();
     var fields = std.StringHashMap(Type).init(alloc);
     errdefer fields.deinit();
-    var types = std.StringHashMap(bool).init(alloc);
+    var types = std.StringHashMap(TypeKind).init(alloc);
     errdefer types.deinit();
     var throws_methods = std.StringHashMap(void).init(alloc);
     errdefer throws_methods.deinit();
@@ -414,7 +418,7 @@ fn extractFromDecls(
     alloc:                Allocator,
     methods:              *std.StringHashMap(Type),
     fields:               *std.StringHashMap(Type),
-    types:                *std.StringHashMap(bool),
+    types:                *std.StringHashMap(TypeKind),
     throws_methods:       *std.StringHashMap(void),
     boxed_variants:       *std.StringHashMap([]const u8),
     variant_payload_types: *std.StringHashMap([]const u8),
@@ -422,21 +426,21 @@ fn extractFromDecls(
     for (decls) |decl| switch (decl) {
         .class  => |c| {
             const key = try alloc.dupe(u8, c.name);
-            try types.put(key, false); // false = not a union
+            try types.put(key, .class);
             try extractFromMembers(c.name, c.members, resolve, alloc, methods, fields, throws_methods);
         },
         .struct_ => |s| {
             const key = try alloc.dupe(u8, s.name);
-            try types.put(key, false);
+            try types.put(key, .struct_);
             try extractFromMembers(s.name, s.members, resolve, alloc, methods, fields, throws_methods);
         },
         .enum_ => |e| {
             const key = try alloc.dupe(u8, e.name);
-            try types.put(key, false);
+            try types.put(key, .enum_);
         },
         .union_ => |u| {
             const key = try alloc.dupe(u8, u.name);
-            try types.put(key, true); // true = is a union (skipped in sole-type import heuristic)
+            try types.put(key, .union_); // unions skipped in sole-type import heuristic
             // Record variant payload type names for principled branch-binding inference.
             // Also record ^T variants for CodeGen's labeled-block boxing.
             for (u.variants) |v| {
@@ -1753,8 +1757,8 @@ const TypeChecker = struct {
                         if (!std.mem.eql(u8, sym.name, mod_alias)) {
                             if (tc.imported_modules) |imp| {
                                 if (imp.get(mod_alias)) |iface| {
-                                    if (iface.types.getPtr(sym.name)) |is_union_ptr| {
-                                        if (!is_union_ptr.*) {
+                                    if (iface.types.getPtr(sym.name)) |kind_ptr| {
+                                        if (kind_ptr.* != .union_) {
                                             // Non-union exposed type = class/struct constructor call.
                                             return Type{ .cross_module = .{
                                                 .module    = mod_alias,
