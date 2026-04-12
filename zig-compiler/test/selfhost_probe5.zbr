@@ -1,0 +1,279 @@
+# Probe 5: Verify the machinery needed for a selfhost TypeChecker.
+#
+# Key questions answered by this probe:
+#   1. Can a union variant hold ^T (recursive self-referential payload)?
+#   2. When branch-matching `on Type.optional as inner`, can `inner` be
+#      passed to a function expecting Type (auto-deref of ^T)?
+#   3. Can List(Type) be stored inside a union variant (tuple case)?
+#   4. Can Type values be stored in and retrieved from HashMap(str, Type)?
+#   5. Do doubly-nested types work: Type.optional(Type.list_(Type.str_()))?
+#   6. Do mutual recursive methods (inferExpr / checkStmt pattern) work
+#      when both are `throws`?
+
+# ── A minimal Type union mirroring the real TypeChecker.Type ─────────────────
+# Primitives are unit variants; compound types carry ^T or List(Type) payloads.
+
+union Type
+    # Primitives
+    unknown
+    int_
+    float_
+    bool_
+    char_
+    str_
+    void_
+    uint_
+    # Sized numeric (carry bit width as int payload)
+    int_n  as int
+    uint_n as int
+    # Optional and error-union: recursive ^T
+    optional    as ^Type
+    error_union as ^Type
+    # List element type: recursive ^T
+    list_ as ^Type
+    # Named user-defined type (symbol name as str)
+    named as str
+    # Tuple: list of element types
+    tuple as List(Type)
+    # Cross-module: two strings
+    cross_module as CrossModuleRef
+    # Stdlib opaque types (unit variants — no payload needed)
+    string_builder
+    http_response
+    regex
+    gui_context
+
+# Helper struct for cross_module variant (two-string payload).
+struct CrossModuleRef
+    var module    as str
+    var type_name as str
+    cue init(mod as str, tname as str)
+        module    = mod
+        type_name = tname
+
+# ── Type helper class ─────────────────────────────────────────────────────────
+
+class Types
+    shared
+        # Describe a Type as a human-readable string.
+        # Tests: branch on all variants; recursive call with ^T payload; List(Type) iteration.
+        def describe(t as Type) as str
+            branch t
+                on Type.unknown          return "unknown"
+                on Type.int_             return "int"
+                on Type.float_           return "float"
+                on Type.bool_            return "bool"
+                on Type.char_            return "char"
+                on Type.str_             return "str"
+                on Type.void_            return "void"
+                on Type.uint_            return "uint"
+                on Type.int_n  as bits
+                    return "int"  + bits.toString()
+                on Type.uint_n as bits
+                    return "uint" + bits.toString()
+                on Type.optional as inner
+                    # inner is ^Type — does passing it to describe() auto-deref?
+                    return "?" + Types.describe(inner)
+                on Type.error_union as inner
+                    return "!" + Types.describe(inner)
+                on Type.list_ as elem
+                    return "List(" + Types.describe(elem) + ")"
+                on Type.named as n
+                    return n
+                on Type.tuple as elems
+                    var parts = ""
+                    var first = true
+                    for e in elems
+                        if not first
+                            parts = parts + ", "
+                        parts = parts + Types.describe(e)
+                        first = false
+                    return "(" + parts + ")"
+                on Type.cross_module as ref
+                    return ref.module + "." + ref.type_name
+                on Type.string_builder   return "StringBuilder"
+                on Type.http_response    return "HttpResponse"
+                on Type.regex            return "Regex"
+                on Type.gui_context      return "Gui"
+
+        # Check two Types for equality.
+        # Tests: branch with guard pattern (on X as v if v == ...).
+        def eql(a as Type, b as Type) as bool
+            branch a
+                on Type.int_            return b == Type.int_()
+                on Type.str_            return b == Type.str_()
+                on Type.bool_           return b == Type.bool_()
+                on Type.optional as ia
+                    branch b
+                        on Type.optional as ib
+                            return Types.eql(ia, ib)
+                        else
+                            return false
+                on Type.list_ as ea
+                    branch b
+                        on Type.list_ as eb
+                            return Types.eql(ea, eb)
+                        else
+                            return false
+                on Type.named as na
+                    branch b
+                        on Type.named as nb
+                            return na == nb
+                        else
+                            return false
+                else
+                    return false
+
+# ── Minimal type environment ──────────────────────────────────────────────────
+# Tests: HashMap(str, Type) — store and retrieve complex Type values.
+
+class TypeEnv
+    var types as HashMap(str, Type)
+    cue init()
+        types = HashMap()
+
+    def define(name as str, t as Type)
+        types.put(name, t)
+
+    def lookup(name as str) as Type
+        if types.contains(name)
+            return types.fetch(name)
+        return Type.unknown()
+
+    def contains(name as str) as bool
+        return types.contains(name)
+
+# ── Mutual recursion with throws ──────────────────────────────────────────────
+# Tests: inferExpr / checkStmt mutual call pattern; both throw.
+
+union Expr
+    int_lit  as int
+    str_lit  as str
+    neg      as ^Expr
+    add      as ExprPair
+
+struct ExprPair
+    var left  as ^Expr
+    var right as ^Expr
+    cue init(l as Expr, r as Expr)
+        left  = l
+        right = r
+
+class Checker
+    var errors as List(str)
+    cue init()
+        errors = List()
+
+    def inferExpr(e as Expr) as Type throws
+        branch e
+            on Expr.int_lit
+                return Type.int_()
+            on Expr.str_lit
+                return Type.str_()
+            on Expr.neg as inner
+                var t = inferExpr(inner)?
+                if t != Type.int_() and t != Type.float_()
+                    raise "neg requires numeric type"
+                return t
+            on Expr.add as pair
+                var lt = inferExpr(pair.left)?
+                var rt = inferExpr(pair.right)?
+                if lt != Type.int_()
+                    raise "add requires int left"
+                if rt != Type.int_()
+                    raise "add requires int right"
+                return Type.int_()
+
+    def checkExpr(e as Expr, expected as Type) throws
+        var actual = inferExpr(e)?
+        if not Types.eql(actual, expected)
+            raise "type mismatch"
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+class Main
+    shared
+        def main
+            # 1. Basic unit variants
+            assert Types.describe(Type.int_())    == "int"
+            assert Types.describe(Type.str_())    == "str"
+            assert Types.describe(Type.unknown()) == "unknown"
+            assert Types.describe(Type.void_())   == "void"
+            print "1. unit variants OK"
+
+            # 2. Payload variants
+            assert Types.describe(Type.int_n(32))  == "int32"
+            assert Types.describe(Type.uint_n(64)) == "uint64"
+            assert Types.describe(Type.named("Point")) == "Point"
+            print "2. payload variants OK"
+
+            # 3. Recursive ^T: optional and list
+            var opt_int  = Type.optional(Type.int_())
+            var list_str = Type.list_(Type.str_())
+            assert Types.describe(opt_int)  == "?int"
+            assert Types.describe(list_str) == "List(str)"
+            print "3. recursive ^T OK"
+
+            # 4. Doubly nested: ?List(str) and List(?int)
+            var opt_list = Type.optional(Type.list_(Type.str_()))
+            var list_opt = Type.list_(Type.optional(Type.int_()))
+            assert Types.describe(opt_list) == "?List(str)"
+            assert Types.describe(list_opt) == "List(?int)"
+            print "4. doubly nested OK"
+
+            # 5. Tuple variant (List(Type) inside union)
+            var elems = List(Type)()
+            elems.add(Type.int_())
+            elems.add(Type.str_())
+            var tup = Type.tuple(elems)
+            assert Types.describe(tup) == "(int, str)"
+            print "5. tuple (List inside union) OK"
+
+            # 6. cross_module variant (struct payload)
+            var xmod = Type.cross_module(CrossModuleRef("math", "Vector"))
+            assert Types.describe(xmod) == "math.Vector"
+            print "6. cross_module struct payload OK"
+
+            # 7. HashMap(str, Type) storage and retrieval
+            var env = TypeEnv()
+            env.define("x", Type.int_())
+            env.define("y", Type.optional(Type.str_()))
+            env.define("z", Type.list_(Type.int_()))
+            assert Types.describe(env.lookup("x")) == "int"
+            assert Types.describe(env.lookup("y")) == "?str"
+            assert Types.describe(env.lookup("z")) == "List(int)"
+            assert env.contains("x")
+            assert not env.contains("w")
+            print "7. HashMap(str, Type) OK"
+
+            # 8. Type.eql
+            assert  Types.eql(Type.int_(), Type.int_())
+            assert not Types.eql(Type.int_(), Type.str_())
+            assert  Types.eql(Type.optional(Type.int_()), Type.optional(Type.int_()))
+            assert not Types.eql(Type.optional(Type.int_()), Type.optional(Type.str_()))
+            assert  Types.eql(Type.list_(Type.str_()), Type.list_(Type.str_()))
+            print "8. Type.eql OK"
+
+            # 9. Mutual recursion with throws: inferExpr / checkExpr
+            var ch = Checker()
+            var lit  = Expr.int_lit(42)
+            var slit = Expr.str_lit("hi")
+            var neg  = Expr.neg(Expr.int_lit(5))
+            var add  = Expr.add(ExprPair(Expr.int_lit(1), Expr.int_lit(2)))
+
+            var t1 = ch.inferExpr(lit)?
+            assert Types.eql(t1, Type.int_())
+
+            var t2 = ch.inferExpr(slit)?
+            assert Types.eql(t2, Type.str_())
+
+            var t3 = ch.inferExpr(neg)?
+            assert Types.eql(t3, Type.int_())
+
+            var t4 = ch.inferExpr(add)?
+            assert Types.eql(t4, Type.int_())
+
+            ch.checkExpr(lit, Type.int_())?
+            print "9. mutual recursion + throws OK"
+
+            print "selfhost_probe5: all OK"

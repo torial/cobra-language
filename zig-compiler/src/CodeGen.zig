@@ -1252,8 +1252,13 @@ const Generator = struct {
     ///   `items as List(str)`                       → "[]const u8"
     /// Return the declared TypeRef for a field of the current class, or null.
     fn resolveFieldTypeRef(g: Generator, field_name: []const u8) ?Ast.TypeRef {
-        const cls = g.owner_class orelse return null;
-        for (cls.members) |m| {
+        // Use owner_class.members when in a class body; fall back to owner_members
+        // (which is set for structs via withStruct) so that struct field ^T boxing works.
+        const members: []const Ast.Decl = if (g.owner_class) |cls|
+            cls.members
+        else
+            g.owner_members;
+        for (members) |m| {
             const vd: *const Ast.DeclVar = switch (m) {
                 .var_ => |v| v,
                 else  => continue,
@@ -7683,14 +7688,69 @@ const Generator = struct {
             }
             if (is_union) {
                 if (on.binding) |bname| {
-                    try bg.w.print(" => |{s}| {{\n", .{bname});
+                    // Determine payload kind for this variant:
+                    //   .ref_payload  → ^T: Zig binding gives *T; emit auto-deref local.
+                    //   .list_payload → List(T): inject list_loop_vars so nested for-in
+                    //                   knows to iterate via .items.
+                    //   .other        → plain value payload; no special treatment.
+                    const PayloadKind = enum { ref_payload, list_payload, other };
+                    const payload_kind: PayloadKind = blk: {
+                        const v = on.values[0];
+                        const variant_name: []const u8 = if (v.* == .member)
+                            v.member.member
+                        else if (v.* == .call and v.call.callee.* == .member)
+                            v.call.callee.member.member
+                        else break :blk .other;
+                        // Extract union type name from the value expression object
+                        // (e.g. `Type.optional` → "Type", `Type.optional()` → "Type").
+                        const union_name: []const u8 = if (v.* == .member and v.member.object.* == .ident)
+                            v.member.object.ident.name
+                        else if (v.* == .call and v.call.callee.* == .member and
+                                 v.call.callee.member.object.* == .ident)
+                            v.call.callee.member.object.ident.name
+                        else break :blk .other;
+                        const du = g.union_decls.get(union_name) orelse break :blk .other;
+                        for (du.variants) |vr| {
+                            if (std.mem.eql(u8, vr.name, variant_name)) {
+                                if (vr.payload) |pl| {
+                                    if (pl == .ref_to) break :blk .ref_payload;
+                                    if (pl == .generic and
+                                        std.mem.eql(u8, pl.generic.name, "List"))
+                                        break :blk .list_payload;
+                                }
+                                break :blk .other;
+                            }
+                        }
+                        break :blk .other;
+                    };
+                    if (payload_kind == .ref_payload) {
+                        // Pointer payload: |bname_ptr| { const bname = bname_ptr.*; ... }
+                        try bg.w.print(" => |{s}_ptr| {{\n", .{bname});
+                        try bg.indented().writeIndent();
+                        try bg.indented().w.print("const {s} = {s}_ptr.*;\n", .{ bname, bname });
+                    } else {
+                        try bg.w.print(" => |{s}| {{\n", .{bname});
+                    }
+                    // For List(T) payload bindings, inject list_loop_vars so that any
+                    // `for elem in bname` loop inside the body uses genForInList (.items).
+                    if (payload_kind == .list_payload) {
+                        var llv = std.StringHashMap(void).init(g.alloc);
+                        try llv.put(bname, {});
+                        var body_gen = bg.indented();
+                        body_gen.list_loop_vars = &llv;
+                        try body_gen.genStmts(on.body);
+                        llv.deinit();
+                    } else {
+                        try bg.indented().genStmts(on.body);
+                    }
                 } else {
                     try bg.w.writeAll(" => {\n");
+                    try bg.indented().genStmts(on.body);
                 }
             } else {
                 try bg.w.writeAll(" => {\n");
+                try bg.indented().genStmts(on.body);
             }
-            try bg.indented().genStmts(on.body);
             try bg.writeIndent();
             try bg.w.writeAll("},\n");
         }
@@ -8249,9 +8309,24 @@ const Generator = struct {
                         break :sw;
                     }
                 }
+                // Auto-deref for ^T struct/class fields: `pair.left` → `pair.left.*`
+                // when the field's declared TypeRef is ref_to (^T in Zebra).
+                // Zig stores the pointer; Zebra semantics expose the dereffed value.
+                const field_needs_deref = blk: {
+                    const tc = g.tc orelse break :blk false;
+                    const obj_type = tc.expr_types.get(e.object) orelse break :blk false;
+                    if (obj_type != .named) break :blk false;
+                    const sym = obj_type.named;
+                    const scope = sym.own_scope orelse break :blk false;
+                    const field_sym = scope.lookupLocal(e.member) orelse break :blk false;
+                    if (field_sym.decl != .var_) break :blk false;
+                    const field_tr = field_sym.decl.var_.type_ orelse break :blk false;
+                    break :blk field_tr == .ref_to;
+                };
                 try g.genExpr(e.object);
                 try g.w.writeAll(".");
                 try g.w.writeAll(e.member);
+                if (field_needs_deref) try g.w.writeAll(".*");
             },
             .call  => |e| try g.genCall(e),
 
@@ -8709,11 +8784,13 @@ const Generator = struct {
                                 break :blk iface.boxed_variants.get(key);
                             };
                             if (box_type) |inner_name| {
-                                try g.w.writeAll("box: { const _p = try _allocator.create(");
+                                const box_lbl = try std.fmt.allocPrint(g.alloc, "_box_{x}", .{@intFromPtr(e)});
+                                defer g.alloc.free(box_lbl);
+                                try g.w.print("{s}: {{ const _bp_{x} = try _allocator.create(", .{ box_lbl, @intFromPtr(e) });
                                 try g.w.print("{s}.{s}", .{ mod_alias, inner_name });
-                                try g.w.writeAll("); _p.* = ");
+                                try g.w.print("); _bp_{x}.* = ", .{@intFromPtr(e)});
                                 try g.genExpr(e.args[0].value);
-                                try g.w.writeAll("; break :box _p; }");
+                                try g.w.print("; break :{s} _bp_{x}; }}", .{ box_lbl, @intFromPtr(e) });
                             } else {
                                 try g.genExpr(e.args[0].value);
                             }
@@ -8754,11 +8831,13 @@ const Generator = struct {
                             }
                         }
                         if (box_inner) |inner| {
-                            try g.w.writeAll("box: { const _p = try _allocator.create(");
+                            const box_lbl = try std.fmt.allocPrint(g.alloc, "_box_{x}", .{@intFromPtr(e)});
+                            defer g.alloc.free(box_lbl);
+                            try g.w.print("{s}: {{ const _bp_{x} = try _allocator.create(", .{ box_lbl, @intFromPtr(e) });
                             try g.genType(inner.*);
-                            try g.w.writeAll("); _p.* = ");
+                            try g.w.print("); _bp_{x}.* = ", .{@intFromPtr(e)});
                             try g.genExpr(e.args[0].value);
-                            try g.w.writeAll("; break :box _p; }");
+                            try g.w.print("; break :{s} _bp_{x}; }}", .{ box_lbl, @intFromPtr(e) });
                         } else {
                             try g.genExpr(e.args[0].value);
                         }
@@ -9356,9 +9435,26 @@ const Generator = struct {
                     }
                     break :blk false;
                 };
+                // For user-defined union == / != use std.meta.eql, which Zig requires
+                // instead of the raw == operator (tagged unions are not comparable with ==).
+                const left_is_union = blk: {
+                    if (either_nil or left_is_str or right_is_str) break :blk false;
+                    if (g.tc) |tc| {
+                        const t = tc.expr_types.get(e.left) orelse .unknown;
+                        break :blk t == .named and t.named.kind == .union_;
+                    }
+                    break :blk false;
+                };
                 if (left_is_str or right_is_str) {
                     if (e.op == .ne) try g.w.writeAll("!");
                     try g.w.writeAll("std.mem.eql(u8, ");
+                    try g.genExpr(e.left);
+                    try g.w.writeAll(", ");
+                    try g.genExpr(e.right);
+                    try g.w.writeAll(")");
+                } else if (left_is_union) {
+                    if (e.op == .ne) try g.w.writeAll("!");
+                    try g.w.writeAll("std.meta.eql(");
                     try g.genExpr(e.left);
                     try g.w.writeAll(", ");
                     try g.genExpr(e.right);
