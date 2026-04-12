@@ -1,0 +1,260 @@
+# codegen_test.zbr -- Phase 7 integration tests for codegen.zbr
+#
+# Tests:
+#   Part 1 — Writer class (shared output buffer)
+#   Part 2 — Generator struct (context-forking, withOwner/indented)
+#   Part 3 — genType primitives
+#   Part 4 — genType generics (List, HashMap, Result)
+#   Part 5 — genType nilable / ref_to / error_union
+#   Part 6 — genEnum
+#   Part 7 — genUnion
+#   Part 8 — genStruct (fields + method stub)
+#   Part 9 — genClass (_type_tag + fields)
+#   Part 10 — genFieldDecl (StringBuilder special case)
+
+use codegen exposing Writer, Generator
+use cg_helpers exposing StrSet
+use ast exposing Decl, DeclEnum, DeclUnion, DeclStruct, DeclClass, DeclVar, DeclMethod, DeclInit, EnumMember, UnionVariant, TypeRef, NamedTypeRef, GenericTypeRef, TupleTypeRef, Modifiers, Param, Span, ParamMode, TypeParam
+
+def zspan() as Span
+    return Span(0, 0, 0, 0)
+
+def zmods() as Modifiers
+    return Modifiers(false, false, false, false, false, false)
+
+def zshared() as Modifiers
+    return Modifiers(false, false, false, true, false, false)
+
+def namedTr(name as str) as TypeRef
+    return TypeRef.named(NamedTypeRef(zspan(), name))
+
+def nilableTr(inner as TypeRef) as TypeRef
+    return TypeRef.nilable(inner)
+
+def refToTr(inner as TypeRef) as TypeRef
+    return TypeRef.ref_to(inner)
+
+def errUnionTr(inner as TypeRef) as TypeRef
+    return TypeRef.error_union(inner)
+
+def listTr(elem as TypeRef) as TypeRef
+    var args = List(TypeRef)()
+    args.add(elem)
+    return TypeRef.generic(GenericTypeRef(zspan(), "List", args))
+
+def hashTr(k as TypeRef, v as TypeRef) as TypeRef
+    var args = List(TypeRef)()
+    args.add(k)
+    args.add(v)
+    return TypeRef.generic(GenericTypeRef(zspan(), "HashMap", args))
+
+def makeGen() as Generator
+    var w = Writer()
+    var cn = StrSet()
+    return Generator(w, 0, "", false, false, false, false, nil, "", "", cn)
+
+# ── Part 1: Writer ────────────────────────────────────────────────────────────
+
+def testWriter
+    var w = Writer()
+    w.emit("hello")
+    w.emit(" world")
+    assert w.result() == "hello world", "Writer basic"
+    print "1. Writer: OK"
+
+# ── Part 2: Generator context-forking ────────────────────────────────────────
+
+def testGenerator
+    var g = makeGen()
+    assert g.indent == 0
+    assert g.owner == ""
+    assert not g.in_method
+
+    var g2 = g.withOwner("Foo")
+    assert g2.owner == "Foo"
+    assert g.owner == ""  # original unchanged
+
+    var g3 = g2.indented()
+    assert g3.indent == 1
+    assert g2.indent == 0  # original unchanged
+
+    var g4 = g3.asMethod()
+    assert g4.in_method
+    assert not g3.in_method  # original unchanged
+
+    print "2. Generator context-forking: OK"
+
+# ── Part 3: genType primitives ────────────────────────────────────────────────
+
+def testGenTypePrimitive
+    var g = makeGen()
+
+    g.genType(namedTr("int"))
+    assert g.w.result() == "i64", "int -> i64"
+
+    var g2 = makeGen()
+    g2.genType(namedTr("str"))
+    assert g2.w.result() == "[]const u8", "str -> []const u8"
+
+    var g3 = makeGen()
+    g3.genType(namedTr("float"))
+    assert g3.w.result() == "f64", "float -> f64"
+
+    var g4 = makeGen()
+    g4.genType(namedTr("bool"))
+    assert g4.w.result() == "bool", "bool -> bool"
+
+    var g5 = makeGen()
+    g5.genType(namedTr("char"))
+    assert g5.w.result() == "u21", "char -> u21"
+
+    var g6 = makeGen()
+    g6.genType(TypeRef.void_)
+    assert g6.w.result() == "void", "void_ -> void"
+
+    var g7 = makeGen()
+    g7.genType(namedTr("MyStruct"))
+    assert g7.w.result() == "MyStruct", "user type unchanged"
+
+    # Class type → *ClassName
+    var cn = StrSet()
+    cn.add("MyClass")
+    var w8 = Writer()
+    var g8 = Generator(w8, 0, "", false, false, false, false, nil, "", "", cn)
+    g8.genType(namedTr("MyClass"))
+    assert g8.w.result() == "*MyClass", "class -> *ClassName"
+
+    print "3. genType primitives: OK"
+
+# ── Part 4: genType generics ─────────────────────────────────────────────────
+
+def testGenTypeGenerics
+    var g = makeGen()
+    g.genType(listTr(namedTr("int")))
+    assert g.w.result() == "std.ArrayList(i64)", "List(int)"
+
+    var g2 = makeGen()
+    g2.genType(hashTr(namedTr("str"), namedTr("int")))
+    assert g2.w.result() == "std.StringHashMap(i64)", "HashMap(str, int)"
+
+    var g3 = makeGen()
+    var rargs = List(TypeRef)()
+    rargs.add(namedTr("int"))
+    rargs.add(namedTr("str"))
+    g3.genType(TypeRef.generic(GenericTypeRef(zspan(), "Result", rargs)))
+    assert g3.w.result() == "_Result(i64, []const u8)", "Result(int, str)"
+
+    print "4. genType generics: OK"
+
+# ── Part 5: genType nilable / ref_to / error_union ───────────────────────────
+
+def testGenTypeCompound
+    var g = makeGen()
+    g.genType(nilableTr(namedTr("int")))
+    assert g.w.result() == "?i64", "nilable int"
+
+    var g2 = makeGen()
+    g2.genType(errUnionTr(namedTr("str")))
+    assert g2.w.result() == "anyerror![]const u8", "error_union str"
+
+    var g3 = makeGen()
+    g3.genType(refToTr(namedTr("Node")))
+    assert g3.w.result() == "*Node", "ref_to Node"
+
+    print "5. genType compound: OK"
+
+# ── Part 6: genEnum ───────────────────────────────────────────────────────────
+
+def testGenEnum
+    var members = List(EnumMember)()
+    members.add(EnumMember(zspan(), "red", nil))
+    members.add(EnumMember(zspan(), "green", nil))
+    members.add(EnumMember(zspan(), "blue", nil))
+    var n = DeclEnum(zspan(), zmods(), "Color", nil, members)
+
+    var g = makeGen()
+    g.genEnum(n)
+    var out = g.w.result()
+    assert out == "pub const Color = enum {\n    red,\n    green,\n    blue,\n};\n\n", "genEnum output: '${out}'"
+    print "6. genEnum: OK"
+
+# ── Part 7: genUnion ──────────────────────────────────────────────────────────
+
+def testGenUnion
+    var variants = List(UnionVariant)()
+    variants.add(UnionVariant(zspan(), "int_", namedTr("int")))
+    variants.add(UnionVariant(zspan(), "str_", namedTr("str")))
+    variants.add(UnionVariant(zspan(), "void_", nil))
+    var n = DeclUnion(zspan(), zmods(), "Value", variants)
+
+    var g = makeGen()
+    g.genUnion(n)
+    var out = g.w.result()
+    assert out == "pub const Value = union(enum) {\n    int_: i64,\n    str_: []const u8,\n    void_,\n};\n\n", "genUnion output: '${out}'"
+    print "7. genUnion: OK"
+
+# ── Part 8: genStruct (fields) ────────────────────────────────────────────────
+
+def testGenStruct
+    var members = List(Decl)()
+    var fld1 = DeclVar(zspan(), zmods(), "x", namedTr("int"), nil, false)
+    var fld2 = DeclVar(zspan(), zmods(), "name", namedTr("str"), nil, false)
+    members.add(Decl.var_(fld1))
+    members.add(Decl.var_(fld2))
+    var n = DeclStruct(zspan(), zmods(), "Point", List(TypeRef)(), members)
+
+    var g = makeGen()
+    g.genStruct(n)
+    var out = g.w.result()
+    assert "pub const Point = struct {" in out, "struct header"
+    assert "x: i64," in out, "field x"
+    assert "name: []const u8," in out, "field name"
+    assert "};\n\n" in out, "struct footer"
+    print "8. genStruct: OK"
+
+# ── Part 9: genClass (_type_tag + fields) ────────────────────────────────────
+
+def testGenClass
+    var members = List(Decl)()
+    var fld = DeclVar(zspan(), zmods(), "value", namedTr("int"), nil, false)
+    members.add(Decl.var_(fld))
+    var cls = DeclClass(zspan(), zmods(), "Counter", List(TypeParam)(), List(TypeRef)(), List(TypeRef)(), members)
+
+    var g = makeGen()
+    g.genClass(cls)
+    var out = g.w.result()
+    assert "pub const Counter = struct {" in out, "class header"
+    assert "_type_tag: u64 = _ttag_Counter," in out, "_type_tag field"
+    assert "value: i64," in out, "field value"
+    assert "_ttag_Counter: u64 = _zbr_hash" in out, "type tag constant"
+    # After genClass, Counter should be in class_names
+    assert g.class_names.contains_("Counter"), "class registered"
+    print "9. genClass: OK"
+
+# ── Part 10: genFieldDecl StringBuilder ──────────────────────────────────────
+
+def testGenFieldDeclSB
+    var g = makeGen()
+    var ig = g.indented()
+    var fld = DeclVar(zspan(), zmods(), "buf", namedTr("StringBuilder"), nil, false)
+    ig.genFieldDecl(fld)
+    var out = g.w.result()
+    assert out == "    buf: std.ArrayList(u8) = .{},\n", "StringBuilder field: '${out}'"
+    print "10. genFieldDecl StringBuilder: OK"
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+class Main
+    shared
+        def main
+            testWriter()
+            testGenerator()
+            testGenTypePrimitive()
+            testGenTypeGenerics()
+            testGenTypeCompound()
+            testGenEnum()
+            testGenUnion()
+            testGenStruct()
+            testGenClass()
+            testGenFieldDeclSB()
+            print "codegen_test: all OK"

@@ -1011,11 +1011,23 @@ fn scanMutationsInExpr(
                                     const sym = obj_type.named;
                                     // Structs need var; classes do not.
                                     if (sym.kind == .struct_ or sym.kind == .interface) break :blk true;
+                                    // Exposed cross-module symbols (from `use Mod exposing TypeName`)
+                                    // have kind=.module and could be structs (value types needing *Self).
+                                    // Conservatively require var — harmless for class pointers.
+                                    if (sym.kind == .module) break :blk true;
                                     break :blk false;
                                 }
                                 if (obj_type == .generic_named) break :blk true; // conservative
-                                // cross_module: classes are pointers; no var needed for method call.
-                                if (obj_type == .cross_module) break :blk false;
+                                // cross_module: look up the module interface to distinguish
+                                // structs (need var — value type with *Self methods) from
+                                // classes (don't need var — already a pointer).  Fall back
+                                // to conservative (needs var) when the interface is absent.
+                                if (obj_type == .cross_module) {
+                                    // TODO: thread imported_modules through here for exact lookup.
+                                    // For now, conservatively require var so that cross-module
+                                    // struct method calls compile (extra var on classes is harmless).
+                                    break :blk true;
+                                }
                                 // Strings are immutable values in Zebra — no method
                                 // mutates a string in-place.  `reverse` is in the
                                 // allow-list for List (which is in-place), but

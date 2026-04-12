@@ -1,0 +1,520 @@
+# codegen.zbr — Phase 7 self-hosting: CodeGen main body (Phase 7a)
+#
+# Port of src/CodeGen.zig to Zebra.  Consumes the AST produced by the parser
+# (selfhost/ast.zbr) and emits Zig source.
+#
+# Phase 7a scope (this file):
+#   Writer       — output sink class (reference type for shared writes across
+#                  Generator context forks)
+#   Generator    — struct with context-forking methods
+#   genType      — TypeRef → Zig type string
+#   genFieldDecl — field declaration inside class/struct body
+#   genEnum      — pub const Name = enum { … };
+#   genUnion     — pub const Name = union(enum) { … };
+#   genStruct    — pub const Name = struct { fields + stub methods };
+#   genClass     — pub const Name = struct { _type_tag + fields + stub methods };
+#
+# Deferred to Phase 7b:
+#   - genMethod body: statement/expression dispatch
+#   - Resolver-dependent self. prefix injection
+#   - TC-dependent type specialisation
+#   - genModule preamble embedding
+
+use ast exposing Decl, DeclEnum, DeclUnion, DeclStruct, DeclClass, DeclVar, DeclMethod, DeclInit, DeclProperty, EnumMember, UnionVariant, TypeRef, NamedTypeRef, GenericTypeRef, TupleTypeRef, Module, Param, Modifiers, Span
+use cg_helpers exposing StrSet
+
+# ── Writer ────────────────────────────────────────────────────────────────────
+# Reference-type output sink.  All Generator copies (produced by struct-except
+# context forks) share the same Writer instance and write to the same buffer.
+
+class Writer
+    var _buf as StringBuilder
+
+    cue init()
+        _buf = StringBuilder()
+
+    def emit(s as str)
+        _buf.append(s)
+
+    def result() as str
+        return _buf.build()
+
+# ── Generator ─────────────────────────────────────────────────────────────────
+
+struct Generator
+    var w                     as Writer   # shared output (class = reference type)
+    var indent                as int      # current indentation depth (4 spaces/level)
+    var owner                 as str      # enclosing type name ("" at module scope)
+    var in_method             as bool     # true inside method/init/property body
+    var is_struct_owner       as bool     # true when owner is a struct (not class)
+    var is_generic            as bool     # true inside a generic class body
+    var current_method_throws as bool     # true when current method is `throws`
+    var try_block_label       as str?     # non-nil inside a `try` block
+    var catch_var             as str      # catch clause binding name ("" if none)
+    var source_file           as str      # source path for comment markers
+    var class_names           as StrSet  # names of classes → emit *ClassName in genType
+
+    cue init(w as Writer, indent as int, owner as str, in_method as bool,
+             is_struct_owner as bool, is_generic as bool,
+             current_method_throws as bool, try_block_label as str?,
+             catch_var as str, source_file as str, class_names as StrSet)
+        this.w                     = w
+        this.indent                = indent
+        this.owner                 = owner
+        this.in_method             = in_method
+        this.is_struct_owner       = is_struct_owner
+        this.is_generic            = is_generic
+        this.current_method_throws = current_method_throws
+        this.try_block_label       = try_block_label
+        this.catch_var             = catch_var
+        this.source_file           = source_file
+        this.class_names           = class_names
+
+    # ── Context-adjustment helpers ────────────────────────────────────────────
+
+    def withOwner(new_owner as str) as Generator
+        var g = this except
+            owner = new_owner
+        return g
+
+    def asMethod as Generator
+        var g = this except
+            in_method = true
+        return g
+
+    def asStructOwner as Generator
+        var g = this except
+            is_struct_owner = true
+        return g
+
+    def indented as Generator
+        var g = this except
+            indent = indent + 1
+        return g
+
+    def withThrows as Generator
+        var g = this except
+            current_method_throws = true
+        return g
+
+    def withTryLabel(label as str, err_var as str) as Generator
+        var g = this except
+            try_block_label = label
+            catch_var       = err_var
+        return g
+
+    def withCatchVar(name as str) as Generator
+        var g = this except
+            catch_var = name
+        return g
+
+    # ── Output helpers ────────────────────────────────────────────────────────
+
+    def writeIndent
+        var i = 0
+        while i < indent
+            w.emit("    ")
+            i += 1
+
+    def line(s as str)
+        writeIndent()
+        w.emit(s)
+        w.emit("\n")
+
+    # ── genType ───────────────────────────────────────────────────────────────
+    # Emit the Zig type string for a Zebra TypeRef.
+
+    def genType(tr as TypeRef)
+        branch tr
+            on TypeRef.named as n
+                # Classes are reference types: emit *ClassName.
+                if class_names.contains_(n.name)
+                    w.emit("*")
+                    w.emit(n.name)
+                    return
+                # StringBuilder -> std.ArrayList(u8)
+                if n.name == "StringBuilder"
+                    w.emit("std.ArrayList(u8)")
+                    return
+                # Cross-module qualified type (contains a dot): emit as-is.
+                if "." in n.name
+                    w.emit(n.name)
+                    return
+                # Primitive type mapping
+                w.emit(zigPrimitive(n.name))
+
+            on TypeRef.nilable as inner
+                # ^TypeRef payload — inner is ^TypeRef, auto-deref applies when
+                # passed to genType.  Self-referential cycle-break (?* vs ?) is
+                # Phase 7b; for now emit the simple optional form.
+                w.emit("?")
+                genType(inner)
+
+            on TypeRef.error_union as inner
+                w.emit("anyerror!")
+                genType(inner)
+
+            on TypeRef.ref_to as inner
+                # ^T? → ?*T  (natural form for optional recursive refs)
+                var emitted = false
+                branch inner
+                    on TypeRef.nilable as ni2
+                        w.emit("?*")
+                        genType(ni2)
+                        emitted = true
+                    else
+                        pass
+                if not emitted
+                    w.emit("*")
+                    genType(inner)
+
+            on TypeRef.generic as gtr
+                genGenericType(gtr)
+
+            on TypeRef.stream as inner
+                w.emit("anytype /* stream: ")
+                genType(inner)
+                w.emit(" */")
+
+            on TypeRef.void_
+                w.emit("void")
+
+            on TypeRef.same_
+                if owner != ""
+                    w.emit(owner)
+                else
+                    w.emit("@This()")
+
+            on TypeRef.tuple as ttr
+                # (T1, T2) → struct { T1, T2 }
+                w.emit("struct { ")
+                var j = 0
+                while j < ttr.elems.count()
+                    if j > 0
+                        w.emit(", ")
+                    genType(ttr.elems.at(j))
+                    j += 1
+                w.emit(" }")
+
+    def genGenericType(gtr as GenericTypeRef)
+        if gtr.name == "Result"
+            w.emit("_Result(")
+            if gtr.args.count() >= 1
+                genType(gtr.args.at(0))
+            else
+                w.emit("void")
+            w.emit(", ")
+            if gtr.args.count() >= 2
+                genType(gtr.args.at(1))
+            else
+                w.emit("[]const u8")
+            w.emit(")")
+            return
+        if gtr.name == "HashMap"
+            var key_str = gtr.args.count() >= 1 and isStringTypeRef(gtr.args.at(0))
+            if key_str
+                w.emit("std.StringHashMap(")
+                if gtr.args.count() >= 2
+                    genType(gtr.args.at(1))
+                else
+                    w.emit("anytype")
+                w.emit(")")
+            else
+                w.emit("std.AutoHashMap(")
+                var ai = 0
+                while ai < gtr.args.count()
+                    if ai > 0
+                        w.emit(", ")
+                    genType(gtr.args.at(ai))
+                    ai += 1
+                w.emit(")")
+            return
+        if gtr.name == "List"
+            w.emit("std.ArrayList(")
+            if gtr.args.count() >= 1
+                genType(gtr.args.at(0))
+            else
+                w.emit("[]const u8")
+            w.emit(")")
+            return
+        # Generic user type: Name(T, …)
+        w.emit(gtr.name)
+        if gtr.args.count() > 0
+            w.emit("(")
+            var bi = 0
+            while bi < gtr.args.count()
+                if bi > 0
+                    w.emit(", ")
+                genType(gtr.args.at(bi))
+                bi += 1
+            w.emit(")")
+
+    # Map a Zebra primitive type name to the Zig type name.
+    # Returns the original name unchanged for user-defined types.
+    def zigPrimitive(name as str) as str
+        if name == "int"
+            return "i64"
+        if name == "uint"
+            return "u64"
+        if name == "float"
+            return "f64"
+        if name == "bool"
+            return "bool"
+        if name == "char"
+            return "u21"
+        if name == "str"
+            return "[]const u8"
+        if name == "String"
+            return "[]const u8"
+        if name == "int8"
+            return "i8"
+        if name == "int16"
+            return "i16"
+        if name == "int32"
+            return "i32"
+        if name == "int64"
+            return "i64"
+        if name == "int128"
+            return "i128"
+        if name == "uint8"
+            return "u8"
+        if name == "uint16"
+            return "u16"
+        if name == "uint32"
+            return "u32"
+        if name == "uint64"
+            return "u64"
+        if name == "uint128"
+            return "u128"
+        if name == "float16"
+            return "f16"
+        if name == "float32"
+            return "f32"
+        if name == "float64"
+            return "f64"
+        if name == "float128"
+            return "f128"
+        return name
+
+    def isStringTypeRef(tr as TypeRef) as bool
+        branch tr
+            on TypeRef.named as n
+                return n.name == "str" or n.name == "String"
+            else
+                pass
+        return false
+
+    # ── genFieldDecl ──────────────────────────────────────────────────────────
+    # Emit a single field inside a class or struct: `name: Type,`
+
+    def genFieldDecl(n as DeclVar)
+        writeIndent()
+        w.emit(n.name)
+        w.emit(": ")
+        if n.type_ != nil
+            var tr = n.type_ to!
+            # StringBuilder field: emit concrete Zig type with empty default.
+            branch tr
+                on TypeRef.named as nt
+                    if nt.name == "StringBuilder"
+                        w.emit("std.ArrayList(u8) = .{},\n")
+                        return
+                else
+                    pass
+            genType(tr)
+        else
+            w.emit("anytype")
+        w.emit(",\n")
+
+    # ── genEnum ───────────────────────────────────────────────────────────────
+
+    def genEnum(n as DeclEnum)
+        writeIndent()
+        w.emit("pub const ")
+        w.emit(n.name)
+        w.emit(" = enum")
+        if n.base != nil
+            w.emit("(")
+            genType(n.base to!)
+            w.emit(")")
+        w.emit(" {\n")
+        var ig = indented()
+        for m in n.members
+            ig.writeIndent()
+            ig.w.emit(m.name)
+            ig.w.emit(",\n")
+        writeIndent()
+        w.emit("};\n\n")
+
+    # ── genUnion ──────────────────────────────────────────────────────────────
+
+    def genUnion(n as DeclUnion)
+        writeIndent()
+        w.emit("pub const ")
+        w.emit(n.name)
+        w.emit(" = union(enum) {\n")
+        var ig = indented()
+        for v in n.variants
+            ig.writeIndent()
+            ig.w.emit(v.name)
+            if v.payload != nil
+                ig.w.emit(": ")
+                ig.genType(v.payload to!)
+            ig.w.emit(",\n")
+        writeIndent()
+        w.emit("};\n\n")
+
+    # ── genStruct ─────────────────────────────────────────────────────────────
+
+    def genStruct(n as DeclStruct)
+        writeIndent()
+        w.emit("pub const ")
+        w.emit(n.name)
+        w.emit(" = struct {\n")
+        var ig0 = indented()
+        var ig1 = ig0.withOwner(n.name)
+        var ig  = ig1.asStructOwner()
+        # Fields first
+        for decl in n.members
+            branch decl
+                on Decl.var_ as fld
+                    ig.genFieldDecl(fld)
+                else
+                    pass
+        # Methods and init
+        for decl in n.members
+            branch decl
+                on Decl.method as m
+                    ig.genMethodSig(n.name, m, false)
+                on Decl.init as ini
+                    ig.genInitSig(n.name, ini, false)
+                else
+                    pass
+        writeIndent()
+        w.emit("};\n\n")
+
+    # ── genClass ──────────────────────────────────────────────────────────────
+
+    def genClass(n as DeclClass)
+        class_names.add(n.name)
+        writeIndent()
+        w.emit("pub const ")
+        w.emit(n.name)
+        w.emit(" = struct {\n")
+        var ig0 = indented()
+        var ig  = ig0.withOwner(n.name)
+        # _type_tag discriminant for `is` checks
+        ig.line("_type_tag: u64 = _ttag_" + n.name + ",")
+        # Fields
+        for decl in n.members
+            branch decl
+                on Decl.var_ as fld
+                    ig.genFieldDecl(fld)
+                else
+                    pass
+        # Methods and init
+        for decl in n.members
+            branch decl
+                on Decl.method as m
+                    ig.genMethodSig(n.name, m, true)
+                on Decl.init as ini
+                    ig.genInitSig(n.name, ini, true)
+                on Decl.property as prop
+                    ig.genPropertySig(n.name, prop)
+                else
+                    pass
+        writeIndent()
+        w.emit("};\n")
+        # Type tag constant: computed as a comptime FNV-1a hash of the class name.
+        w.emit("const _ttag_")
+        w.emit(n.name)
+        w.emit(": u64 = _zbr_hash(\"")
+        w.emit(n.name)
+        w.emit("\");\n\n")
+
+    # ── Method/init/property stubs (Phase 7a) ────────────────────────────────
+    # Phase 7a: emit signature + stub body.  Phase 7b will replace the body.
+
+    def genMethodSig(type_name as str, m as DeclMethod, is_class as bool)
+        writeIndent()
+        w.emit("pub fn ")
+        w.emit(m.name)
+        w.emit("(")
+        if not m.mods.is_shared
+            if is_class
+                w.emit("self: *")
+            else
+                w.emit("self: *")
+            w.emit(type_name)
+            if m.params.count() > 0
+                w.emit(", ")
+        genParamList(m.params)
+        w.emit(") ")
+        if m.throws_
+            w.emit("anyerror!")
+        if m.return_type != nil
+            genType(m.return_type to!)
+        else
+            w.emit("void")
+        w.emit(" {\n")
+        var ig = indented()
+        if not m.mods.is_shared
+            ig.line("_ = self; // TODO Phase 7b")
+        else
+            ig.line("// TODO Phase 7b")
+        writeIndent()
+        w.emit("}\n")
+
+    def genInitSig(type_name as str, ini as DeclInit, is_class as bool)
+        writeIndent()
+        w.emit("pub fn init(")
+        genParamList(ini.params)
+        w.emit(") ")
+        if is_class
+            w.emit("*")
+        w.emit(type_name)
+        w.emit(" {\n")
+        var ig = indented()
+        if is_class
+            ig.writeIndent()
+            ig.w.emit("const _self = _allocator.create(")
+            ig.w.emit(type_name)
+            ig.w.emit(") catch @panic(\"OOM\");\n")
+            ig.line("return _self; // TODO Phase 7b")
+        else
+            ig.writeIndent()
+            ig.w.emit("return ")
+            ig.w.emit(type_name)
+            ig.w.emit("{}; // TODO Phase 7b\n")
+        writeIndent()
+        w.emit("}\n")
+
+    def genPropertySig(type_name as str, prop as DeclProperty)
+        writeIndent()
+        w.emit("pub fn ")
+        w.emit(prop.name)
+        w.emit("(self: *")
+        w.emit(type_name)
+        w.emit(") ")
+        if prop.type_ != nil
+            genType(prop.type_ to!)
+        else
+            w.emit("void")
+        w.emit(" {\n")
+        var ig = indented()
+        ig.line("_ = self; // TODO Phase 7b")
+        writeIndent()
+        w.emit("}\n")
+
+    def genParamList(params as List(Param))
+        var first = true
+        for p in params
+            if not first
+                w.emit(", ")
+            first = false
+            w.emit(p.name)
+            w.emit(": ")
+            if p.type_ != nil
+                genType(p.type_ to!)
+            else
+                w.emit("anytype")

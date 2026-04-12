@@ -2389,6 +2389,24 @@ const TypeChecker = struct {
                     }
                     // No scope match but object is a union — still a variant constructor.
                     if (class_sym.kind == .union_) return obj_type;
+                    // Exposed cross-module type: `Generator` from `use codegen exposing Generator`
+                    // has kind=.module but own_scope is null (it's a reference, not the definition).
+                    // Treat instance method calls as cross_module lookups so the return type propagates.
+                    if (class_sym.kind == .module and class_sym.decl == .use) {
+                        const use_decl = class_sym.decl.use;
+                        const last_dot = std.mem.lastIndexOf(u8, use_decl.path, ".");
+                        const mod_alias = if (last_dot) |d| use_decl.path[d + 1..] else use_decl.path;
+                        if (tc.imported_modules) |imp| {
+                            if (imp.get(mod_alias)) |iface| {
+                                const key = try std.fmt.allocPrint(tc.map_alloc,
+                                    "{s}.{s}", .{ class_sym.name, mem.member });
+                                defer tc.map_alloc.free(key);
+                                if (iface.methods.get(key)) |ret| if (ret != .unknown) return ret;
+                                if (iface.instance_method_return_types.get(key)) |tname|
+                                    return Type{ .cross_module = .{ .module = mod_alias, .type_name = tname } };
+                            }
+                        }
+                    }
                 }
                 // Extension method lookup: "TypeName.method" in ext_methods map.
                 if (tc.extTypeName(obj_type)) |tname| {
