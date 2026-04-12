@@ -433,3 +433,32 @@ When a `TypeChecker` class holds a `TcScope` field (`_scope as TcScope`), the as
 **All existing tests pass.** No observable change to existing Zebra programs; classes were already treated as pass-by-value objects whose mutation methods happened to use pointer receivers in the generated Zig.
 
 When a class field has a cross-module class type (`var _scope as TcScope` in typechecker.zbr), assignment from a locally-constructed instance (`var s = TcScope()`) fails with a spurious type mismatch because the constructor returns `.cross_module` while the annotation resolves to `.named`. The fix (compiler bug #6 above) makes `eql` and `isAssignable` treat these as compatible. The local-variable intermediate was still needed to allow `s.push(...)` before `_scope = s`.
+
+---
+
+## Phase 6 Readiness Probe (2026-04-11)
+
+**Probe:** `test/selfhost_probe6.zbr` — 7 pattern checks. All pass.
+
+### Patterns confirmed working
+- `"""..."""` multiline strings as first-class values — content with embedded `"`, whitespace, multiple lines: all correct
+- `struct except` for context-copy (`withOwner` pattern) — one-field or multi-field overrides work
+- `StringBuilder` — `StringBuilder()`, `.append()`, `.build()`
+- `branch` with 16 union variants — all dispatch paths correct
+- Long if-else dispatch chains (60+ conditions across 3 type categories) — clean
+- Struct methods that return modified struct copies (`this except { ... }`) — works step-by-step
+
+### Bugs found and fixed during probe (1 compiler bug, commit a8ecb5cc)
+1. **`genVarExcept`/`genAssignExcept`: `this except` inside struct method** — emitted `var _tmp = self` (copying pointer) instead of `var _tmp = self.*` (copying struct value). Fixed by detecting `base == .this and in_method and is_struct_owner` and appending `.*`.
+
+### Discovered language constraints for Phase 6 porting
+- **`#` is the comment character** — `//` is floor-division; using `// ...` comments causes parse errors when the line contains non-identifier chars
+- **Union variant syntax** — `name as Type` (not `name(Type)`)
+- **Single-char single-quoted literals are `char` (`u8`)** — `'x'` is char, `"x"` is str; use double-quotes for single-char strings in expression positions
+- **Struct method chaining on temporaries fails** — `s.method1().method2()` — the temporary from `method1()` is `*const T` but `method2` wants `*T`; must assign each step to a `var` before the next call
+- **`class Main` + `shared def main` required for allocator init** — top-level `def main()` never initializes `_allocator`; allocating operations (string interp, repeat, etc.) segfault
+
+### Implications for Phase 6
+- The `Generator` struct's `withOwner`/`withClass`/`withIndent` pattern (copy-modify-return) works step-by-step but **cannot be chained** in a single expression. Each context fork must assign to a local `var`.
+- The preamble (~1,876 lines of embedded Zig code in `genModule`) can use `"""..."""` strings — newlines in the source become actual newlines in the string value, and `\n` escape sequences in the source pass through as literal `\n` in output (correct for emitting Zig code that contains escape sequences)
+- `StringBuilder` is the right output accumulator for the code generator methods
