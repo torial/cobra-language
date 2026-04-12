@@ -357,6 +357,34 @@ pub const ModuleInterface = struct {
     ///   `on Parser.PNode.module_ as m` → m has type cross_module{ "Parser", "PModule" }
     /// This makes `m.field` member accesses type-checkable against the module interface.
     variant_payload_types: std.StringHashMap([]const u8),
+    /// Instance field type names for user-defined (non-primitive) field types.
+    /// Key: "ClassName.fieldName", Value: type name string (e.g. "TcScope", "AstNode").
+    /// Populated when `simpleTypeFromRef` returns `.unknown` for a named user type.
+    /// Used by `inferMember` to return a `cross_module` type for cross-module field
+    /// accesses, enabling chained member inference: `inst.field.method()`.
+    instance_field_types: std.StringHashMap([]const u8),
+    /// Instance method return type names for user-defined return types.
+    /// Key: "ClassName.methodName", Value: type name string.
+    /// Mirrors `instance_field_types` for method calls on cross-module instances.
+    instance_method_return_types: std.StringHashMap([]const u8),
+    /// Set of fields declared as `^T` (non-optional ref_to pointer) in structs/classes.
+    /// Key: "TypeName.fieldName" — present iff the field is `^T` (NOT `^T?`).
+    /// Used by CodeGen to emit `field.*` auto-deref for cross-module struct field accesses.
+    ref_fields: std.StringHashMap(void),
+    /// Set of fields declared as `^T?` (optional ref_to pointer) in structs/classes.
+    /// Key: "TypeName.fieldName" — present iff the field is `^T?`.
+    /// Used by CodeGen to emit `field.?.*` in `expr to!` unwrap operations.
+    optional_ref_fields: std.StringHashMap(void),
+    /// Per-struct `cue init` parameter boxing flags.
+    /// Key: struct name (e.g. "ExprBinary").
+    /// Value: owned bool slice — one entry per param, true iff that param is `^T`.
+    /// Used by CodeGen to auto-box `T` → `*T` when calling cross-module constructors.
+    struct_init_ref_params: std.StringHashMap([]bool),
+    /// Element type names for struct/class fields declared as `List(T)`.
+    /// Key: "ClassName.fieldName", Value: element type name string.
+    /// Used by TypeChecker's `inferForInElemType` to type loop vars when iterating
+    /// cross-module List(T) fields, enabling ref_fields deref for `^T` elements.
+    list_field_elem_types: std.StringHashMap([]const u8),
 
     pub fn deinit(self: *ModuleInterface) void {
         const alloc = self.methods.allocator;
@@ -382,6 +410,32 @@ pub const ModuleInterface = struct {
         var vpv = self.variant_payload_types.valueIterator();
         while (vpv.next()) |v| alloc.free(v.*);
         self.variant_payload_types.deinit();
+        var iftk = self.instance_field_types.keyIterator();
+        while (iftk.next()) |k| alloc.free(k.*);
+        var iftv = self.instance_field_types.valueIterator();
+        while (iftv.next()) |v| alloc.free(v.*);
+        self.instance_field_types.deinit();
+        var imrtk = self.instance_method_return_types.keyIterator();
+        while (imrtk.next()) |k| alloc.free(k.*);
+        var imrtv = self.instance_method_return_types.valueIterator();
+        while (imrtv.next()) |v| alloc.free(v.*);
+        self.instance_method_return_types.deinit();
+        var rfk = self.ref_fields.keyIterator();
+        while (rfk.next()) |k| alloc.free(k.*);
+        self.ref_fields.deinit();
+        var orfk = self.optional_ref_fields.keyIterator();
+        while (orfk.next()) |k| alloc.free(k.*);
+        self.optional_ref_fields.deinit();
+        var sirpk = self.struct_init_ref_params.keyIterator();
+        while (sirpk.next()) |k| alloc.free(k.*);
+        var sirpv = self.struct_init_ref_params.valueIterator();
+        while (sirpv.next()) |v| alloc.free(v.*);
+        self.struct_init_ref_params.deinit();
+        var lfetk = self.list_field_elem_types.keyIterator();
+        while (lfetk.next()) |k| alloc.free(k.*);
+        var lfetv = self.list_field_elem_types.valueIterator();
+        while (lfetv.next()) |v| alloc.free(v.*);
+        self.list_field_elem_types.deinit();
     }
 };
 
@@ -407,32 +461,50 @@ pub fn extractModuleInterface(
     errdefer boxed_variants.deinit();
     var variant_payload_types = std.StringHashMap([]const u8).init(alloc);
     errdefer variant_payload_types.deinit();
+    var instance_field_types = std.StringHashMap([]const u8).init(alloc);
+    errdefer instance_field_types.deinit();
+    var instance_method_return_types = std.StringHashMap([]const u8).init(alloc);
+    errdefer instance_method_return_types.deinit();
+    var ref_fields = std.StringHashMap(void).init(alloc);
+    errdefer ref_fields.deinit();
+    var optional_ref_fields = std.StringHashMap(void).init(alloc);
+    errdefer optional_ref_fields.deinit();
+    var struct_init_ref_params = std.StringHashMap([]bool).init(alloc);
+    errdefer struct_init_ref_params.deinit();
+    var list_field_elem_types = std.StringHashMap([]const u8).init(alloc);
+    errdefer list_field_elem_types.deinit();
 
-    try extractFromDecls(module.decls, resolve, alloc, &methods, &fields, &types, &throws_methods, &boxed_variants, &variant_payload_types);
-    return .{ .methods = methods, .fields = fields, .types = types, .throws_methods = throws_methods, .boxed_variants = boxed_variants, .variant_payload_types = variant_payload_types };
+    try extractFromDecls(module.decls, resolve, alloc, &methods, &fields, &types, &throws_methods, &boxed_variants, &variant_payload_types, &instance_field_types, &instance_method_return_types, &ref_fields, &optional_ref_fields, &struct_init_ref_params, &list_field_elem_types);
+    return .{ .methods = methods, .fields = fields, .types = types, .throws_methods = throws_methods, .boxed_variants = boxed_variants, .variant_payload_types = variant_payload_types, .instance_field_types = instance_field_types, .instance_method_return_types = instance_method_return_types, .ref_fields = ref_fields, .optional_ref_fields = optional_ref_fields, .struct_init_ref_params = struct_init_ref_params, .list_field_elem_types = list_field_elem_types };
 }
 
 fn extractFromDecls(
-    decls:                []const Ast.Decl,
-    resolve:              *const Resolver.ResolveResult,
-    alloc:                Allocator,
-    methods:              *std.StringHashMap(Type),
-    fields:               *std.StringHashMap(Type),
-    types:                *std.StringHashMap(TypeKind),
-    throws_methods:       *std.StringHashMap(void),
-    boxed_variants:       *std.StringHashMap([]const u8),
-    variant_payload_types: *std.StringHashMap([]const u8),
+    decls:                        []const Ast.Decl,
+    resolve:                      *const Resolver.ResolveResult,
+    alloc:                        Allocator,
+    methods:                      *std.StringHashMap(Type),
+    fields:                       *std.StringHashMap(Type),
+    types:                        *std.StringHashMap(TypeKind),
+    throws_methods:               *std.StringHashMap(void),
+    boxed_variants:               *std.StringHashMap([]const u8),
+    variant_payload_types:        *std.StringHashMap([]const u8),
+    instance_field_types:         *std.StringHashMap([]const u8),
+    instance_method_return_types: *std.StringHashMap([]const u8),
+    ref_fields:                   *std.StringHashMap(void),
+    optional_ref_fields:          *std.StringHashMap(void),
+    struct_init_ref_params:       *std.StringHashMap([]bool),
+    list_field_elem_types:        *std.StringHashMap([]const u8),
 ) !void {
     for (decls) |decl| switch (decl) {
         .class  => |c| {
             const key = try alloc.dupe(u8, c.name);
             try types.put(key, .class);
-            try extractFromMembers(c.name, c.members, resolve, alloc, methods, fields, throws_methods);
+            try extractFromMembers(c.name, c.members, resolve, alloc, methods, fields, throws_methods, instance_field_types, instance_method_return_types, ref_fields, optional_ref_fields, struct_init_ref_params, list_field_elem_types);
         },
         .struct_ => |s| {
             const key = try alloc.dupe(u8, s.name);
             try types.put(key, .struct_);
-            try extractFromMembers(s.name, s.members, resolve, alloc, methods, fields, throws_methods);
+            try extractFromMembers(s.name, s.members, resolve, alloc, methods, fields, throws_methods, instance_field_types, instance_method_return_types, ref_fields, optional_ref_fields, struct_init_ref_params, list_field_elem_types);
         },
         .enum_ => |e| {
             const key = try alloc.dupe(u8, e.name);
@@ -472,19 +544,38 @@ fn extractFromDecls(
                 }
             }
         },
-        .namespace => |ns| try extractFromDecls(ns.decls, resolve, alloc, methods, fields, types, throws_methods, boxed_variants, variant_payload_types),
+        .namespace => |ns| try extractFromDecls(ns.decls, resolve, alloc, methods, fields, types, throws_methods, boxed_variants, variant_payload_types, instance_field_types, instance_method_return_types, ref_fields, optional_ref_fields, struct_init_ref_params, list_field_elem_types),
+        // Top-level functions: record return type name when it is a user-defined type.
+        // Key = function name (no class prefix); value = type name string.
+        // Used by inferCall so `analyzeEscapes(...)` return value can be typed as cross_module.
+        .method => |m| {
+            if (m.return_type) |*rt| {
+                if (namedTypeStr(rt, resolve)) |ret_name| {
+                    const key = try alloc.dupe(u8, m.name);
+                    errdefer alloc.free(key);
+                    const val = try alloc.dupe(u8, ret_name);
+                    try instance_method_return_types.put(key, val);
+                }
+            }
+        },
         else => {},
     };
 }
 
 fn extractFromMembers(
-    class_name:     []const u8,
-    members:        []const Ast.Decl,
-    resolve:        *const Resolver.ResolveResult,
-    alloc:          Allocator,
-    methods:        *std.StringHashMap(Type),
-    fields:         *std.StringHashMap(Type),
-    throws_methods: *std.StringHashMap(void),
+    class_name:                   []const u8,
+    members:                      []const Ast.Decl,
+    resolve:                      *const Resolver.ResolveResult,
+    alloc:                        Allocator,
+    methods:                      *std.StringHashMap(Type),
+    fields:                       *std.StringHashMap(Type),
+    throws_methods:               *std.StringHashMap(void),
+    instance_field_types:         *std.StringHashMap([]const u8),
+    instance_method_return_types: *std.StringHashMap([]const u8),
+    ref_fields:                   *std.StringHashMap(void),
+    optional_ref_fields:          *std.StringHashMap(void),
+    struct_init_ref_params:       *std.StringHashMap([]bool),
+    list_field_elem_types:        *std.StringHashMap([]const u8),
 ) !void {
     for (members) |m| switch (m) {
         .method => |meth| {
@@ -500,18 +591,112 @@ fn extractFromMembers(
                 const tk = try alloc.dupe(u8, key);
                 try throws_methods.put(tk, {});
             }
+            // For user-defined return types, record the type name so cross-module
+            // method calls can return a typed cross_module value instead of .unknown.
+            if (ret == .unknown) {
+                if (meth.return_type) |*rt| {
+                    if (namedTypeStr(rt, resolve)) |tname| {
+                        const imrt_key = try alloc.dupe(u8, key);
+                        const imrt_val = try alloc.dupe(u8, tname);
+                        try instance_method_return_types.put(imrt_key, imrt_val);
+                    }
+                }
+            }
         },
         .var_  => |v| {
             const t = simpleTypeFromRef(if (v.type_) |*tr| tr else null, resolve, alloc);
             const key = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ class_name, v.name });
             try fields.put(key, t);
+            if (v.type_) |*tr| {
+                // For user-defined field types, record the type name for cross-module
+                // chained access: inst.field.method() needs inst.field to be typed.
+                if (t == .unknown) {
+                    if (namedTypeStr(tr, resolve)) |tname| {
+                        const ift_key = try alloc.dupe(u8, key);
+                        const ift_val = try alloc.dupe(u8, tname);
+                        try instance_field_types.put(ift_key, ift_val);
+                    }
+                }
+                // Track List(T) fields so for-in iterations can type the loop variable.
+                if (tr.* == .generic and std.mem.eql(u8, tr.generic.name, "List") and
+                    tr.generic.args.len > 0)
+                {
+                    const elem_tr = &tr.generic.args[0];
+                    if (namedTypeStr(elem_tr, resolve)) |elem_name| {
+                        const lfet_key = try alloc.dupe(u8, key);
+                        const lfet_val = try alloc.dupe(u8, elem_name);
+                        try list_field_elem_types.put(lfet_key, lfet_val);
+                    }
+                }
+                // Track ^T and ^T? fields for cross-module auto-deref:
+                //   ^T  (ref_to non-nilable) → ref_fields: emit `field.*`
+                //   ^T? (ref_to wrapping nilable) → optional_ref_fields: emit `field.?.*` on to!
+                if (tr.* == .ref_to) {
+                    const is_optional_ref = tr.ref_to.* == .nilable;
+                    const rf_key = try alloc.dupe(u8, key);
+                    if (is_optional_ref) {
+                        try optional_ref_fields.put(rf_key, {});
+                    } else {
+                        try ref_fields.put(rf_key, {});
+                    }
+                }
+            }
         },
         .property => |p| {
             const t = simpleTypeFromRef(if (p.type_) |*tr| tr else null, resolve, alloc);
             const key = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ class_name, p.name });
             try fields.put(key, t);
+            if (t == .unknown) {
+                if (p.type_) |*tr| {
+                    if (namedTypeStr(tr, resolve)) |tname| {
+                        const ift_key = try alloc.dupe(u8, key);
+                        const ift_val = try alloc.dupe(u8, tname);
+                        try instance_field_types.put(ift_key, ift_val);
+                    }
+                }
+            }
+        },
+        .init => |ci| {
+            // Record per-param boxing flags for cross-module constructor calls.
+            // For each param, true iff the param is `^T` (ref_to).
+            if (ci.params.len > 0) {
+                var flags = try alloc.alloc(bool, ci.params.len);
+                for (ci.params, 0..) |p, i| {
+                    flags[i] = if (p.type_) |pt| pt == .ref_to else false;
+                }
+                // Only store if at least one param needs boxing.
+                const any_ref = for (flags) |f| { if (f) break true; } else false;
+                if (any_ref) {
+                    const sirp_key = try alloc.dupe(u8, class_name);
+                    try struct_init_ref_params.put(sirp_key, flags);
+                } else {
+                    alloc.free(flags);
+                }
+            }
         },
         else => {},
+    };
+}
+
+/// Extract the string name of a user-defined (non-builtin) type from a TypeRef.
+/// Returns the name if the TypeRef resolves to a symbol (user-defined type),
+/// or null for builtins, generics, and other compound types.
+/// Unwraps `^T` (ref_to) to get the inner named type.
+///
+/// IMPORTANT: `tr` must be a pointer into the AST arena (not a stack copy).
+/// `resolve.types` is keyed by arena `*const Ast.NamedTypeRef` pointers; a
+/// by-value switch would produce stack pointers that never match.
+fn namedTypeStr(tr: *const Ast.TypeRef, resolve: *const Resolver.ResolveResult) ?[]const u8 {
+    return switch (tr.*) {
+        .named  => |*n| blk: {
+            const resolved = resolve.types.get(n) orelse break :blk null;
+            break :blk switch (resolved) {
+                .symbol  => n.name,
+                .builtin => null,
+            };
+        },
+        .ref_to => |inner| namedTypeStr(inner, resolve), // inner is *Ast.TypeRef — unwrap ^T
+        else    => null,
     };
 }
 
@@ -1179,6 +1364,25 @@ const TypeChecker = struct {
                                         }
                                     }
                                 }
+                                // ③ Subject is already a `.cross_module` type (e.g. inferred
+                                //    from a `^T` field like `a.target` where target: ^Expr).
+                                //    We have the module and union type name directly; look up
+                                //    the variant payload in that module's interface.
+                                if (subj_type == .cross_module) {
+                                    const cm = subj_type.cross_module;
+                                    if (tc.imported_modules) |imp| {
+                                        if (imp.get(cm.module)) |iface| {
+                                            const lookup_key = std.fmt.allocPrint(tc.map_alloc, "{s}.{s}", .{ cm.type_name, variant }) catch continue;
+                                            defer tc.map_alloc.free(lookup_key);
+                                            if (iface.variant_payload_types.get(lookup_key)) |payload_struct_name| {
+                                                try tc.narrowed_types.put(bname, .{ .cross_module = .{
+                                                    .module    = cm.module,
+                                                    .type_name = payload_struct_name,
+                                                }});
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1562,8 +1766,14 @@ const TypeChecker = struct {
                     const key = try std.fmt.allocPrint(tc.map_alloc,
                         "{s}.{s}", .{ cm.type_name, e.member });
                     defer tc.map_alloc.free(key);
-                    if (iface.fields.get(key))  |t| return t;
-                    if (iface.methods.get(key)) |t| return t;
+                    if (iface.fields.get(key))  |t| if (t != .unknown) return t;
+                    if (iface.methods.get(key)) |t| if (t != .unknown) return t;
+                    // For user-defined field types: return a typed cross_module value
+                    // so chained access (inst.field.method()) stays typed.
+                    if (iface.instance_field_types.get(key)) |tname|
+                        return Type{ .cross_module = .{ .module = cm.module, .type_name = tname } };
+                    if (iface.instance_method_return_types.get(key)) |tname|
+                        return Type{ .cross_module = .{ .module = cm.module, .type_name = tname } };
                 }
             }
         }
@@ -1677,6 +1887,31 @@ const TypeChecker = struct {
             const t = tc.expr_types.get(iter) orelse .unknown;
             if (t == .csv_row) return .string;
         }
+        // Cross-module field: `c.args` where `c` has cross_module type and `args` is List(T).
+        // Look up list_field_elem_types in the imported module interface.
+        if (iter.* == .member) {
+            const mem = iter.member;
+            if (tc.imported_modules) |imp| {
+                // Check narrowed_types first (branch-bound vars like `c` from `on Expr.call as c`
+                // are stored there, not in expr_types).
+                const obj_type = blk: {
+                    if (mem.object.* == .ident) {
+                        if (tc.narrowed_types.get(mem.object.ident.name)) |t| break :blk t;
+                    }
+                    break :blk tc.expr_types.get(mem.object) orelse .unknown;
+                };
+                if (obj_type == .cross_module) {
+                    const cm = obj_type.cross_module;
+                    if (imp.get(cm.module)) |iface| {
+                        const key = std.fmt.allocPrint(tc.map_alloc, "{s}.{s}", .{ cm.type_name, mem.member }) catch return .unknown;
+                        defer tc.map_alloc.free(key);
+                        if (iface.list_field_elem_types.get(key)) |elem_name| {
+                            return Type{ .cross_module = .{ .module = cm.module, .type_name = elem_name } };
+                        }
+                    }
+                }
+            }
+        }
         // for_num loop var → int (handled at the call site)
         return .unknown;
     }
@@ -1765,6 +2000,15 @@ const TypeChecker = struct {
                                                 .type_name = sym.name,
                                             }};
                                         }
+                                    }
+                                    // Exposed top-level function with a user-defined return type:
+                                    // e.g. `analyzeEscapes` returns `StrSet`.
+                                    // The key is just the function name (no class prefix).
+                                    if (iface.instance_method_return_types.get(sym.name)) |ret_name| {
+                                        return Type{ .cross_module = .{
+                                            .module    = mod_alias,
+                                            .type_name = ret_name,
+                                        }};
                                     }
                                 }
                             }
@@ -2104,8 +2348,13 @@ const TypeChecker = struct {
                             const key = try std.fmt.allocPrint(tc.map_alloc,
                                 "{s}.{s}", .{ cm.type_name, mem.member });
                             defer tc.map_alloc.free(key);
-                            if (iface.methods.get(key)) |ret| return ret;
-                            if (iface.fields.get(key))  |ret| return ret;
+                            if (iface.methods.get(key)) |ret| if (ret != .unknown) return ret;
+                            if (iface.fields.get(key))  |ret| if (ret != .unknown) return ret;
+                            // For user-defined return types: return a typed cross_module value.
+                            if (iface.instance_method_return_types.get(key)) |tname|
+                                return Type{ .cross_module = .{ .module = cm.module, .type_name = tname } };
+                            if (iface.instance_field_types.get(key)) |tname|
+                                return Type{ .cross_module = .{ .module = cm.module, .type_name = tname } };
                         }
                     }
                 }

@@ -544,6 +544,13 @@ fn exprCallIsThrows(
     imported_modules: ?*const std.StringHashMap(TypeChecker.ModuleInterface),
     owner_members:    []const Ast.Decl,
 ) bool {
+    // Bare function call (callee is a plain ident, not a member expression).
+    // e.g. `someFunc()` where `someFunc` is a top-level or same-class function.
+    if (e.callee.* == .ident) {
+        const sym = resolve.exprs.get(&e.callee.ident) orelse return false;
+        if (sym.decl == .method) return sym.decl.method.throws;
+        return false;
+    }
     if (e.callee.* != .member) return false;
     const mem = e.callee.member;
     // `.method()` syntax: callee is `this.method_name` — walk owner members.
@@ -7120,9 +7127,10 @@ const Generator = struct {
             return true;
         }
         if (std.mem.eql(u8, method, "build")) {
-            // sb.build() → sb.items  (non-allocating slice into the buffer)
+            // sb.build() → owned slice; toOwnedSlice transfers ownership so the
+            // deferred deinit becomes a no-op (ArrayList is empty after transfer).
             try g.genExpr(object);
-            try g.w.writeAll(".items");
+            try g.w.writeAll(".toOwnedSlice(_allocator) catch @panic(\"OOM\")");
             return true;
         }
         if (std.mem.eql(u8, method, "clear")) {
@@ -7746,16 +7754,28 @@ const Generator = struct {
                                  v.call.callee.member.object.* == .ident)
                             v.call.callee.member.object.ident.name
                         else break :blk .other;
-                        const du = g.union_decls.get(union_name) orelse break :blk .other;
-                        for (du.variants) |vr| {
-                            if (std.mem.eql(u8, vr.name, variant_name)) {
-                                if (vr.payload) |pl| {
-                                    if (pl == .ref_to) break :blk .ref_payload;
-                                    if (pl == .generic and
-                                        std.mem.eql(u8, pl.generic.name, "List"))
-                                        break :blk .list_payload;
+                        if (g.union_decls.get(union_name)) |du| {
+                            // Same-module union: inspect AST payload directly.
+                            for (du.variants) |vr| {
+                                if (std.mem.eql(u8, vr.name, variant_name)) {
+                                    if (vr.payload) |pl| {
+                                        if (pl == .ref_to) break :blk .ref_payload;
+                                        if (pl == .generic and
+                                            std.mem.eql(u8, pl.generic.name, "List"))
+                                            break :blk .list_payload;
+                                    }
+                                    break :blk .other;
                                 }
-                                break :blk .other;
+                            }
+                        } else if (g.exposed_unions.get(union_name)) |mod_alias| {
+                            // Cross-module union: consult boxed_variants in imported interface.
+                            // boxed_variants key = "UnionName.variantName" → inner type name (non-null iff ^T).
+                            if (g.imported_modules) |imp| {
+                                if (imp.get(mod_alias)) |iface| {
+                                    const bv_key = std.fmt.allocPrint(g.alloc, "{s}.{s}", .{ union_name, variant_name }) catch break :blk .other;
+                                    defer g.alloc.free(bv_key);
+                                    if (iface.boxed_variants.contains(bv_key)) break :blk .ref_payload;
+                                }
                             }
                         }
                         break :blk .other;
@@ -8365,13 +8385,27 @@ const Generator = struct {
                 const field_needs_deref = blk: {
                     const tc = g.tc orelse break :blk false;
                     const obj_type = tc.expr_types.get(e.object) orelse break :blk false;
-                    if (obj_type != .named) break :blk false;
-                    const sym = obj_type.named;
-                    const scope = sym.own_scope orelse break :blk false;
-                    const field_sym = scope.lookupLocal(e.member) orelse break :blk false;
-                    if (field_sym.decl != .var_) break :blk false;
-                    const field_tr = field_sym.decl.var_.type_ orelse break :blk false;
-                    break :blk field_tr == .ref_to;
+                    // ① Same-module named type: inspect the scope directly.
+                    if (obj_type == .named) {
+                        const sym = obj_type.named;
+                        const scope = sym.own_scope orelse break :blk false;
+                        const field_sym = scope.lookupLocal(e.member) orelse break :blk false;
+                        if (field_sym.decl != .var_) break :blk false;
+                        const field_tr = field_sym.decl.var_.type_ orelse break :blk false;
+                        break :blk field_tr == .ref_to;
+                    }
+                    // ② Cross-module type: consult ref_fields in the imported interface.
+                    if (obj_type == .cross_module) {
+                        const cm = obj_type.cross_module;
+                        if (g.imported_modules) |imp| {
+                            if (imp.get(cm.module)) |iface| {
+                                const key = std.fmt.allocPrint(g.alloc, "{s}.{s}", .{ cm.type_name, e.member }) catch break :blk false;
+                                defer g.alloc.free(key);
+                                break :blk iface.ref_fields.contains(key);
+                            }
+                        }
+                    }
+                    break :blk false;
                 };
                 try g.genExpr(e.object);
                 try g.w.writeAll(".");
@@ -8447,8 +8481,24 @@ const Generator = struct {
                     }
                     break :blk false;
                 };
+                // Detect `^T?` cross-module fields: `field to!` → `field.?.*`
+                // The field stores `?*T` in Zig; `.?` unwraps the optional, `.*` derefs the pointer.
+                const needs_ptr_deref = blk: {
+                    if (e.expr.* != .member) break :blk false;
+                    const mem = e.expr.member;
+                    const tc = g.tc orelse break :blk false;
+                    const obj_type = tc.expr_types.get(mem.object) orelse break :blk false;
+                    if (obj_type != .cross_module) break :blk false;
+                    const cm = obj_type.cross_module;
+                    const imp = g.imported_modules orelse break :blk false;
+                    const iface = imp.get(cm.module) orelse break :blk false;
+                    const key = std.fmt.allocPrint(g.alloc, "{s}.{s}", .{ cm.type_name, mem.member }) catch break :blk false;
+                    defer g.alloc.free(key);
+                    break :blk iface.optional_ref_fields.contains(key);
+                };
                 try g.genExpr(e.expr);
                 if (!already_unwrapped) try g.w.writeAll(".?");
+                if (needs_ptr_deref) try g.w.writeAll(".*");
             },
             .is_nil => |e| {
                 try g.w.writeAll("(");
@@ -8701,6 +8751,18 @@ const Generator = struct {
         return null;
     }
 
+    /// Emit a single argument, boxing value `T` → `*T` when the param is `^T`.
+    /// `param_is_ref` = the param's declared type is `.ref_to`; `inner` = the inner TypeRef.
+    fn genBoxedArgExpr(g: Generator, expr: *const Ast.Expr, inner: Ast.TypeRef) anyerror!void {
+        const lbl = try std.fmt.allocPrint(g.alloc, "_box_{x}", .{@intFromPtr(expr)});
+        defer g.alloc.free(lbl);
+        try g.w.print("{s}: {{ const _bp_{x} = _allocator.create(", .{ lbl, @intFromPtr(expr) });
+        try g.genType(inner);
+        try g.w.print(") catch @panic(\"OOM\"); _bp_{x}.* = ", .{@intFromPtr(expr)});
+        try g.genArgExpr(expr);
+        try g.w.print("; break :{s} _bp_{x}; }}", .{ lbl, @intFromPtr(expr) });
+    }
+
     /// Emit a comma-separated argument list, honouring named args and defaults.
     /// If params is null or no arg is named, falls back to positional emission.
     fn genArgs(g: Generator, params: ?[]const Ast.Param, args: []const Ast.Arg) anyerror!void {
@@ -8708,6 +8770,15 @@ const Generator = struct {
         if (!has_named) {
             for (args, 0..) |a, i| {
                 if (i > 0) try g.w.writeAll(", ");
+                // Box the arg if the corresponding param is ^T.
+                if (params) |ps| {
+                    if (i < ps.len) {
+                        if (ps[i].type_) |pt| if (pt == .ref_to) {
+                            try g.genBoxedArgExpr(a.value, pt.ref_to.*);
+                            continue;
+                        };
+                    }
+                }
                 try g.genArgExpr(a.value);
             }
             return;
@@ -8730,10 +8801,22 @@ const Generator = struct {
             }
             for (resolved, 0..) |maybe_expr, i| {
                 if (i > 0) try g.w.writeAll(", ");
+                const param_is_ref = if (i < ps.len) blk: {
+                    const pt = ps[i].type_ orelse break :blk false;
+                    break :blk pt == .ref_to;
+                } else false;
                 if (maybe_expr) |expr| {
-                    try g.genArgExpr(expr);
+                    if (param_is_ref) {
+                        try g.genBoxedArgExpr(expr, ps[i].type_.?.ref_to.*);
+                    } else {
+                        try g.genArgExpr(expr);
+                    }
                 } else if (i < ps.len and ps[i].default != null) {
-                    try g.genArgExpr(ps[i].default.?);
+                    if (param_is_ref) {
+                        try g.genBoxedArgExpr(ps[i].default.?, ps[i].type_.?.ref_to.*);
+                    } else {
+                        try g.genArgExpr(ps[i].default.?);
+                    }
                 } else {
                     try g.w.writeAll("undefined"); // missing required arg
                 }
@@ -8958,8 +9041,40 @@ const Generator = struct {
             const cname = e.callee.ident.name;
             if (g.exposed_classes.contains(cname)) {
                 try g.w.print("{s}.init(", .{cname});
+                // Look up boxing flags from the module interface if available.
+                const box_flags: ?[]bool = blk: {
+                    if (g.imported_modules) |imp| {
+                        var it = imp.iterator();
+                        while (it.next()) |entry| {
+                            if (entry.value_ptr.struct_init_ref_params.get(cname)) |flags| {
+                                break :blk flags;
+                            }
+                        }
+                    }
+                    break :blk null;
+                };
                 for (e.args, 0..) |a, i| {
                     if (i > 0) try g.w.writeAll(", ");
+                    if (box_flags) |flags| {
+                        if (i < flags.len and flags[i]) {
+                            // `nil` literal for a `^T?` param maps to Zig `null`; don't try
+                            // to allocate a pointer to null (comptime error with @TypeOf(null)).
+                            if (a.value.* == .nil) {
+                                try g.w.writeAll("null");
+                                continue;
+                            }
+                            // Need the inner type for boxing: look up ref_fields to get the type name.
+                            // For now, emit the labeled-block boxing with anytype inference.
+                            const lbl = try std.fmt.allocPrint(g.alloc, "_box_{x}", .{@intFromPtr(a.value)});
+                            defer g.alloc.free(lbl);
+                            try g.w.print("{s}: {{ const _bp_{x} = blk2: {{ break :blk2 _allocator.create(@TypeOf(", .{ lbl, @intFromPtr(a.value) });
+                            try g.genExpr(a.value);
+                            try g.w.print(")) catch @panic(\"OOM\"); }}; _bp_{x}.* = ", .{@intFromPtr(a.value)});
+                            try g.genExpr(a.value);
+                            try g.w.print("; break :{s} _bp_{x}; }}", .{ lbl, @intFromPtr(a.value) });
+                            continue;
+                        }
+                    }
                     try g.genExpr(a.value);
                 }
                 try g.w.writeAll(")");
@@ -9903,6 +10018,22 @@ const Generator = struct {
                 // Structs, enums, unions, and primitives are value types (no pointer).
                 if (g.class_names.contains(n.name)) {
                     try g.w.writeAll("*");
+                    try g.w.writeAll(n.name);
+                    return;
+                }
+                // Cross-module qualified type: "moduleAlias.TypeName".
+                // If the referenced type is a class in the imported module, emit
+                // `*moduleAlias.TypeName` (pointer) rather than a value type.
+                if (std.mem.indexOfScalar(u8, n.name, '.')) |dot| {
+                    const mod_alias  = n.name[0..dot];
+                    const type_name  = n.name[dot+1..];
+                    const is_class = blk: {
+                        const imp = g.imported_modules orelse break :blk false;
+                        const iface = imp.get(mod_alias) orelse break :blk false;
+                        const kind = iface.types.get(type_name) orelse break :blk false;
+                        break :blk kind == .class;
+                    };
+                    if (is_class) try g.w.writeAll("*");
                     try g.w.writeAll(n.name);
                     return;
                 }

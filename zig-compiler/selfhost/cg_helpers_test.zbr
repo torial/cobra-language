@@ -1,0 +1,312 @@
+# cg_helpers_test.zbr -- integration tests for cg_helpers.zbr
+#
+# Tests grouped by complexity:
+#   Part 1 -- StrSet, assignOpStr, binaryOpStr (no AST)
+#   Part 2 -- typeRefStr with non-boxing TypeRef variants
+#   Part 3 -- typeRefStr with ^TypeRef boxing (throws)
+#   Part 4 -- nilNarrowVar simple (no throws) + binary (throws)
+#   Part 5 -- exprHasTry (throws)
+#   Part 6 -- bodyHasRaise (throws)
+#   Part 7 -- nameUsedInExpr / nameUsedInStmts (throws for binary/stmt)
+#   Part 8 -- analyzeEscapes, scanMutations (throws)
+#
+# Throws-requiring tests run inside `try { ... } catch |_e| { assert false }`.
+
+use cg_helpers exposing StrSet, assignOpStr, binaryOpStr, typeRefStr, exprHasTry, bodyHasRaise, nilNarrowVar, nameUsedInExpr, nameUsedInStmts, collectAllIdents, analyzeEscapes, scanMutations
+use ast exposing Stmt, Expr, AssignOp, BinaryOp, TypeRef, NamedTypeRef, GenericTypeRef, TupleTypeRef, DeclVar, Modifiers, Span, ExprIdent, ExprIntLit, ExprBoolLit, ExprBinary, ExprUnary, ExprTry, IntBase, StmtReturn, StmtRaise, StmtAssign
+
+def zspan() as Span
+    return Span(0, 0, 0, 0)
+
+def zmods() as Modifiers
+    return Modifiers(false, false, false, false, false, false)
+
+# ── Part 1: StrSet ────────────────────────────────────────────────────────────
+
+def testStrSet()
+    var s = StrSet()
+    assert s.count() == 0
+    assert not s.contains_("a")
+    s.add("alpha")
+    assert s.count() == 1
+    assert s.contains_("alpha")
+    assert not s.contains_("beta")
+    s.add("beta")
+    s.add("alpha")
+    assert s.count() == 2
+    assert s.contains_("beta")
+    print "1. StrSet: OK"
+
+# ── Part 2: assignOpStr ───────────────────────────────────────────────────────
+
+def testAssignOpStr()
+    assert assignOpStr(AssignOp.assign)          == "="
+    assert assignOpStr(AssignOp.plus_eq)         == "+="
+    assert assignOpStr(AssignOp.minus_eq)        == "-="
+    assert assignOpStr(AssignOp.star_eq)         == "*="
+    assert assignOpStr(AssignOp.slash_eq)        == "/="
+    assert assignOpStr(AssignOp.percent_eq)      == "%="
+    assert assignOpStr(AssignOp.ampersand_eq)    == "&="
+    assert assignOpStr(AssignOp.vertical_bar_eq) == "|="
+    assert assignOpStr(AssignOp.caret_eq)        == "^="
+    assert assignOpStr(AssignOp.double_lt_eq)    == "<<="
+    assert assignOpStr(AssignOp.double_gt_eq)    == ">>="
+    assert assignOpStr(AssignOp.slashslash_eq)   == "="
+    assert assignOpStr(AssignOp.starstar_eq)     == "="
+    print "2. assignOpStr: OK"
+
+# ── Part 3: binaryOpStr ───────────────────────────────────────────────────────
+
+def testBinaryOpStr()
+    assert binaryOpStr(BinaryOp.add)     == "+"
+    assert binaryOpStr(BinaryOp.sub)     == "-"
+    assert binaryOpStr(BinaryOp.mul)     == "*"
+    assert binaryOpStr(BinaryOp.div)     == "/"
+    assert binaryOpStr(BinaryOp.mod)     == "%"
+    assert binaryOpStr(BinaryOp.bit_and) == "&"
+    assert binaryOpStr(BinaryOp.bit_or)  == "|"
+    assert binaryOpStr(BinaryOp.bit_xor) == "^"
+    assert binaryOpStr(BinaryOp.shl)     == "<<"
+    assert binaryOpStr(BinaryOp.shr)     == ">>"
+    assert binaryOpStr(BinaryOp.eq)      == "=="
+    assert binaryOpStr(BinaryOp.ne)      == "!="
+    assert binaryOpStr(BinaryOp.lt)      == "<"
+    assert binaryOpStr(BinaryOp.le)      == "<="
+    assert binaryOpStr(BinaryOp.gt)      == ">"
+    assert binaryOpStr(BinaryOp.ge)      == ">="
+    assert binaryOpStr(BinaryOp.and_)    == "and"
+    assert binaryOpStr(BinaryOp.or_)     == "or"
+    assert binaryOpStr(BinaryOp.int_div) == "?"
+    assert binaryOpStr(BinaryOp.pow)     == "?"
+    assert binaryOpStr(BinaryOp.dotdot)  == "?"
+    assert binaryOpStr(BinaryOp.in_)     == "?"
+    print "3. binaryOpStr: OK"
+
+# ── Part 4: typeRefStr (non-boxing variants -- no throws) ─────────────────────
+
+def testTypeRefStrSimple()
+    var sp = zspan()
+    assert typeRefStr(TypeRef.named(NamedTypeRef(sp, "int")))  == "int"
+    assert typeRefStr(TypeRef.named(NamedTypeRef(sp, "bool"))) == "bool"
+    assert typeRefStr(TypeRef.void_)  == "void"
+    assert typeRefStr(TypeRef.same_)  == "same"
+    print "4a. typeRefStr simple: OK"
+
+def testTypeRefStrGeneric()
+    var sp = zspan()
+    var args1 = List(TypeRef)()
+    args1.add(TypeRef.named(NamedTypeRef(sp, "str")))
+    assert typeRefStr(TypeRef.generic(GenericTypeRef(sp, "List", args1))) == "List(str)"
+    var args2 = List(TypeRef)()
+    args2.add(TypeRef.named(NamedTypeRef(sp, "str")))
+    args2.add(TypeRef.named(NamedTypeRef(sp, "int")))
+    assert typeRefStr(TypeRef.generic(GenericTypeRef(sp, "HashMap", args2))) == "HashMap(str, int)"
+    print "4b. typeRefStr generic: OK"
+
+def testTypeRefStrTuple()
+    var sp = zspan()
+    var elems = List(TypeRef)()
+    elems.add(TypeRef.named(NamedTypeRef(sp, "int")))
+    elems.add(TypeRef.named(NamedTypeRef(sp, "bool")))
+    assert typeRefStr(TypeRef.tuple(TupleTypeRef(sp, elems))) == "(int, bool)"
+    print "4c. typeRefStr tuple: OK"
+
+# typeRefStr with ^TypeRef boxing (nilable, stream, error_union, ref_to)
+
+def testTypeRefStrBoxed() throws
+    var sp = zspan()
+    var inner = TypeRef.named(NamedTypeRef(sp, "str"))
+    assert typeRefStr(TypeRef.nilable(inner))     == "?str"
+    assert typeRefStr(TypeRef.stream(inner))      == "str*"
+    assert typeRefStr(TypeRef.error_union(inner)) == "!str"
+    assert typeRefStr(TypeRef.ref_to(inner))      == "^str"
+    print "4d. typeRefStr boxed: OK"
+
+# ── Part 5: nilNarrowVar ──────────────────────────────────────────────────────
+
+def testNilNarrowVarSimple()
+    var sp = zspan()
+    # Non-binary expression -- returns nil
+    var id_x = Expr.ident(ExprIdent(sp, "x"))
+    assert nilNarrowVar(id_x, true)  == nil
+    assert nilNarrowVar(id_x, false) == nil
+    print "5a. nilNarrowVar non-binary: OK"
+
+def testNilNarrowVar() throws
+    var sp   = zspan()
+    var id_x = Expr.ident(ExprIdent(sp, "x"))
+    var nil_ = Expr.nil_(sp)
+    # x != nil  (for_then=true) -> "x"
+    var ne = Expr.binary(ExprBinary(sp, BinaryOp.ne, id_x, nil_))
+    assert nilNarrowVar(ne, true) to!  == "x"
+    assert nilNarrowVar(ne, false) == nil
+    # x == nil  (for_then=false) -> "x"
+    var eq = Expr.binary(ExprBinary(sp, BinaryOp.eq, id_x, nil_))
+    assert nilNarrowVar(eq, false) to! == "x"
+    assert nilNarrowVar(eq, true)  == nil
+    # nil != x  (commutative) -> "x"
+    var ne2 = Expr.binary(ExprBinary(sp, BinaryOp.ne, nil_, id_x))
+    assert nilNarrowVar(ne2, true) to! == "x"
+    # Wrong op (add) -> nil
+    var lit = Expr.int_lit(ExprIntLit(sp, "0", IntBase.decimal))
+    var add = Expr.binary(ExprBinary(sp, BinaryOp.add, id_x, lit))
+    assert nilNarrowVar(add, true) == nil
+    print "5b. nilNarrowVar binary: OK"
+
+# ── Part 6: exprHasTry ────────────────────────────────────────────────────────
+
+def testExprHasTry() throws
+    var sp = zspan()
+    # Literals -- false
+    assert not exprHasTry(Expr.int_lit(ExprIntLit(sp, "1", IntBase.decimal)))
+    assert not exprHasTry(Expr.bool_lit(ExprBoolLit(sp, true)))
+    assert not exprHasTry(Expr.nil_(sp))
+    assert not exprHasTry(Expr.ident(ExprIdent(sp, "x")))
+    # Bare try_ node -- true
+    var inner = Expr.ident(ExprIdent(sp, "f"))
+    var try_e = Expr.try_(ExprTry(sp, inner))
+    assert exprHasTry(try_e)
+    # Binary wrapping a try_ -- true
+    var lhs = Expr.int_lit(ExprIntLit(sp, "0", IntBase.decimal))
+    assert exprHasTry(Expr.binary(ExprBinary(sp, BinaryOp.add, lhs, try_e)))
+    # Binary without any try -- false
+    var rhs = Expr.int_lit(ExprIntLit(sp, "1", IntBase.decimal))
+    assert not exprHasTry(Expr.binary(ExprBinary(sp, BinaryOp.add, lhs, rhs)))
+    print "6. exprHasTry: OK"
+
+# ── Part 7: bodyHasRaise ─────────────────────────────────────────────────────
+
+def testBodyHasRaise() throws
+    var sp = zspan()
+    # Empty body -- false
+    assert not bodyHasRaise(List(Stmt)())
+    # raise_ statement -- true
+    var with_raise = List(Stmt)()
+    with_raise.add(Stmt.raise_(StmtRaise(sp, nil, nil)))
+    assert bodyHasRaise(with_raise)
+    # pass_ only -- false
+    var with_pass = List(Stmt)()
+    with_pass.add(Stmt.pass_(sp))
+    assert not bodyHasRaise(with_pass)
+    # var whose init has a try_ -- true
+    var try_e = Expr.try_(ExprTry(sp, Expr.ident(ExprIdent(sp, "f"))))
+    var dv    = DeclVar(sp, zmods(), "x", nil, try_e, false)
+    var with_try_var = List(Stmt)()
+    with_try_var.add(Stmt.var_(dv))
+    assert bodyHasRaise(with_try_var)
+    # return with plain literal -- false
+    var ret_lit = Expr.int_lit(ExprIntLit(sp, "42", IntBase.decimal))
+    var with_return = List(Stmt)()
+    with_return.add(Stmt.return_(StmtReturn(sp, ret_lit)))
+    assert not bodyHasRaise(with_return)
+    print "7. bodyHasRaise: OK"
+
+# ── Part 8: nameUsedInExpr / nameUsedInStmts ─────────────────────────────────
+
+def testNameUsedInExprSimple()
+    var sp = zspan()
+    var id_x = Expr.ident(ExprIdent(sp, "x"))
+    assert     nameUsedInExpr("x", id_x)
+    assert not nameUsedInExpr("y", id_x)
+    var lit = Expr.int_lit(ExprIntLit(sp, "1", IntBase.decimal))
+    assert not nameUsedInExpr("x", lit)
+    assert not nameUsedInExpr("x", Expr.nil_(sp))
+    print "8a. nameUsedInExpr simple: OK"
+
+def testNameUsedInExprBinary() throws
+    var sp   = zspan()
+    var id_x = Expr.ident(ExprIdent(sp, "x"))
+    var id_y = Expr.ident(ExprIdent(sp, "y"))
+    var bin  = Expr.binary(ExprBinary(sp, BinaryOp.add, id_x, id_y))
+    assert     nameUsedInExpr("x", bin)
+    assert     nameUsedInExpr("y", bin)
+    assert not nameUsedInExpr("z", bin)
+    print "8b. nameUsedInExpr binary: OK"
+
+def testNameUsedInStmts() throws
+    var sp   = zspan()
+    var id_x = Expr.ident(ExprIdent(sp, "x"))
+    var stmts = List(Stmt)()
+    stmts.add(Stmt.return_(StmtReturn(sp, id_x)))
+    assert     nameUsedInStmts("x", stmts)
+    assert not nameUsedInStmts("y", stmts)
+    assert not nameUsedInStmts("x", List(Stmt)())
+    print "8c. nameUsedInStmts: OK"
+
+# ── Part 9: analyzeEscapes ───────────────────────────────────────────────────
+
+def testAnalyzeEscapes() throws
+    var sp   = zspan()
+    var id_x = Expr.ident(ExprIdent(sp, "x"))
+    # return x -> x escapes
+    var stmts = List(Stmt)()
+    stmts.add(Stmt.return_(StmtReturn(sp, id_x)))
+    var esc = analyzeEscapes(stmts)
+    assert     esc.contains_("x")
+    assert not esc.contains_("y")
+    # empty body -> nothing escapes
+    assert analyzeEscapes(List(Stmt)()).count() == 0
+    print "9. analyzeEscapes: OK"
+
+# ── Part 10: scanMutations ────────────────────────────────────────────────────
+
+def testScanMutations() throws
+    var sp   = zspan()
+    var id_x = Expr.ident(ExprIdent(sp, "x"))
+    var lit  = Expr.int_lit(ExprIntLit(sp, "1", IntBase.decimal))
+    # x = 1 -> x is mutated
+    var stmts = List(Stmt)()
+    stmts.add(Stmt.assign(StmtAssign(sp, id_x, AssignOp.assign, lit)))
+    var mut = scanMutations(stmts)
+    assert     mut.contains_("x")
+    assert not mut.contains_("y")
+    # empty body -> nothing mutated
+    assert scanMutations(List(Stmt)()).count() == 0
+    print "10. scanMutations: OK"
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+class Main
+    shared
+        def main
+            testStrSet()
+            testAssignOpStr()
+            testBinaryOpStr()
+            testTypeRefStrSimple()
+            testTypeRefStrGeneric()
+            testTypeRefStrTuple()
+            try
+                testTypeRefStrBoxed()
+            catch |_e|
+                assert false, "testTypeRefStrBoxed raised"
+            testNilNarrowVarSimple()
+            try
+                testNilNarrowVar()
+            catch |_e|
+                assert false, "testNilNarrowVar raised"
+            try
+                testExprHasTry()
+            catch |_e|
+                assert false, "testExprHasTry raised"
+            try
+                testBodyHasRaise()
+            catch |_e|
+                assert false, "testBodyHasRaise raised"
+            testNameUsedInExprSimple()
+            try
+                testNameUsedInExprBinary()
+            catch |_e|
+                assert false, "testNameUsedInExprBinary raised"
+            try
+                testNameUsedInStmts()
+            catch |_e|
+                assert false, "testNameUsedInStmts raised"
+            try
+                testAnalyzeEscapes()
+            catch |_e|
+                assert false, "testAnalyzeEscapes raised"
+            try
+                testScanMutations()
+            catch |_e|
+                assert false, "testScanMutations raised"
+            print "cg_helpers_test: all OK"

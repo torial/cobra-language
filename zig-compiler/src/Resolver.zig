@@ -990,12 +990,15 @@ const Resolver = struct {
     }
 
     fn resolveNamedRef(r: Resolver, n: *const Ast.NamedTypeRef, scope: *Scope) anyerror!void {
-        if (BUILTINS.get(n.name) != null or Builtins.isDynamicSizedNumeric(n.name)) {
-            try r.types.put(n, .builtin);
-            return;
-        }
+        // Check local scope BEFORE builtins: a locally-defined type should shadow
+        // a stdlib builtin of the same name (e.g. ast.zbr's `Arg` struct vs the
+        // stdlib `Arg` arg-parser type).
         if (scope.lookup(n.name)) |sym| {
             try r.types.put(n, .{ .symbol = sym });
+            return;
+        }
+        if (BUILTINS.get(n.name) != null or Builtins.isDynamicSizedNumeric(n.name)) {
+            try r.types.put(n, .builtin);
             return;
         }
         // Cross-module qualified type reference: "ModuleName.TypeName"

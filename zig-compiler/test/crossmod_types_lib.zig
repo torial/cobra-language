@@ -1466,8 +1466,8 @@ pub const Point = struct {
     _type_tag: u64 = _ttag_Point,
     x: i64 = undefined,
     y: i64 = undefined,
-    pub fn init(px: i64, py: i64) Point {
-        var self: Point = undefined;
+    pub fn init(px: i64, py: i64) *Point {
+        const self = _allocator.create(Point) catch @panic("OOM");
         self._type_tag = _ttag_Point;
 // zbr:test\crossmod_types_lib.zbr:7
         self.x = px;

@@ -462,3 +462,47 @@ When a class field has a cross-module class type (`var _scope as TcScope` in typ
 - The `Generator` struct's `withOwner`/`withClass`/`withIndent` pattern (copy-modify-return) works step-by-step but **cannot be chained** in a single expression. Each context fork must assign to a local `var`.
 - The preamble (~1,876 lines of embedded Zig code in `genModule`) can use `"""..."""` strings — newlines in the source become actual newlines in the string value, and `\n` escape sequences in the source pass through as literal `\n` in output (correct for emitting Zig code that contains escape sequences)
 - `StringBuilder` is the right output accumulator for the code generator methods
+
+---
+
+## Phase 6: cg_helpers.zbr — Code Generation Helpers (2026-04-11)
+
+**Files:** `selfhost/cg_helpers.zbr` (805 lines), `selfhost/cg_helpers_test.zbr`
+**Tests:** 10/10 cg_helpers tests pass.
+
+### What cg_helpers.zbr ports
+
+`cg_helpers.zbr` ports seven CodeGen helper routines from `src/cg_helpers.zig`:
+1. `nameUsedInExpr` — checks if a given name appears (free) in an expression tree
+2. `nameUsedInStmts` — ditto for a statement list
+3. `analyzeEscapes` — returns the set of variables that escape from a closure/block
+4. `scanMutations` — returns the set of variables mutated inside a statement list
+5. `typeRefStr` — renders a `TypeRef` to its canonical string form (e.g. `"List(int)"`, `"^Expr?"`)
+6. `namedTypeStr` — extracts the type name string from a named or qualified TypeRef
+7. `tcModuleStr` — formats a `TcModuleInterface` for debug display
+
+### Bugs fixed during Phase 6 (7 additional bugs, total now ~41)
+
+1. **Resolver scope-before-builtins** (`src/Resolver.zig`) — `"Arg"` is a stdlib builtin (arg-parser type), colliding with `ast.zbr`'s `Arg` struct (call argument AST node). Old code checked builtins first → `Arg` in `ast.zbr` was `.builtin`, preventing `list_field_elem_types["ExprCall.args"]` from being populated. Fix: check local scope **before** builtins so locally-defined types shadow same-named builtins.
+
+2. **`cross_module` subject branch-binding** (`src/TypeChecker.zig`) — When `branch a.target` where `a.target: ^Expr` produces `subj_type = cross_module{ast, Expr}`, the TypeChecker only handled `.named` subjects for variant payload binding. Added a ③ case: when subject type is already `.cross_module`, look up variant payload in the module interface directly.
+
+3. **Nil boxing for `^T?` params** (`src/CodeGen.zig`) — `StmtRaise(sp, nil, nil)` caused `_allocator.create(@TypeOf(null))` (comptime error). Added `.nil` literal check in the exposed-class boxing loop: emit `null` directly without trying to allocate a pointer to nil.
+
+4. **Top-level function return type tracking** (`src/TypeChecker.zig`) — `analyzeEscapes(...)` and `scanMutations(...)` return `StrSet` (a user-defined class). TypeChecker returned `.unknown` for the return type, causing CodeGen to use `genListMethod` on `.count()`, generating incorrect `.items.len`. Added tracking of top-level function return types in `ModuleInterface.instance_method_return_types` (function name only as key, no class prefix).
+
+5. **`StringBuilder.build()` dangling pointer** (`src/CodeGen.zig`) — `sb.build()` returned `sb.items` but `defer b.deinit()` freed memory before the caller could use it. Changed to emit `sb.toOwnedSlice(_allocator) catch @panic("OOM")` which transfers ownership (ArrayList becomes empty, deinit is a no-op).
+
+6. **`.nil_` tag name** (`src/CodeGen.zig`) — Comparison `a.value.* == .nil_` used the wrong tag name; correct name is `.nil`. Caught immediately during compilation.
+
+7. **Cross-module class field type** (`src/CodeGen.zig`) — When a class field is declared as a cross-module class type (`var start as crossmod_types_lib.Point`), the TypeRef becomes `.named` with `name = "crossmod_types_lib.Point"`. The `genType` function only checked `g.class_names` (local classes), so it emitted the value type `crossmod_types_lib.Point` instead of `*crossmod_types_lib.Point`. Fix: detect dot in name, split into `(module_alias, type_name)`, look up kind in the module interface, emit `*` if kind is `.class`.
+
+### Key discoveries from Phase 6
+
+**Cross-module type name shadowing:** If a locally-defined struct has the same name as a stdlib builtin, the Resolver must check local scope first. The `"Arg"` collision was subtle — it only surfaced when `list_field_elem_types` for `ExprCall.args` was empty (no iteration element type), which prevented `arg.value` from being auto-dereffed across all code paths that iterated `ExprCall.args`.
+
+**`cross_module` vs `.named` branch subjects:** When a union-typed field is `^T`, reading it auto-dereferences to give a `cross_module{M, T}` type directly. The existing branch-binding code only handled `.named` subjects (locally-defined unions). The ③ case was needed for chain patterns: `branch a.target` where `a: Arg`, `target: ^Expr`.
+
+**Ownership in StringBuilder:** `toOwnedSlice` is the correct combinator — it returns an owned slice and drains the ArrayList (so `deinit` is harmless). Using `.items` after `deinit` is a use-after-free.
+
+**Cross-module class fields need pointer types in generated Zig:** A field `var x as SomeModule.SomeClass` must emit `x: *SomeModule.SomeClass` in the Zig struct because classes are heap-allocated reference types. The `genType` function needed a cross-module class check analogous to the local `g.class_names.contains(...)` check.

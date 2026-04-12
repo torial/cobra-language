@@ -1,0 +1,805 @@
+# cg_helpers.zbr -- CodeGen helper functions (Phase 6 self-hosting)
+#
+# Pure analysis passes on the Zebra AST: no I/O, no allocator dependencies.
+# Used by the cg_*.zbr files to classify statements and expressions before
+# emitting Zig output.
+#
+# Contents
+#   StrSet        -- mutable reference-type string set; .contains_/.add/.count/.items
+#   assignOpStr   -- AssignOp enum -> Zig operator string
+#   binaryOpStr   -- BinaryOp enum -> Zig operator string
+#   typeRefStr    -- TypeRef -> human-readable string
+#   exprHasTry    -- does an expression contain a try_ node?
+#   bodyHasRaise  -- does a body contain a raise_ or bare try_ statement?
+#   bodyNeedsErrVar -- same scan for _try_err variable decision
+#   nilNarrowVar  -- extract nil-narrowed variable name from a condition
+#   nameUsedInStmts / nameUsedInStmt / nameUsedInExpr -- name-presence scan
+#   collectAllIdents   -- gather ident names reachable in an expression
+#   seedEscapedFromReturns / propagateEscapesOnce / analyzeEscapes
+#   scanMutationsInto / scanMutationsInExpr / scanMutations
+#
+# Note on List(^Expr) elements
+# ----------------------------
+# Zebra's field-read auto-deref applies to struct fields typed as ^T (the
+# CodeGen emits `.*` for member access).  It does NOT apply to List(^Expr)
+# iteration -- `for elem in list_of_boxed_exprs` yields ^Expr, which cannot
+# be passed to a function expecting Expr.
+#
+# Affected AST nodes: ExprListLit.elems, ExprArrayLit.elems, ExprTuple.elems.
+# These are handled with an `else pass` fallback (conservative skip).  This
+# is safe for all callers in the codegen:
+#   bodyHasRaise  -- list literals never contain raise/try nodes
+#   exprHasTry    -- same
+#   collectAllIdents -- may under-report escaped names inside list literals
+#                      (causes at most a memory leak, never use-after-free)
+#   scanMutations -- list literal args are never direct mutation sites
+# Extend these if a real case materialises during Phase 6 stress-testing.
+
+use ast exposing Stmt, Expr, AssignOp, BinaryOp, TypeRef, StringPart, DeclVar, Arg, DictEntry, ElseIf, BranchOn, CatchClause, GenericTypeRef, TupleTypeRef, NamedTypeRef
+
+# ── StrSet ────────────────────────────────────────────────────────────────────
+# Mutable reference-type string set.
+# Classes are reference types in Zebra (arena-allocated); passing a StrSet
+# to a helper function and calling .add() is visible at all call sites.
+
+class StrSet
+    var _items as List(str)
+
+    cue init()
+        _items = List(str)()
+
+    def add(s as str)
+        if not contains_(s)
+            _items.add(s)
+
+    def contains_(s as str) as bool
+        for item in _items
+            if item == s
+                return true
+        return false
+
+    def count() as int
+        return _items.count()
+
+    def items() as List(str)
+        return _items
+
+# ── assignOpStr ───────────────────────────────────────────────────────────────
+
+def assignOpStr(op as AssignOp) as str
+    branch op
+        on AssignOp.assign          return "="
+        on AssignOp.plus_eq         return "+="
+        on AssignOp.minus_eq        return "-="
+        on AssignOp.star_eq         return "*="
+        on AssignOp.slash_eq        return "/="
+        on AssignOp.percent_eq      return "%="
+        on AssignOp.ampersand_eq    return "&="
+        on AssignOp.vertical_bar_eq return "|="
+        on AssignOp.caret_eq        return "^="
+        on AssignOp.double_lt_eq    return "<<="
+        on AssignOp.double_gt_eq    return ">>="
+        on AssignOp.slashslash_eq   return "="
+        on AssignOp.starstar_eq     return "="
+
+# ── binaryOpStr ───────────────────────────────────────────────────────────────
+
+def binaryOpStr(op as BinaryOp) as str
+    branch op
+        on BinaryOp.add     return "+"
+        on BinaryOp.sub     return "-"
+        on BinaryOp.mul     return "*"
+        on BinaryOp.div     return "/"
+        on BinaryOp.mod     return "%"
+        on BinaryOp.bit_and return "&"
+        on BinaryOp.bit_or  return "|"
+        on BinaryOp.bit_xor return "^"
+        on BinaryOp.shl     return "<<"
+        on BinaryOp.shr     return ">>"
+        on BinaryOp.eq      return "=="
+        on BinaryOp.ne      return "!="
+        on BinaryOp.lt      return "<"
+        on BinaryOp.le      return "<="
+        on BinaryOp.gt      return ">"
+        on BinaryOp.ge      return ">="
+        on BinaryOp.and_    return "and"
+        on BinaryOp.or_     return "or"
+        else
+            # int_div, pow, dotdot, in_ -- handled specially in genBinary
+            return "?"
+
+# ── typeRefStr ────────────────────────────────────────────────────────────────
+# Convert a TypeRef to a human-readable string for diagnostics and reflection
+# metadata.  Recurses through nilable / stream / error_union / ref_to / generic.
+
+def typeRefStr(tr as TypeRef) as str
+    branch tr
+        on TypeRef.named as n
+            return n.name
+        on TypeRef.nilable as inner
+            return "?" + typeRefStr(inner)
+        on TypeRef.stream as inner
+            return typeRefStr(inner) + "*"
+        on TypeRef.error_union as inner
+            return "!" + typeRefStr(inner)
+        on TypeRef.ref_to as inner
+            return "^" + typeRefStr(inner)
+        on TypeRef.generic as g
+            var b as StringBuilder = StringBuilder()
+            b.append(g.name)
+            b.append("(")
+            var i = 0
+            for arg in g.args
+                if i > 0
+                    b.append(", ")
+                b.append(typeRefStr(arg))
+                i = i + 1
+            b.append(")")
+            return b.build()
+        on TypeRef.void_
+            return "void"
+        on TypeRef.same_
+            return "same"
+        on TypeRef.tuple as t
+            var b2 as StringBuilder = StringBuilder()
+            b2.append("(")
+            var j = 0
+            for elem in t.elems
+                if j > 0
+                    b2.append(", ")
+                b2.append(typeRefStr(elem))
+                j = j + 1
+            b2.append(")")
+            return b2.build()
+
+# ── exprHasTry ────────────────────────────────────────────────────────────────
+# Returns true if `expr` contains a bare try_ node (error propagation).
+# Used by bodyHasRaise / bodyNeedsErrVar to detect throws-requiring expressions.
+#
+# List(^Expr) cases (list_lit, array_lit, tuple_lit) are skipped -- see note.
+
+def exprHasTry(expr as Expr) as bool
+    branch expr
+        on Expr.try_
+            return true
+        on Expr.binary as b
+            if exprHasTry(b.left)
+                return true
+            return exprHasTry(b.right)
+        on Expr.unary as u
+            return exprHasTry(u.operand)
+        on Expr.call as c
+            if exprHasTry(c.callee)
+                return true
+            for arg in c.args
+                if exprHasTry(arg.value)
+                    return true
+            return false
+        on Expr.member as m
+            return exprHasTry(m.object)
+        on Expr.orelse_ as o
+            if exprHasTry(o.expr)
+                return true
+            return exprHasTry(o.fallback)
+        on Expr.catch_ as ca
+            if exprHasTry(ca.expr)
+                return true
+            return exprHasTry(ca.fallback)
+        on Expr.to_nilable as t
+            return exprHasTry(t.expr)
+        on Expr.to_non_nil as t
+            return exprHasTry(t.expr)
+        on Expr.is_nil as t
+            return exprHasTry(t.expr)
+        on Expr.cast as c
+            return exprHasTry(c.expr)
+        on Expr.type_check as t
+            return exprHasTry(t.expr)
+        on Expr.if_expr as i
+            if exprHasTry(i.cond)
+                return true
+            if exprHasTry(i.then_expr)
+                return true
+            return exprHasTry(i.else_expr)
+        on Expr.string_interp as si
+            for part in si.parts
+                branch part
+                    on StringPart.expr_ as e
+                        if exprHasTry(e)
+                            return true
+                    else
+                        pass
+            return false
+        on Expr.all_any as a
+            if exprHasTry(a.iter)
+                return true
+            return exprHasTry(a.cond)
+        on Expr.dict_lit as d
+            for entry in d.entries
+                if exprHasTry(entry.key)
+                    return true
+                if exprHasTry(entry.value)
+                    return true
+            return false
+        else
+            # Literals, nil_, this_, ident, zig_lit, list_lit, array_lit, tuple_lit,
+            # lambda, index, slice -- none contain bare try_ in practice.
+            return false
+
+# ── bodyHasRaise ─────────────────────────────────────────────────────────────
+# Returns true if any statement in `stmts` is a raise_ or contains a bare
+# try_ expression.  Used to decide if a method needs anyerror! return type.
+
+def bodyHasRaise(stmts as List(Stmt)) as bool
+    for s in stmts
+        branch s
+            on Stmt.raise_
+                return true
+            on Stmt.var_ as n
+                if n.init_expr != nil
+                    if exprHasTry(n.init_expr to!)
+                        return true
+            on Stmt.assign as a
+                if exprHasTry(a.value)
+                    return true
+            on Stmt.return_ as r
+                if r.value != nil
+                    if exprHasTry(r.value to!)
+                        return true
+            on Stmt.expr as e
+                if exprHasTry(e)
+                    return true
+            on Stmt.if_ as si
+                if exprHasTry(si.cond)
+                    return true
+                if bodyHasRaise(si.then_stmts)
+                    return true
+                for ei in si.else_ifs
+                    if exprHasTry(ei.cond)
+                        return true
+                    if bodyHasRaise(ei.stmts)
+                        return true
+                if si.else_stmts != nil
+                    if bodyHasRaise(si.else_stmts to!)
+                        return true
+            on Stmt.while_ as w
+                if exprHasTry(w.cond)
+                    return true
+                if bodyHasRaise(w.stmts)
+                    return true
+            on Stmt.for_in as f
+                if exprHasTry(f.iter)
+                    return true
+                if bodyHasRaise(f.stmts)
+                    return true
+            on Stmt.for_num as fnum
+                if exprHasTry(fnum.start)
+                    return true
+                if exprHasTry(fnum.stop_)
+                    return true
+                if bodyHasRaise(fnum.stmts)
+                    return true
+            on Stmt.branch_ as b
+                for c in b.cases
+                    if bodyHasRaise(c.stmts)
+                        return true
+                if b.else_ != nil
+                    if bodyHasRaise(b.else_ to!)
+                        return true
+            on Stmt.with_ as w
+                if bodyHasRaise(w.stmts)
+                    return true
+            on Stmt.arena_scope as a
+                if bodyHasRaise(a.stmts)
+                    return true
+            on Stmt.defer_ as d
+                # Defer body is a single statement; wrap in a temporary list to recurse.
+                var dl = List(Stmt)()
+                dl.add(d.stmt)
+                if bodyHasRaise(dl)
+                    return true
+            on Stmt.guard_ as g
+                if exprHasTry(g.cond)
+                    return true
+                if bodyHasRaise(g.else_stmts)
+                    return true
+            on Stmt.try_catch
+                # try/catch absorbs raises -- do not propagate outward.
+                pass
+            else
+                pass
+    return false
+
+# ── bodyNeedsErrVar ───────────────────────────────────────────────────────────
+# Returns true if the body requires a mutable _try_err variable.
+# Identical to bodyHasRaise: both raise_ and bare try_ expressions trigger this.
+
+def bodyNeedsErrVar(stmts as List(Stmt)) as bool
+    return bodyHasRaise(stmts)
+
+# ── nilNarrowVar ──────────────────────────────────────────────────────────────
+# If `cond` is `x != nil` (for_then=true) or `x == nil` (for_then=false),
+# returns the name of the variable being nil-checked.  Returns nil otherwise.
+
+def nilNarrowVar(cond as Expr, for_then as bool) as str?
+    branch cond
+        on Expr.binary as b
+            if for_then
+                if b.op != BinaryOp.ne
+                    return nil
+            else
+                if b.op != BinaryOp.eq
+                    return nil
+            # Check left=ident, right=nil
+            branch b.left
+                on Expr.ident as id
+                    branch b.right
+                        on Expr.nil_
+                            return id.name
+                        else
+                            pass
+                else
+                    pass
+            # Check left=nil, right=ident
+            branch b.left
+                on Expr.nil_
+                    branch b.right
+                        on Expr.ident as id
+                            return id.name
+                        else
+                            pass
+                else
+                    pass
+            return nil
+        else
+            return nil
+
+# ── nameUsedInExpr ────────────────────────────────────────────────────────────
+# Returns true if `name` appears as an ExprIdent anywhere in `expr`.
+# List(^Expr) nodes (list_lit, array_lit, tuple_lit) are skipped conservatively.
+
+def nameUsedInExpr(name as str, expr as Expr) as bool
+    branch expr
+        on Expr.ident as id
+            return id.name == name
+        on Expr.binary as b
+            if nameUsedInExpr(name, b.left)
+                return true
+            return nameUsedInExpr(name, b.right)
+        on Expr.unary as u
+            return nameUsedInExpr(name, u.operand)
+        on Expr.call as c
+            if nameUsedInExpr(name, c.callee)
+                return true
+            for arg in c.args
+                if nameUsedInExpr(name, arg.value)
+                    return true
+            return false
+        on Expr.member as m
+            return nameUsedInExpr(name, m.object)
+        on Expr.index as i
+            if nameUsedInExpr(name, i.object)
+                return true
+            return nameUsedInExpr(name, i.index)
+        on Expr.orelse_ as o
+            if nameUsedInExpr(name, o.expr)
+                return true
+            return nameUsedInExpr(name, o.fallback)
+        on Expr.catch_ as ca
+            if nameUsedInExpr(name, ca.expr)
+                return true
+            return nameUsedInExpr(name, ca.fallback)
+        on Expr.if_expr as i
+            if nameUsedInExpr(name, i.cond)
+                return true
+            if nameUsedInExpr(name, i.then_expr)
+                return true
+            return nameUsedInExpr(name, i.else_expr)
+        on Expr.to_nilable as t
+            return nameUsedInExpr(name, t.expr)
+        on Expr.to_non_nil as t
+            return nameUsedInExpr(name, t.expr)
+        on Expr.is_nil as t
+            return nameUsedInExpr(name, t.expr)
+        on Expr.cast as c
+            return nameUsedInExpr(name, c.expr)
+        on Expr.type_check as t
+            return nameUsedInExpr(name, t.expr)
+        on Expr.try_ as t
+            return nameUsedInExpr(name, t.expr)
+        on Expr.dict_lit as d
+            for entry in d.entries
+                if nameUsedInExpr(name, entry.key)
+                    return true
+                if nameUsedInExpr(name, entry.value)
+                    return true
+            return false
+        on Expr.string_interp as si
+            for part in si.parts
+                branch part
+                    on StringPart.expr_ as e
+                        if nameUsedInExpr(name, e)
+                            return true
+                    else
+                        pass
+            return false
+        on Expr.all_any as a
+            if nameUsedInExpr(name, a.iter)
+                return true
+            return nameUsedInExpr(name, a.cond)
+        else
+            # Literals, nil_, this_, zig_lit, list_lit, array_lit, tuple_lit -- no idents
+            return false
+
+# ── nameUsedInStmt / nameUsedInStmts ─────────────────────────────────────────
+
+def nameUsedInStmts(name as str, stmts as List(Stmt)) as bool
+    for s in stmts
+        if nameUsedInStmt(name, s)
+            return true
+    return false
+
+def nameUsedInStmt(name as str, stmt as Stmt) as bool
+    branch stmt
+        on Stmt.var_ as n
+            if n.init_expr != nil
+                return nameUsedInExpr(name, n.init_expr to!)
+            return false
+        on Stmt.assign as a
+            if nameUsedInExpr(name, a.target)
+                return true
+            return nameUsedInExpr(name, a.value)
+        on Stmt.return_ as r
+            if r.value != nil
+                return nameUsedInExpr(name, r.value to!)
+            return false
+        on Stmt.expr as e
+            return nameUsedInExpr(name, e)
+        on Stmt.assert_ as a
+            if nameUsedInExpr(name, a.cond)
+                return true
+            if a.message != nil
+                return nameUsedInExpr(name, a.message to!)
+            return false
+        on Stmt.if_ as si
+            if nameUsedInExpr(name, si.cond)
+                return true
+            if nameUsedInStmts(name, si.then_stmts)
+                return true
+            for ei in si.else_ifs
+                if nameUsedInExpr(name, ei.cond)
+                    return true
+                if nameUsedInStmts(name, ei.stmts)
+                    return true
+            if si.else_stmts != nil
+                return nameUsedInStmts(name, si.else_stmts to!)
+            return false
+        on Stmt.while_ as w
+            if nameUsedInExpr(name, w.cond)
+                return true
+            return nameUsedInStmts(name, w.stmts)
+        on Stmt.for_in as f
+            if nameUsedInExpr(name, f.iter)
+                return true
+            return nameUsedInStmts(name, f.stmts)
+        on Stmt.for_num as fnum
+            if nameUsedInExpr(name, fnum.start)
+                return true
+            if nameUsedInExpr(name, fnum.stop_)
+                return true
+            return nameUsedInStmts(name, fnum.stmts)
+        on Stmt.guard_ as g
+            if nameUsedInExpr(name, g.cond)
+                return true
+            return nameUsedInStmts(name, g.else_stmts)
+        on Stmt.destruct as d
+            return nameUsedInExpr(name, d.init_expr)
+        on Stmt.arena_scope as a
+            return nameUsedInStmts(name, a.stmts)
+        else
+            return false
+
+# ── collectAllIdents ──────────────────────────────────────────────────────────
+# Add all ExprIdent names reachable from `expr` into `out`.
+# Used by escape analysis.  List(^Expr) containers are skipped -- see note.
+
+def collectAllIdents(expr as Expr, out as StrSet)
+    branch expr
+        on Expr.ident as id
+            out.add(id.name)
+        on Expr.call as c
+            collectAllIdents(c.callee, out)
+            for arg in c.args
+                collectAllIdents(arg.value, out)
+        on Expr.member as m
+            collectAllIdents(m.object, out)
+        on Expr.binary as b
+            collectAllIdents(b.left, out)
+            collectAllIdents(b.right, out)
+        on Expr.unary as u
+            collectAllIdents(u.operand, out)
+        on Expr.to_nilable as t
+            collectAllIdents(t.expr, out)
+        on Expr.to_non_nil as t
+            collectAllIdents(t.expr, out)
+        on Expr.is_nil as t
+            collectAllIdents(t.expr, out)
+        on Expr.orelse_ as o
+            collectAllIdents(o.expr, out)
+            collectAllIdents(o.fallback, out)
+        on Expr.catch_ as ca
+            collectAllIdents(ca.expr, out)
+            collectAllIdents(ca.fallback, out)
+        on Expr.if_expr as i
+            collectAllIdents(i.cond, out)
+            collectAllIdents(i.then_expr, out)
+            collectAllIdents(i.else_expr, out)
+        on Expr.cast as c
+            collectAllIdents(c.expr, out)
+        on Expr.try_ as t
+            collectAllIdents(t.expr, out)
+        on Expr.type_check as t
+            collectAllIdents(t.expr, out)
+        on Expr.dict_lit as d
+            for entry in d.entries
+                collectAllIdents(entry.key, out)
+                collectAllIdents(entry.value, out)
+        on Expr.string_interp as si
+            for part in si.parts
+                branch part
+                    on StringPart.expr_ as e
+                        collectAllIdents(e, out)
+                    else
+                        pass
+        on Expr.all_any as a
+            collectAllIdents(a.iter, out)
+            collectAllIdents(a.cond, out)
+        else
+            # Literals, nil_, this_, zig_lit, list_lit, array_lit, tuple_lit -- no user idents
+            pass
+
+# ── seedEscapedFromReturns ────────────────────────────────────────────────────
+# Add all ident names appearing in return expressions to `out`.
+
+def seedEscapedFromReturns(stmts as List(Stmt), out as StrSet)
+    for s in stmts
+        branch s
+            on Stmt.return_ as r
+                if r.value != nil
+                    collectAllIdents(r.value to!, out)
+            on Stmt.if_ as si
+                seedEscapedFromReturns(si.then_stmts, out)
+                for ei in si.else_ifs
+                    seedEscapedFromReturns(ei.stmts, out)
+                if si.else_stmts != nil
+                    seedEscapedFromReturns(si.else_stmts to!, out)
+            on Stmt.while_ as w
+                seedEscapedFromReturns(w.stmts, out)
+            on Stmt.for_in as f
+                seedEscapedFromReturns(f.stmts, out)
+            on Stmt.for_num as fnum
+                seedEscapedFromReturns(fnum.stmts, out)
+            on Stmt.branch_ as b
+                for c in b.cases
+                    seedEscapedFromReturns(c.stmts, out)
+                if b.else_ != nil
+                    seedEscapedFromReturns(b.else_ to!, out)
+            on Stmt.with_ as w
+                seedEscapedFromReturns(w.stmts, out)
+            on Stmt.arena_scope as a
+                seedEscapedFromReturns(a.stmts, out)
+            on Stmt.try_catch as tc
+                seedEscapedFromReturns(tc.stmts, out)
+                for cl in tc.clauses
+                    seedEscapedFromReturns(cl.stmts, out)
+            on Stmt.guard_ as g
+                seedEscapedFromReturns(g.else_stmts, out)
+            else
+                pass
+
+# ── propagateEscapesOnce ──────────────────────────────────────────────────────
+# One propagation pass:
+#   var y = <expr>         -- if y is escaped, add all idents in <expr> to set
+#   escaped_obj.field = e  -- if obj is escaped, add idents in e to set
+# Returns true if the set grew (caller loops until stable).
+
+def propagateEscapesOnce(stmts as List(Stmt), out as StrSet) as bool
+    var grew = false
+    for s in stmts
+        branch s
+            on Stmt.var_ as n
+                if out.contains_(n.name)
+                    if n.init_expr != nil
+                        var before = out.count()
+                        collectAllIdents(n.init_expr to!, out)
+                        if out.count() > before
+                            grew = true
+            on Stmt.assign as a
+                branch a.target
+                    on Expr.member as m
+                        branch m.object
+                            on Expr.ident as id
+                                if out.contains_(id.name)
+                                    var before2 = out.count()
+                                    collectAllIdents(a.value, out)
+                                    if out.count() > before2
+                                        grew = true
+                            else
+                                pass
+                    else
+                        pass
+            on Stmt.if_ as si
+                if propagateEscapesOnce(si.then_stmts, out)
+                    grew = true
+                for ei in si.else_ifs
+                    if propagateEscapesOnce(ei.stmts, out)
+                        grew = true
+                if si.else_stmts != nil
+                    if propagateEscapesOnce(si.else_stmts to!, out)
+                        grew = true
+            on Stmt.while_ as w
+                if propagateEscapesOnce(w.stmts, out)
+                    grew = true
+            on Stmt.for_in as f
+                if propagateEscapesOnce(f.stmts, out)
+                    grew = true
+            on Stmt.for_num as fnum
+                if propagateEscapesOnce(fnum.stmts, out)
+                    grew = true
+            on Stmt.branch_ as b
+                for c in b.cases
+                    if propagateEscapesOnce(c.stmts, out)
+                        grew = true
+                if b.else_ != nil
+                    if propagateEscapesOnce(b.else_ to!, out)
+                        grew = true
+            on Stmt.with_ as ww
+                if propagateEscapesOnce(ww.stmts, out)
+                    grew = true
+            on Stmt.arena_scope as a
+                if propagateEscapesOnce(a.stmts, out)
+                    grew = true
+            on Stmt.try_catch as tc
+                if propagateEscapesOnce(tc.stmts, out)
+                    grew = true
+                for cl in tc.clauses
+                    if propagateEscapesOnce(cl.stmts, out)
+                        grew = true
+            on Stmt.guard_ as g
+                if propagateEscapesOnce(g.else_stmts, out)
+                    grew = true
+            else
+                pass
+    return grew
+
+# ── analyzeEscapes ────────────────────────────────────────────────────────────
+# Compute the set of local variable names whose values escape via return.
+# Seed from return expressions, then fixed-point propagate through aliases.
+
+def analyzeEscapes(stmts as List(Stmt)) as StrSet
+    var out = StrSet()
+    seedEscapedFromReturns(stmts, out)
+    var keep_going = true
+    while keep_going
+        keep_going = propagateEscapesOnce(stmts, out)
+    return out
+
+# ── scanMutationsInExpr ───────────────────────────────────────────────────────
+# Mark any local variable that is the receiver of a method call as mutated.
+# This is a conservative over-approximation (no TypeChecker): every method
+# call on a local ident marks it as `var`.  The Zig implementation uses a
+# TC-driven allow-list; we add that refinement when TC integration is wired.
+
+def scanMutationsInExpr(expr as Expr, out as StrSet)
+    branch expr
+        on Expr.call as c
+            branch c.callee
+                on Expr.member as m
+                    branch m.object
+                        on Expr.ident as id
+                            out.add(id.name)
+                        else
+                            pass
+                else
+                    pass
+            for arg in c.args
+                scanMutationsInExpr(arg.value, out)
+        on Expr.binary as b
+            scanMutationsInExpr(b.left, out)
+            scanMutationsInExpr(b.right, out)
+        on Expr.unary as u
+            scanMutationsInExpr(u.operand, out)
+        on Expr.member as m
+            scanMutationsInExpr(m.object, out)
+        on Expr.try_ as t
+            scanMutationsInExpr(t.expr, out)
+        on Expr.type_check as t
+            scanMutationsInExpr(t.expr, out)
+        on Expr.if_expr as i
+            scanMutationsInExpr(i.cond, out)
+            scanMutationsInExpr(i.then_expr, out)
+            scanMutationsInExpr(i.else_expr, out)
+        on Expr.orelse_ as o
+            scanMutationsInExpr(o.expr, out)
+            scanMutationsInExpr(o.fallback, out)
+        on Expr.catch_ as ca
+            scanMutationsInExpr(ca.expr, out)
+            scanMutationsInExpr(ca.fallback, out)
+        on Expr.dict_lit as d
+            for entry in d.entries
+                scanMutationsInExpr(entry.key, out)
+                scanMutationsInExpr(entry.value, out)
+        on Expr.string_interp as si
+            for part in si.parts
+                branch part
+                    on StringPart.expr_ as e
+                        scanMutationsInExpr(e, out)
+                    else
+                        pass
+        else
+            pass
+
+# ── scanMutationsInto / scanMutations ─────────────────────────────────────────
+
+def scanMutationsInto(stmts as List(Stmt), out as StrSet)
+    for s in stmts
+        branch s
+            on Stmt.assign as a
+                branch a.target
+                    on Expr.ident as id
+                        out.add(id.name)
+                    on Expr.member as m
+                        branch m.object
+                            on Expr.ident as id
+                                out.add(id.name)
+                            else
+                                pass
+                    else
+                        pass
+            on Stmt.if_ as si
+                scanMutationsInto(si.then_stmts, out)
+                for ei in si.else_ifs
+                    scanMutationsInto(ei.stmts, out)
+                if si.else_stmts != nil
+                    scanMutationsInto(si.else_stmts to!, out)
+            on Stmt.while_ as w
+                scanMutationsInto(w.stmts, out)
+            on Stmt.for_in as f
+                scanMutationsInto(f.stmts, out)
+            on Stmt.for_num as fnum
+                scanMutationsInto(fnum.stmts, out)
+            on Stmt.branch_ as b
+                for c in b.cases
+                    scanMutationsInto(c.stmts, out)
+                if b.else_ != nil
+                    scanMutationsInto(b.else_ to!, out)
+            on Stmt.var_ as n
+                if n.init_expr != nil
+                    scanMutationsInExpr(n.init_expr to!, out)
+            on Stmt.return_ as r
+                if r.value != nil
+                    scanMutationsInExpr(r.value to!, out)
+            on Stmt.expr as e
+                scanMutationsInExpr(e, out)
+            on Stmt.with_ as w
+                branch w.target
+                    on Expr.ident as id
+                        out.add(id.name)
+                    else
+                        pass
+                scanMutationsInto(w.stmts, out)
+            on Stmt.arena_scope as a
+                scanMutationsInto(a.stmts, out)
+            on Stmt.try_catch as tc
+                scanMutationsInto(tc.stmts, out)
+                for cl in tc.clauses
+                    scanMutationsInto(cl.stmts, out)
+            on Stmt.guard_ as g
+                scanMutationsInto(g.else_stmts, out)
+            else
+                pass
+
+def scanMutations(stmts as List(Stmt)) as StrSet
+    var out = StrSet()
+    scanMutationsInto(stmts, out)
+    return out

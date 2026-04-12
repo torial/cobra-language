@@ -226,11 +226,16 @@ fn run(src: []const u8, path: []const u8, mode: Mode, gui_backend: CodeGen.GuiBa
         };
         switch (dep.kind) {
             .zbr => {
-                // dep.path lives until dep_visited is freed (end of run()).
-                // Skip if already compiled as a transitive dep of an earlier
-                // direct dep (diamond-dep case).  The interface is still in
-                // iface_cache so the root file's TC can reach it.
-                if (dep_visited.contains(dep.path)) continue;
+                // Diamond-dep case: already compiled as a transitive dep.
+                // The interface is in iface_cache — clone it into imported_modules
+                // so the root file's TC/CG can recognize the module's types/unions.
+                if (dep_visited.contains(dep.path)) {
+                    if (iface_cache.getPtr(dep.path)) |cached| {
+                        try imported_modules.put(u.path, try cloneInterface(cached, alloc));
+                    }
+                    alloc.free(dep.path);
+                    continue;
+                }
                 if (try compileZbrToZig(dep.path, &dep_visited, &iface_cache, alloc)) |iface| {
                     try imported_modules.put(u.path, iface);
                 } else {
@@ -586,7 +591,63 @@ fn cloneInterface(src: *const TypeChecker.ModuleInterface, alloc: std.mem.Alloca
             try variant_payload_types.put(k, v);
         }
     }
-    return .{ .methods = methods, .fields = fields, .types = types, .throws_methods = throws_methods, .boxed_variants = boxed_variants, .variant_payload_types = variant_payload_types };
+    var instance_field_types = std.StringHashMap([]const u8).init(alloc);
+    errdefer instance_field_types.deinit();
+    {
+        var it = src.instance_field_types.iterator();
+        while (it.next()) |e| {
+            const k = try alloc.dupe(u8, e.key_ptr.*);
+            errdefer alloc.free(k);
+            const v = try alloc.dupe(u8, e.value_ptr.*);
+            try instance_field_types.put(k, v);
+        }
+    }
+    var instance_method_return_types = std.StringHashMap([]const u8).init(alloc);
+    errdefer instance_method_return_types.deinit();
+    {
+        var it = src.instance_method_return_types.iterator();
+        while (it.next()) |e| {
+            const k = try alloc.dupe(u8, e.key_ptr.*);
+            errdefer alloc.free(k);
+            const v = try alloc.dupe(u8, e.value_ptr.*);
+            try instance_method_return_types.put(k, v);
+        }
+    }
+    var ref_fields = std.StringHashMap(void).init(alloc);
+    errdefer ref_fields.deinit();
+    {
+        var it = src.ref_fields.keyIterator();
+        while (it.next()) |k| try ref_fields.put(try alloc.dupe(u8, k.*), {});
+    }
+    var optional_ref_fields = std.StringHashMap(void).init(alloc);
+    errdefer optional_ref_fields.deinit();
+    {
+        var it = src.optional_ref_fields.keyIterator();
+        while (it.next()) |k| try optional_ref_fields.put(try alloc.dupe(u8, k.*), {});
+    }
+    var struct_init_ref_params = std.StringHashMap([]bool).init(alloc);
+    errdefer struct_init_ref_params.deinit();
+    {
+        var it = src.struct_init_ref_params.iterator();
+        while (it.next()) |e| {
+            const k = try alloc.dupe(u8, e.key_ptr.*);
+            errdefer alloc.free(k);
+            const v = try alloc.dupe(bool, e.value_ptr.*);
+            try struct_init_ref_params.put(k, v);
+        }
+    }
+    var list_field_elem_types = std.StringHashMap([]const u8).init(alloc);
+    errdefer list_field_elem_types.deinit();
+    {
+        var it = src.list_field_elem_types.iterator();
+        while (it.next()) |e| {
+            const k = try alloc.dupe(u8, e.key_ptr.*);
+            errdefer alloc.free(k);
+            const v = try alloc.dupe(u8, e.value_ptr.*);
+            try list_field_elem_types.put(k, v);
+        }
+    }
+    return .{ .methods = methods, .fields = fields, .types = types, .throws_methods = throws_methods, .boxed_variants = boxed_variants, .variant_payload_types = variant_payload_types, .instance_field_types = instance_field_types, .instance_method_return_types = instance_method_return_types, .ref_fields = ref_fields, .optional_ref_fields = optional_ref_fields, .struct_init_ref_params = struct_init_ref_params, .list_field_elem_types = list_field_elem_types };
 }
 
 /// Compile a .zbr file to the corresponding .zig file, first recursively
@@ -619,12 +680,18 @@ fn compileZbrToZig(
         if (iface_cache.get(zbr_path)) |cached| return try cloneInterface(&cached, alloc);
         // Genuine cycle (A → B → A): return an empty interface to break the loop.
         return TypeChecker.ModuleInterface{
-            .methods              = std.StringHashMap(TypeChecker.Type).init(alloc),
-            .fields               = std.StringHashMap(TypeChecker.Type).init(alloc),
-            .types                = std.StringHashMap(TypeChecker.TypeKind).init(alloc),
-            .throws_methods       = std.StringHashMap(void).init(alloc),
-            .boxed_variants       = std.StringHashMap([]const u8).init(alloc),
-            .variant_payload_types = std.StringHashMap([]const u8).init(alloc),
+            .methods                      = std.StringHashMap(TypeChecker.Type).init(alloc),
+            .fields                       = std.StringHashMap(TypeChecker.Type).init(alloc),
+            .types                        = std.StringHashMap(TypeChecker.TypeKind).init(alloc),
+            .throws_methods               = std.StringHashMap(void).init(alloc),
+            .boxed_variants               = std.StringHashMap([]const u8).init(alloc),
+            .variant_payload_types        = std.StringHashMap([]const u8).init(alloc),
+            .instance_field_types         = std.StringHashMap([]const u8).init(alloc),
+            .instance_method_return_types = std.StringHashMap([]const u8).init(alloc),
+            .ref_fields                   = std.StringHashMap(void).init(alloc),
+            .optional_ref_fields          = std.StringHashMap(void).init(alloc),
+            .struct_init_ref_params       = std.StringHashMap([]bool).init(alloc),
+            .list_field_elem_types        = std.StringHashMap([]const u8).init(alloc),
         };
     }
 
