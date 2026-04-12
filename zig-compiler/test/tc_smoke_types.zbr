@@ -1,0 +1,17 @@
+# Smoke: minimal tc_types module to verify multi-file selfhost works.
+
+union TcType
+    unknown
+    int_
+    str_
+    optional as ^TcType
+
+class TcTypes
+    shared
+        def describe(t as TcType) as str
+            branch t
+                on TcType.unknown   return "unknown"
+                on TcType.int_      return "int"
+                on TcType.str_      return "str"
+                on TcType.optional as inner
+                    return "?" + TcTypes.describe(inner)

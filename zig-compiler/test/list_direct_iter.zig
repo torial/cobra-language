@@ -6,7 +6,9 @@ const builtin = @import("builtin");
 
 var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 var _allocator: std.mem.Allocator = undefined;
-pub fn _initAllocator(a: std.mem.Allocator) void { _allocator = a; }
+pub fn _initAllocator(a: std.mem.Allocator) void {
+    _allocator = a;
+}
 
 const _Stringable = struct {
     ptr:         *anyopaque,
@@ -1465,7 +1467,6 @@ pub const Program = struct {
     pub fn main() void {
 // zbr:test/list_direct_iter.zbr:4
         var nums = std.ArrayList(i64){};
-        defer nums.deinit(_allocator);
 // zbr:test/list_direct_iter.zbr:5
         nums.append(_allocator, 1) catch unreachable;
 // zbr:test/list_direct_iter.zbr:6

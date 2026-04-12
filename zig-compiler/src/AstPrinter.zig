@@ -89,6 +89,7 @@ const Printer = struct {
             .enum_     => |n| try p.printEnum(n.*),
             .extend    => |n| try p.printExtend(n.*),
             .union_    => |n| try p.w("(union {s})", .{n.name}),
+            .sig_      => |n| try p.w("(sig {s})", .{n.name}),
             .method    => |n| try p.printMethod(n.*),
             .property  => |n| try p.printProperty(n.*),
             .var_      => |n| try p.printVar(n.*),
@@ -306,6 +307,7 @@ const Printer = struct {
                 for (g.args) |arg| { try p.w(" ", .{}); try p.printTypeRef(arg); }
                 try p.w(">", .{});
             },
+            .ref_to  => |inner| { try p.w("^", .{}); try p.printTypeRef(inner.*); },
             .void_  => try p.w("void", .{}),
             .same   => try p.w("same", .{}),
             .tuple  => |tup| {

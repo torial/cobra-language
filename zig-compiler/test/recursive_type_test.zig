@@ -6,7 +6,9 @@ const builtin = @import("builtin");
 
 var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 var _allocator: std.mem.Allocator = undefined;
-pub fn _initAllocator(a: std.mem.Allocator) void { _allocator = a; }
+pub fn _initAllocator(a: std.mem.Allocator) void {
+    _allocator = a;
+}
 
 const _Stringable = struct {
     ptr:         *anyopaque,
@@ -1552,15 +1554,15 @@ pub const Main = struct {
 // zbr:test/recursive_type_test.zbr:45
         var b = Node.init(2);
 // zbr:test/recursive_type_test.zbr:46
-        { const _rp = _allocator.create(Node) catch @panic("OOM"); _rp.* = c; b.next = _rp; }
+        { const _rp = _allocator.create(Node) catch @panic("OOM"); _rp.* = c; b.next.* = _rp; }
 // zbr:test/recursive_type_test.zbr:48
         var a = Node.init(1);
 // zbr:test/recursive_type_test.zbr:49
-        { const _rp = _allocator.create(Node) catch @panic("OOM"); _rp.* = b; a.next = _rp; }
+        { const _rp = _allocator.create(Node) catch @panic("OOM"); _rp.* = b; a.next.* = _rp; }
 // zbr:test/recursive_type_test.zbr:51
         std.debug.assert((a.value == 1));
 // zbr:test/recursive_type_test.zbr:54
-        const n = a.next;
+        const n = a.next.*;
 // zbr:test/recursive_type_test.zbr:55
         std.debug.assert((n != null));
 // zbr:test/recursive_type_test.zbr:56
@@ -1578,19 +1580,19 @@ pub const Main = struct {
 // zbr:test/recursive_type_test.zbr:66
         var root = Tree.init(5);
 // zbr:test/recursive_type_test.zbr:67
-        { const _rp = _allocator.create(Tree) catch @panic("OOM"); _rp.* = leaf_l; root.left = _rp; }
+        { const _rp = _allocator.create(Tree) catch @panic("OOM"); _rp.* = leaf_l; root.left.* = _rp; }
 // zbr:test/recursive_type_test.zbr:68
-        { const _rp = _allocator.create(Tree) catch @panic("OOM"); _rp.* = leaf_r; root.right = _rp; }
+        { const _rp = _allocator.create(Tree) catch @panic("OOM"); _rp.* = leaf_r; root.right.* = _rp; }
 // zbr:test/recursive_type_test.zbr:70
         std.debug.assert((root.value == 5));
 // zbr:test/recursive_type_test.zbr:71
-        const rl = root.left;
+        const rl = root.left.*;
 // zbr:test/recursive_type_test.zbr:72
         std.debug.assert((rl != null));
 // zbr:test/recursive_type_test.zbr:73
         std.debug.assert((rl.?.value == 10));
 // zbr:test/recursive_type_test.zbr:74
-        const rr = root.right;
+        const rr = root.right.*;
 // zbr:test/recursive_type_test.zbr:75
         std.debug.assert((rr != null));
 // zbr:test/recursive_type_test.zbr:76
@@ -1600,9 +1602,9 @@ pub const Main = struct {
 // zbr:test/recursive_type_test.zbr:82
         const holder = PairHolder.init(pair);
 // zbr:test/recursive_type_test.zbr:83
-        std.debug.assert((holder.p.a == 7));
+        std.debug.assert((holder.p.*.a == 7));
 // zbr:test/recursive_type_test.zbr:84
-        std.debug.assert((holder.p.b == 13));
+        std.debug.assert((holder.p.*.b == 13));
 // zbr:test/recursive_type_test.zbr:86
         std.debug.print("{s}\n", .{"recursive_type_test OK"});
     }

@@ -6,7 +6,9 @@ const builtin = @import("builtin");
 
 var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 var _allocator: std.mem.Allocator = undefined;
-pub fn _initAllocator(a: std.mem.Allocator) void { _allocator = a; }
+pub fn _initAllocator(a: std.mem.Allocator) void {
+    _allocator = a;
+}
 
 const _Stringable = struct {
     ptr:         *anyopaque,
@@ -1493,7 +1495,6 @@ pub const RandomTest = struct {
         std.debug.print("{s}\n", .{"bytes length: OK"});
 // zbr:test/random_test.zbr:28
         var fruits = std.ArrayList([]const u8){};
-        defer fruits.deinit(_allocator);
 // zbr:test/random_test.zbr:29
         fruits.append(_allocator, "apple") catch unreachable;
 // zbr:test/random_test.zbr:30
@@ -1506,7 +1507,6 @@ pub const RandomTest = struct {
         std.debug.print("{s}\n", .{"choice: OK"});
 // zbr:test/random_test.zbr:36
         var nums = std.ArrayList(i64){};
-        defer nums.deinit(_allocator);
 // zbr:test/random_test.zbr:37
         nums.append(_allocator, 1) catch unreachable;
 // zbr:test/random_test.zbr:38
@@ -1520,7 +1520,7 @@ pub const RandomTest = struct {
 // zbr:test/random_test.zbr:42
         (if (nums.items.len > 0) _rng().shuffle(@TypeOf(nums.items[0]), nums.items));
 // zbr:test/random_test.zbr:43
-        std.debug.assert((nums.items.len == 5));
+        std.debug.assert((@as(i64, @intCast(nums.items.len)) == 5));
 // zbr:test/random_test.zbr:44
         std.debug.print("{s}\n", .{"shuffle: OK"});
 // zbr:test/random_test.zbr:46

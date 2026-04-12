@@ -1072,7 +1072,7 @@ fn resolveSnippet(src: []const u8) anyerror!TestResult {
     var bind_result = try Binder.bindPass1(module, sym_arena.allocator(), alloc);
     defer bind_result.deinit();
 
-    const result = try resolvePass2(module, &bind_result.table, alloc, alloc);
+    const result = try resolvePass2(module, &bind_result.table, alloc, alloc, null);
     return .{ .result = result, .sym_arena = sym_arena };
 }
 

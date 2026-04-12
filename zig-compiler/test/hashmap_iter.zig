@@ -6,7 +6,9 @@ const builtin = @import("builtin");
 
 var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 var _allocator: std.mem.Allocator = undefined;
-pub fn _initAllocator(a: std.mem.Allocator) void { _allocator = a; }
+pub fn _initAllocator(a: std.mem.Allocator) void {
+    _allocator = a;
+}
 
 const _Stringable = struct {
     ptr:         *anyopaque,
@@ -1465,7 +1467,6 @@ pub const Program = struct {
     pub fn main() void {
 // zbr:test/hashmap_iter.zbr:4
         var scores = std.StringHashMap(i64).init(_allocator);
-        defer scores.deinit();
 // zbr:test/hashmap_iter.zbr:5
         scores.put((_allocator.dupe(u8, "alice") catch @panic("OOM")), 10) catch unreachable;
 // zbr:test/hashmap_iter.zbr:6

@@ -2789,7 +2789,7 @@ fn checkSnippet(src: []const u8) anyerror!TestResult {
     var bind = try Binder.bindPass1(module, sym_arena.allocator(), alloc);
     defer bind.deinit();
 
-    var resolve = try Resolver.resolvePass2(module, &bind.table, alloc, alloc);
+    var resolve = try Resolver.resolvePass2(module, &bind.table, alloc, alloc, null);
 
     const tc = try typeCheckPass3(module, &resolve, alloc, alloc, null);
     return .{ .resolve = resolve, .tc = tc, .sym_arena = sym_arena };

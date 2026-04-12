@@ -140,7 +140,7 @@ pub fn generate(
     defer union_names.deinit();
     var union_decls = try collectUnionDecls(module, alloc);
     defer union_decls.deinit();
-    var exposed_unions = std.StringHashMap(void).init(alloc);
+    var exposed_unions = std.StringHashMap([]const u8).init(alloc); // maps exposed name → module alias
     defer exposed_unions.deinit();
     var exposed_classes = std.StringHashMap(void).init(alloc);
     defer exposed_classes.deinit();
@@ -1133,9 +1133,9 @@ const Generator = struct {
     /// expression can emit a labeled-block boxing expression.
     union_decls: *const std.StringHashMap(*const Ast.DeclUnion),
     /// Union type names introduced by selective imports (`use Mod exposing UnionName`).
-    /// Populated lazily by `genUse` when an exposed name is a union in the dep's
-    /// ModuleInterface.  Allows `UnionName.variant(v)` → `UnionName{ .variant = v }`.
-    exposed_unions: *std.StringHashMap(void),
+    /// Maps exposed name → module alias so boxing info can be fetched from ModuleInterface.
+    /// Populated lazily by `genUse`; allows `UnionName.variant(v)` → `UnionName{ .variant = v }`.
+    exposed_unions: *std.StringHashMap([]const u8),
     /// Class/struct names introduced by selective imports (`use Mod exposing ClassName`).
     /// Populated lazily by `genUse` when the exposed name is a class (non-union) type.
     /// Allows `ClassName(args)` → `ClassName.init(args)` without a class symbol lookup.
@@ -3307,7 +3307,7 @@ const Generator = struct {
                     if (iface_opt) |iface| {
                         if (iface.types.getPtr(exp_name)) |is_union_ptr| {
                             if (is_union_ptr.*) {
-                                try g.exposed_unions.put(exp_name, {});
+                                try g.exposed_unions.put(exp_name, alias);
                             } else {
                                 try g.exposed_classes.put(exp_name, {});
                             }
@@ -8786,9 +8786,9 @@ const Generator = struct {
                             if (box_type) |inner_name| {
                                 const box_lbl = try std.fmt.allocPrint(g.alloc, "_box_{x}", .{@intFromPtr(e)});
                                 defer g.alloc.free(box_lbl);
-                                try g.w.print("{s}: {{ const _bp_{x} = try _allocator.create(", .{ box_lbl, @intFromPtr(e) });
+                                try g.w.print("{s}: {{ const _bp_{x} = _allocator.create(", .{ box_lbl, @intFromPtr(e) });
                                 try g.w.print("{s}.{s}", .{ mod_alias, inner_name });
-                                try g.w.print("); _bp_{x}.* = ", .{@intFromPtr(e)});
+                                try g.w.print(") catch @panic(\"OOM\"); _bp_{x}.* = ", .{@intFromPtr(e)});
                                 try g.genExpr(e.args[0].value);
                                 try g.w.print("; break :{s} _bp_{x}; }}", .{ box_lbl, @intFromPtr(e) });
                             } else {
@@ -8817,8 +8817,12 @@ const Generator = struct {
                     try g.w.print("{s}{{ .{s} = ", .{type_name, mem.member});
                     if (e.args.len == 1) {
                         // Check whether this variant's payload is ^T (heap-boxed).
-                        // If so, emit a labeled-block expression that allocates and fills a pointer.
+                        // For same-module unions: look up union_decls.
+                        // For exposed (cross-module) unions: look up boxed_variants via the
+                        // stored module alias so the correct qualified inner type is emitted.
                         var box_inner: ?*const Ast.TypeRef = null;
+                        var box_xmod_alias: ?[]const u8  = null;
+                        var box_xmod_inner: ?[]const u8  = null;
                         if (g.union_decls.get(type_name)) |du| {
                             for (du.variants) |v| {
                                 if (std.mem.eql(u8, v.name, mem.member)) {
@@ -8829,13 +8833,33 @@ const Generator = struct {
                                     break;
                                 }
                             }
+                        } else if (g.exposed_unions.get(type_name)) |mod_alias| {
+                            // Cross-module exposed union: consult boxed_variants table.
+                            if (g.imported_modules) |imp| {
+                                if (imp.get(mod_alias)) |iface| {
+                                    const key = try std.fmt.allocPrint(g.alloc, "{s}.{s}", .{ type_name, mem.member });
+                                    defer g.alloc.free(key);
+                                    if (iface.boxed_variants.get(key)) |inner_name| {
+                                        box_xmod_alias = mod_alias;
+                                        box_xmod_inner = inner_name;
+                                    }
+                                }
+                            }
                         }
                         if (box_inner) |inner| {
                             const box_lbl = try std.fmt.allocPrint(g.alloc, "_box_{x}", .{@intFromPtr(e)});
                             defer g.alloc.free(box_lbl);
-                            try g.w.print("{s}: {{ const _bp_{x} = try _allocator.create(", .{ box_lbl, @intFromPtr(e) });
+                            try g.w.print("{s}: {{ const _bp_{x} = _allocator.create(", .{ box_lbl, @intFromPtr(e) });
                             try g.genType(inner.*);
-                            try g.w.print("); _bp_{x}.* = ", .{@intFromPtr(e)});
+                            try g.w.print(") catch @panic(\"OOM\"); _bp_{x}.* = ", .{@intFromPtr(e)});
+                            try g.genExpr(e.args[0].value);
+                            try g.w.print("; break :{s} _bp_{x}; }}", .{ box_lbl, @intFromPtr(e) });
+                        } else if (box_xmod_inner) |inner_name| {
+                            const box_lbl = try std.fmt.allocPrint(g.alloc, "_box_{x}", .{@intFromPtr(e)});
+                            defer g.alloc.free(box_lbl);
+                            try g.w.print("{s}: {{ const _bp_{x} = _allocator.create(", .{ box_lbl, @intFromPtr(e) });
+                            try g.w.print("{s}.{s}", .{ box_xmod_alias.?, inner_name });
+                            try g.w.print(") catch @panic(\"OOM\"); _bp_{x}.* = ", .{@intFromPtr(e)});
                             try g.genExpr(e.args[0].value);
                             try g.w.print("; break :{s} _bp_{x}; }}", .{ box_lbl, @intFromPtr(e) });
                         } else {

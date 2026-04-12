@@ -298,3 +298,81 @@ Less than Phase 3. HashMaps and Lists are constructed freely, no allocator threa
 ### Net verdict: easier or harder than the Zig version?
 
 **Easier for the algorithm, harder than Phase 3 for infrastructure.** The resolver logic (two-pass, flat scope chain, `branch` dispatch) was pleasant to write. The friction was entirely CodeGen: three separate bugs around `this.field` type resolution, cross-module struct field iteration, and transitive initialization. All three are now fixed and will benefit Phase 5+. Phase 4 surfaced 4 new CodeGen bugs; compiler bug count across all phases: Phase 1 = 8, Phase 2 = 3, Phase 3 = 1, Phase 4 = 4, **total = 16**.
+
+---
+
+## Phase 5: Type Checker — Plan
+
+**Status:** Not yet started (probe validated 2026-04-11).
+**Target files (in dependency order):**
+
+| File | Role | Key patterns |
+|---|---|---|
+| `tc_types.zbr` | `TcType` union + `TcTypes` helpers | All union variant kinds; `^T`, `List(T)`, struct payload; recursive `describe`/`eql` |
+| `tc_scope.zbr` | `TcScope` class + `ScopeKind` enum | HashMap(str, TcSymbol); scope chain; `define`/`lookup`/`contains` |
+| `tc_stdlib.zbr` | `TcStdlib` registry | Registry pattern: `HashMap(str, StdlibEntry)`; dispatch by method name; returns expected arg/return types |
+| `tc_infer.zbr` | `TcInfer` — expression inference | `inferExpr(e as PNode) as TcType throws`; mutual recursion with `tc_check` |
+| `tc_check.zbr` | `TcCheck` — statement checking | `checkStmt(s as PNode) throws`; calls `tc_infer`; populates `expr_types` |
+| `typechecker.zbr` | `TypeChecker` — public entry point | Ties together all modules; entry: `check(root as PNode) as TcResult throws` |
+
+### File naming convention
+
+All TypeChecker source files use the `tc_` prefix. This is a **namespacing convention**, not a Zebra language feature — Zebra has no package system yet, so the prefix prevents name collisions with future compiler phases that may define their own `Types`, `Scope`, `Infer`, etc.
+
+Conventions:
+- `tc_*.zbr` — TypeChecker implementation files
+- Class names keep the `Tc` prefix: `TcType`, `TcScope`, `TcInfer`, `TcCheck`
+- The public entry class (`TypeChecker` in `typechecker.zbr`) drops the prefix since it's the only exported name
+
+The same convention will apply when other large compiler phases are split:
+- `cg_*.zbr` / `CgXxx` for Code Generator
+- `pr_*.zbr` / `PrXxx` for Parser (if re-split later)
+
+### `TcType` union design
+
+The `TcType` union in `tc_types.zbr` mirrors the probe5 `Type` union with renamed variants to match the Zig `TypeChecker.Type` exactly:
+
+```
+union TcType
+    unknown
+    int_   float_   bool_   char_   str_   void_   uint_
+    int_n  as int       # sized: int32, int64, etc.
+    uint_n as int
+    optional    as ^TcType
+    error_union as ^TcType
+    list_        as ^TcType
+    named        as TcNamedRef   # name + kind (class/struct/union/enum/interface)
+    tuple        as List(TcType)
+    fn_ref       as TcFnRef      # function references (first-class fn values)
+    cross_module as TcCrossRef   # two-string: module alias + type name
+    string_builder  http_response  regex  gui_context   # opaque stdlib types
+```
+
+The `TcNamedRef` struct carries the symbol name and `SymbolKind` enum so union equality (`std.meta.eql`) can distinguish `class Foo` from `union Foo`.
+
+### `TcStdlib` registry pattern
+
+Rather than a long if-else chain, `tc_stdlib.zbr` uses a `HashMap(str, StdlibEntry)` populated in `cue init`. Each entry declares the expected argument types and return type for a stdlib method call. `TcInfer` delegates to `TcStdlib.lookup(method_name)` and returns the entry's declared return type.
+
+This pattern is more maintainable than a switch: adding a new stdlib method is one `map.put(...)` call, and the map can be inspected / iterated for completeness checks later.
+
+### Boxing: `catch @panic("OOM")` instead of `try`
+
+All `^T` union variant construction uses `_allocator.create(T) catch @panic("OOM")` rather than `try _allocator.create(T)`. This means:
+
+- **Constructors for `^T`-payload variants do NOT force their callers to be `throws`.** A plain `def describe(t as TcType) as str` can create `TcType.optional(inner)` without marking itself as `throws`.
+- **Rationale:** The program uses an arena allocator. Arena allocators never return OOM in practice — they call `@panic` internally if the OS refuses `mmap`. Using `catch @panic("OOM")` makes this explicit: OOM is a fatal programming error, not a recoverable condition. `try` would force error unions through every constructor call site for a failure that cannot meaningfully be handled.
+
+This is the correct model for any program using a Zig `std.heap.ArenaAllocator`.
+
+### Multi-file selfhost: cross-module `^T` boxing confirmed
+
+`tc_smoke_main.zbr` (uses `use tc_smoke_types exposing TcType, TcTypes`) passes with the `catch @panic("OOM")` fix. The cross-module boxing path (via `exposed_unions` → module alias → `iface.boxed_variants`) generates correct Zig. Phase 5 can use `use` with `exposing` freely across all 6 files.
+
+### Bugs fixed in Phase 5 prep (probe5 — 5 additional bugs, total now 21)
+
+1. **`^T` branch-binding auto-deref** — `on Type.optional as inner` gives `*Type` from Zig switch; now generates `|inner_ptr| { const inner = inner_ptr.*; }` to auto-deref.
+2. **`List(T)` branch-binding loop tracking** — `on Type.tuple as elems` where `elems: List(Type)`; `for e in elems` now routes to `genForInList` (`.items` iteration) via `list_loop_vars` injection in `genBranch`.
+3. **`resolveFieldTypeRef` struct fix** — `withStruct` never set `owner_class`, so `^T` field boxing in `genAssign` silently skipped struct fields. Now falls back to `owner_members`.
+4. **Union `==` / `!=` via `std.meta.eql`** — Zig forbids `==` on tagged unions with payloads. When LHS TC type is a named union (`sym.kind == .union_`), generates `std.meta.eql(a, b)`.
+5. **`^T` struct field read auto-deref** — Accessing `pair.left` where `left: ^Expr` gives `*Expr` in Zig but `Expr` in Zebra. In `genExpr(.member)`, appends `.*` when field TypeRef is `ref_to`.

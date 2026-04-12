@@ -6,7 +6,9 @@ const builtin = @import("builtin");
 
 var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 var _allocator: std.mem.Allocator = undefined;
-pub fn _initAllocator(a: std.mem.Allocator) void { _allocator = a; }
+pub fn _initAllocator(a: std.mem.Allocator) void {
+    _allocator = a;
+}
 
 const _Stringable = struct {
     ptr:         *anyopaque,
@@ -1467,7 +1469,6 @@ pub const Program = struct {
         var ngrams = std.StringHashMap(i64).init(_allocator);
 // zbr:test/fuzzy_match.zbr:10
         var clist = std.ArrayList([]const u8){};
-        defer clist.deinit(_allocator);
 // zbr:test/fuzzy_match.zbr:11
         var _cp_it_1f8 = std.unicode.Utf8View.initUnchecked(text).iterator();
         while (_cp_it_1f8.nextCodepoint()) |c| {
@@ -1526,7 +1527,7 @@ pub const Program = struct {
 // zbr:test/fuzzy_match.zbr:35
         var verses = std.ArrayList([]const u8){};
 // zbr:test/fuzzy_match.zbr:36
-        var lines: std.ArrayList([]const u8) = (blk: {
+        const lines: std.ArrayList([]const u8) = (blk: {
             const _fl_content = std.fs.cwd().readFileAlloc(_allocator, path, std.math.maxInt(usize)) catch @panic("File.readLines error");
             var _fl_list = std.ArrayList([]const u8){};
             var _fl_it = std.mem.splitScalar(u8, _fl_content, '\n');
@@ -1535,7 +1536,6 @@ pub const Program = struct {
             }
             break :blk _fl_list;
         });
-        defer lines.deinit(_allocator);
 // zbr:test/fuzzy_match.zbr:37
         var first: bool = true;
 // zbr:test/fuzzy_match.zbr:38
@@ -1547,7 +1547,6 @@ pub const Program = struct {
             } else {
 // zbr:test/fuzzy_match.zbr:42
                 var parts = std.ArrayList([]const u8){};
-                defer parts.deinit(_allocator);
 // zbr:test/fuzzy_match.zbr:43
                 var _it_p = std.mem.splitSequence(u8, line, ",");
                 while (_it_p.next()) |p| {
@@ -1572,11 +1571,9 @@ pub const Program = struct {
 
     pub fn main() void {
 // zbr:test/fuzzy_match.zbr:52
-        var mark_verses: std.ArrayList([]const u8) = Program.loadVerses("test/texts/MAR.csv");
-        defer mark_verses.deinit(_allocator);
+        const mark_verses: std.ArrayList([]const u8) = Program.loadVerses("test/texts/MAR.csv");
 // zbr:test/fuzzy_match.zbr:53
-        var mat_verses: std.ArrayList([]const u8) = Program.loadVerses("test/texts/MAT.csv");
-        defer mat_verses.deinit(_allocator);
+        const mat_verses: std.ArrayList([]const u8) = Program.loadVerses("test/texts/MAT.csv");
 // zbr:test/fuzzy_match.zbr:54
         {
             const _pt0 = (std.fmt.allocPrint(_allocator, "Mark: {} verses", .{@as(i64, @intCast(mark_verses.items.len))}) catch @panic("OOM"));
@@ -1591,13 +1588,10 @@ pub const Program = struct {
         }
 // zbr:test/fuzzy_match.zbr:58
         var mat_ngrams = std.ArrayList(std.StringHashMap(i64)){};
-        defer mat_ngrams.deinit(_allocator);
 // zbr:test/fuzzy_match.zbr:59
         var mat_totals = std.ArrayList(i64){};
-        defer mat_totals.deinit(_allocator);
 // zbr:test/fuzzy_match.zbr:60
         var mat_idx = std.ArrayList(i64){};
-        defer mat_idx.deinit(_allocator);
 // zbr:test/fuzzy_match.zbr:61
         var pi: i64 = 0;
 // zbr:test/fuzzy_match.zbr:62
@@ -1635,8 +1629,7 @@ pub const Program = struct {
 // zbr:test/fuzzy_match.zbr:76
             if (_zebra_gt(total_m, 3)) {
 // zbr:test/fuzzy_match.zbr:77
-                var ngrams_m: std.StringHashMap(i64) = Program.buildNgrams(mtext);
-                defer ngrams_m.deinit();
+                const ngrams_m: std.StringHashMap(i64) = Program.buildNgrams(mtext);
 // zbr:test/fuzzy_match.zbr:78
                 var ti: i64 = 0;
 // zbr:test/fuzzy_match.zbr:79

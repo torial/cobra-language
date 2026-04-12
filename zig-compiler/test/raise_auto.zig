@@ -6,7 +6,9 @@ const builtin = @import("builtin");
 
 var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 var _allocator: std.mem.Allocator = undefined;
-pub fn _initAllocator(a: std.mem.Allocator) void { _allocator = a; }
+pub fn _initAllocator(a: std.mem.Allocator) void {
+    _allocator = a;
+}
 
 const _Stringable = struct {
     ptr:         *anyopaque,
@@ -1487,7 +1489,7 @@ pub const App = struct {
         var _try_err_29a8: ?anyerror = null;
         _try_blk_29a8: {
 // zbr:test/raise_auto.zbr:11
-            result = App.risky(5) catch |_tc_1f690b42938| { _try_err_29a8 = _tc_1f690b42938; break :_try_blk_29a8; };
+            result = App.risky(5) catch |_tc_24d8ce12938| { _try_err_29a8 = _tc_24d8ce12938; break :_try_blk_29a8; };
             break :_try_blk_29a8;
         }
         if (_try_err_29a8 != null) {

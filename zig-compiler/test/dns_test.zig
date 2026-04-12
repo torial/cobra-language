@@ -6,7 +6,9 @@ const builtin = @import("builtin");
 
 var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 var _allocator: std.mem.Allocator = undefined;
-pub fn _initAllocator(a: std.mem.Allocator) void { _allocator = a; }
+pub fn _initAllocator(a: std.mem.Allocator) void {
+    _allocator = a;
+}
 
 const _Stringable = struct {
     ptr:         *anyopaque,
@@ -1475,7 +1477,6 @@ pub const Main = struct {
     pub fn testMultipleHosts() void {
 // zbr:test/dns_test.zbr:10
         var hosts = std.ArrayList([]const u8){};
-        defer hosts.deinit(_allocator);
 // zbr:test/dns_test.zbr:11
         hosts.append(_allocator, "localhost") catch unreachable;
 // zbr:test/dns_test.zbr:12

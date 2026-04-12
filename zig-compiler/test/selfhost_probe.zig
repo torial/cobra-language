@@ -6,7 +6,9 @@ const builtin = @import("builtin");
 
 var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 var _allocator: std.mem.Allocator = undefined;
-pub fn _initAllocator(a: std.mem.Allocator) void { _allocator = a; }
+pub fn _initAllocator(a: std.mem.Allocator) void {
+    _allocator = a;
+}
 
 const _Stringable = struct {
     ptr:         *anyopaque,
@@ -1584,7 +1586,7 @@ pub const Lexer = struct {
 
     pub fn peek(self: *Lexer) TokenKind {
 // zbr:test/selfhost_probe.zbr:67
-        if (_zebra_lt(self.pos, self.tokens.items.len)) {
+        if (_zebra_lt(self.pos, @as(i64, @intCast(self.tokens.items.len)))) {
 // zbr:test/selfhost_probe.zbr:68
             return self.tokens[@intCast(self.pos)].kind;
         }

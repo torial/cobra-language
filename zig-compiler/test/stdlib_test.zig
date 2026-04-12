@@ -6,7 +6,9 @@ const builtin = @import("builtin");
 
 var _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 var _allocator: std.mem.Allocator = undefined;
-pub fn _initAllocator(a: std.mem.Allocator) void { _allocator = a; }
+pub fn _initAllocator(a: std.mem.Allocator) void {
+    _allocator = a;
+}
 
 const _Stringable = struct {
     ptr:         *anyopaque,
@@ -1465,7 +1467,6 @@ pub const Program = struct {
     pub fn main() void {
 // zbr:test/stdlib_test.zbr:4
         var nums = std.ArrayList(i64){};
-        defer nums.deinit(_allocator);
 // zbr:test/stdlib_test.zbr:5
         nums.append(_allocator, 10) catch unreachable;
 // zbr:test/stdlib_test.zbr:6
@@ -1473,16 +1474,15 @@ pub const Program = struct {
 // zbr:test/stdlib_test.zbr:7
         nums.append(_allocator, 30) catch unreachable;
 // zbr:test/stdlib_test.zbr:8
-        std.debug.print("{any}\n", .{nums.items.len});
+        std.debug.print("{any}\n", .{@as(i64, @intCast(nums.items.len))});
 // zbr:test/stdlib_test.zbr:9
         std.debug.print("{}\n", .{nums.items[@as(usize, @intCast(1))]});
 // zbr:test/stdlib_test.zbr:10
         _ = nums.orderedRemove(0);
 // zbr:test/stdlib_test.zbr:11
-        std.debug.print("{any}\n", .{nums.items.len});
+        std.debug.print("{any}\n", .{@as(i64, @intCast(nums.items.len))});
 // zbr:test/stdlib_test.zbr:13
         var scores = std.StringHashMap(i64).init(_allocator);
-        defer scores.deinit();
 // zbr:test/stdlib_test.zbr:14
         scores.put((_allocator.dupe(u8, "alice") catch @panic("OOM")), 95) catch unreachable;
 // zbr:test/stdlib_test.zbr:15
