@@ -410,4 +410,26 @@ This is the correct model for any program using a Zig `std.heap.ArenaAllocator`.
 
 ### Cross-module class field assignment pattern
 
+When a `TypeChecker` class holds a `TcScope` field (`_scope as TcScope`), the assignment `_scope = TcScope()` triggered a `.named` vs `.cross_module` type mismatch (bug #6 above). The cross-module name-match fix in `Type.eql()` resolved this for the self-hosting port.
+
+---
+
+## Post-Phase-5 Compiler Improvement: Classes as Reference Types (2026-04-11)
+
+**Motivation from self-hosting:** The "class copy semantics" footgun — where `var inf = TcInfer(sc)` copies `sc` shallowly — revealed that Zebra classes should have reference semantics. Classes that hold other classes and need to call mutating methods after construction require interior mutability. Struct copy semantics are fine for plain data; class copy semantics are a footgun for objects.
+
+**Change:** Classes are now heap-allocated reference types. `class` = pointer (`*T`, arena-allocated); `struct` = value type (unchanged). The arena means no deallocation; `_allocator.create(T)` is used in `init()`.
+
+**Compiler changes (`b50c0c5f`):**
+- `TypeKind` enum replaces `bool` in `ModuleInterface.types` — distinguishes `class`, `struct_`, `union_`, `enum_`
+- `class_names` set in Generator — pre-populated from local decls and `genUse` cross-module imports
+- `genType` emits `*ClassName` for all class types
+- `genInit` returns `*ClassName`; body uses `_allocator.create(ClassName) catch @panic("OOM")`
+- Synthetic `init()` likewise returns `*ClassName`
+- `scanMutationsInExpr`: class method receivers no longer need `var` (pointer is already mutable)
+
+**Effect on self-hosting:** The Phase 5 workaround (setup scope before construction) is now unnecessary. `var inf = TcInfer(sc)` copies the pointer; any subsequent `sc.push(...)` is visible through `inf._scope` because both hold the same pointer.
+
+**All existing tests pass.** No observable change to existing Zebra programs; classes were already treated as pass-by-value objects whose mutation methods happened to use pointer receivers in the generated Zig.
+
 When a class field has a cross-module class type (`var _scope as TcScope` in typechecker.zbr), assignment from a locally-constructed instance (`var s = TcScope()`) fails with a spurious type mismatch because the constructor returns `.cross_module` while the annotation resolves to `.named`. The fix (compiler bug #6 above) makes `eql` and `isAssignable` treat these as compatible. The local-variable intermediate was still needed to allow `s.push(...)` before `_scope = s`.
