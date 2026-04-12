@@ -7979,7 +7979,14 @@ const Generator = struct {
         const ig = g.indented();
         try ig.writeIndent();
         try ig.w.writeAll("var _tmp = ");
+        // Inside a struct method `self` is *StructType (pointer receiver).
+        // `this except ...` must copy the struct value, not the pointer.
+        // Emit `self.*` to dereference and get a struct copy.
+        const base_is_this = s.base.* == .this;
         try ig.genExpr(s.base);
+        if (base_is_this and g.in_method and g.is_struct_owner) {
+            try ig.w.writeAll(".*");
+        }
         try ig.w.writeAll(";\n");
         for (s.fields) |f| {
             try ig.writeIndent();
@@ -8004,7 +8011,13 @@ const Generator = struct {
         const ig = g.indented();
         try ig.writeIndent();
         try ig.w.writeAll("var _tmp = ");
+        // Same deref fix as genVarExcept: `this except` inside a struct method
+        // must dereference the pointer receiver to get a struct value copy.
+        const base_is_this = s.base.* == .this;
         try ig.genExpr(s.base);
+        if (base_is_this and g.in_method and g.is_struct_owner) {
+            try ig.w.writeAll(".*");
+        }
         try ig.w.writeAll(";\n");
         for (s.fields) |f| {
             try ig.writeIndent();

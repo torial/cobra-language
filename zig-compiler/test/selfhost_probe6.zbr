@@ -1,0 +1,280 @@
+# selfhost_probe6.zbr -- Phase 6 (CodeGen) readiness probe
+#
+# Tests patterns heavy in codegen.zbr:
+#   1. """...""" multiline strings as values
+#   2. struct except for context-copy (withOwner pattern)
+#   3. StringBuilder for incremental output
+#   4. branch with many union variants
+#   5. long if-else dispatch chains (genCall stdlib pattern)
+#   6. struct methods returning struct copies
+#   7. nested struct context propagation
+
+# -- 1. Multiline triple-quoted strings --
+
+def preamble() as str
+    return """
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+pub fn main() void {}
+"""
+
+def test_multiline()
+    var s = preamble()
+    assert s.contains('const std')   # multiline contains std
+    assert s.contains('pub fn main') # multiline contains main
+    print '1. multiline """: OK'
+
+# -- 2. Struct except for context-copy (withOwner pattern) --
+
+struct GenCtx
+    var owner   as str
+    var indent_ as int
+    var throws_ as bool
+
+    cue init(owner as str, indent_ as int, throws_ as bool)
+        this.owner   = owner
+        this.indent_ = indent_
+        this.throws_ = throws_
+
+    def withOwner(new_owner as str) as GenCtx
+        var copy = this except
+            owner = new_owner
+        return copy
+
+    def withIndent(delta as int) as GenCtx
+        var copy = this except
+            indent_ = this.indent_ + delta
+        return copy
+
+    def withThrows(t as bool) as GenCtx
+        var copy = this except
+            throws_ = t
+        return copy
+
+def test_struct_except()
+    var g = GenCtx('module', 0, false)
+    var g2 = g.withOwner('MyClass')
+    var g3 = g2.withIndent(1)
+    var g4 = g3.withThrows(true)
+    assert g.owner == 'module'
+    assert g2.owner == 'MyClass'
+    assert g3.indent_ == 1
+    assert g4.throws_ == true
+    assert g3.owner == 'MyClass'    # owner preserved across chain
+    print '2. struct except copy: OK'
+
+# -- 3. StringBuilder for incremental output --
+
+def test_string_builder()
+    var b as StringBuilder = StringBuilder()
+    b.append('pub fn ')
+    b.append('init(')
+    b.append(') void {')
+    b.append('\n}')
+    var result = b.build()
+    assert result.contains('pub fn init')
+    assert result.contains('void')
+    print '3. StringBuilder: OK'
+
+# -- 4. branch with many union variants --
+
+union CgNode
+    int_lit   as str
+    float_lit as str
+    bool_lit  as bool
+    str_lit   as str
+    nil_lit
+    ident_    as str
+    member_   as str
+    call_     as str
+    binary_   as str
+    unary_    as str
+    cast_     as str
+    if_expr   as str
+    lambda_
+    list_lit  as int
+    dict_lit  as int
+    zig_lit   as str
+
+def emitNode(node as CgNode) as str
+    branch node
+        on CgNode.int_lit as t
+            return t
+        on CgNode.float_lit as t
+            return t
+        on CgNode.bool_lit as v
+            if v
+                return 'true'
+            return 'false'
+        on CgNode.str_lit as t
+            return "\"" + t + "\""
+        on CgNode.nil_lit
+            return 'null'
+        on CgNode.ident_ as n
+            return n
+        on CgNode.member_ as n
+            return 'self.' + n
+        on CgNode.call_ as n
+            return n + '()'
+        on CgNode.binary_ as op
+            return "(" + op + ")"
+        on CgNode.unary_ as op
+            return op
+        on CgNode.cast_ as t
+            return '@as(' + t + ', x)'
+        on CgNode.if_expr as c
+            return 'if (' + c + ') ...'
+        on CgNode.lambda_
+            return 'fn() void { ... }'
+        on CgNode.list_lit as n
+            return 'list[${n}]'
+        on CgNode.dict_lit as n
+            return 'dict[${n}]'
+        on CgNode.zig_lit as t
+            return t
+
+def test_many_variants()
+    assert emitNode(CgNode.int_lit('42')) == '42'
+    assert emitNode(CgNode.bool_lit(true)) == 'true'
+    assert emitNode(CgNode.bool_lit(false)) == 'false'
+    assert emitNode(CgNode.str_lit('hi')) == '"hi"'
+    assert emitNode(CgNode.nil_lit()) == 'null'
+    assert emitNode(CgNode.member_("x")) == 'self.x'
+    assert emitNode(CgNode.call_('foo')) == 'foo()'
+    assert emitNode(CgNode.cast_('i64')) == '@as(i64, x)'
+    assert emitNode(CgNode.list_lit(3)) == 'list[3]'
+    assert emitNode(CgNode.zig_lit('@panic("x")')) == '@panic("x")'
+    print '4. branch many variants: OK'
+
+# -- 5. Long if-else dispatch (genCall stdlib pattern) --
+
+def dispatchMethod(obj_type as str, method as str) as str
+    if obj_type == 'List'
+        if method == 'add'
+            return 'list.append'
+        if method == 'count'
+            return '@as(i64, @intCast(list.items.len))'
+        if method == 'at'
+            return 'list.items'
+        if method == 'remove'
+            return 'list.orderedRemove'
+        return 'list.' + method
+    if obj_type == 'HashMap'
+        if method == 'set'
+            return 'map.put'
+        if method == 'get'
+            return 'map.get'
+        if method == 'has'
+            return 'map.contains'
+        if method == 'remove'
+            return 'map.remove'
+        return 'map.' + method
+    if obj_type == 'str'
+        if method == 'contains'
+            return 'std.mem.indexOf'
+        if method == 'startsWith'
+            return 'std.mem.startsWith'
+        if method == 'endsWith'
+            return 'std.mem.endsWith'
+        return 'str.' + method
+    return obj_type + "." + method
+
+def test_dispatch_chain()
+    assert dispatchMethod('List', 'add') == 'list.append'
+    assert dispatchMethod('List', 'count').contains('intCast')
+    assert dispatchMethod('HashMap', 'has') == 'map.contains'
+    assert dispatchMethod('str', 'startsWith').contains('startsWith')
+    assert dispatchMethod('Other', 'foo') == 'Other.foo'
+    print '5. dispatch chain: OK'
+
+# -- 6. Struct methods returning struct copies --
+
+struct EmitCtx
+    var buf_   as str
+    var depth_ as int
+
+    cue init()
+        buf_   = ''
+        depth_ = 0
+
+    def write_(s as str) as EmitCtx
+        var copy = this except
+            buf_ = buf_ + s
+        return copy
+
+    def indented() as EmitCtx
+        var copy = this except
+            depth_ = depth_ + 1
+        return copy
+
+    def dedented() as EmitCtx
+        var copy = this except
+            depth_ = depth_ - 1
+        return copy
+
+    def writeLine(s as str) as EmitCtx
+        var pad = '    '.repeat(depth_)
+        var copy = this except
+            buf_ = buf_ + pad + s + "\n"
+        return copy
+
+def test_struct_return()
+    var ctx = EmitCtx()
+    ctx = ctx.indented()
+    ctx = ctx.writeLine('pub fn foo() void {')
+    ctx = ctx.indented()
+    ctx = ctx.writeLine('return;')
+    ctx = ctx.dedented()
+    ctx = ctx.writeLine("}")
+    assert ctx.buf_.contains('pub fn foo')
+    assert ctx.buf_.contains('return;')
+    assert ctx.buf_.contains('        ')  # double indent (8 spaces)
+    print '6. struct method chain: OK'
+
+# -- 7. Nested struct context propagation --
+
+struct SubCtx
+    var indent_ as int
+    var owner   as str
+    var out_    as str
+
+    cue init(indent_ as int, owner as str)
+        this.indent_ = indent_
+        this.owner   = owner
+        out_         = ''
+
+    def sub(extra as int) as SubCtx
+        var copy = this except
+            indent_ = indent_ + extra
+            out_    = ''
+        return copy
+
+    def emit_(s as str) as SubCtx
+        var copy = this except
+            out_ = out_ + s
+        return copy
+
+def test_nested_ctx()
+    var g   = SubCtx(0, 'MyClass')
+    var bg  = g.sub(1)
+    var bg2 = bg.emit_('var x: i64 = 0;')
+    var bg3 = bg2.emit_(' var y = x + 1;')
+    assert g.indent_ == 0
+    assert g.out_ == ''
+    assert bg.indent_ == 1
+    assert bg3.out_.contains('x + 1')
+    print '7. nested struct ctx: OK'
+
+# -- main --
+
+class Main
+    shared
+        def main
+            test_multiline()
+            test_struct_except()
+            test_string_builder()
+            test_many_variants()
+            test_dispatch_chain()
+            test_struct_return()
+            test_nested_ctx()
+            print 'selfhost_probe6: all OK'
