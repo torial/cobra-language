@@ -367,6 +367,12 @@ pub const ModuleInterface = struct {
     /// Key: "ClassName.methodName", Value: type name string.
     /// Mirrors `instance_field_types` for method calls on cross-module instances.
     instance_method_return_types: std.StringHashMap([]const u8),
+    /// Top-level function return type names for user-defined return types.
+    /// Key: function name only (no class prefix), Value: type name string.
+    /// Separate from `instance_method_return_types` to avoid key collision with
+    /// a method whose qualified key accidentally matches a bare function name.
+    /// Used by `inferCall` so e.g. `analyzeEscapes(...)` returns `cross_module{StrSet}`.
+    fn_return_types: std.StringHashMap([]const u8),
     /// Set of fields declared as `^T` (non-optional ref_to pointer) in structs/classes.
     /// Key: "TypeName.fieldName" — present iff the field is `^T` (NOT `^T?`).
     /// Used by CodeGen to emit `field.*` auto-deref for cross-module struct field accesses.
@@ -420,6 +426,11 @@ pub const ModuleInterface = struct {
         var imrtv = self.instance_method_return_types.valueIterator();
         while (imrtv.next()) |v| alloc.free(v.*);
         self.instance_method_return_types.deinit();
+        var frtk = self.fn_return_types.keyIterator();
+        while (frtk.next()) |k| alloc.free(k.*);
+        var frtv = self.fn_return_types.valueIterator();
+        while (frtv.next()) |v| alloc.free(v.*);
+        self.fn_return_types.deinit();
         var rfk = self.ref_fields.keyIterator();
         while (rfk.next()) |k| alloc.free(k.*);
         self.ref_fields.deinit();
@@ -465,6 +476,8 @@ pub fn extractModuleInterface(
     errdefer instance_field_types.deinit();
     var instance_method_return_types = std.StringHashMap([]const u8).init(alloc);
     errdefer instance_method_return_types.deinit();
+    var fn_return_types = std.StringHashMap([]const u8).init(alloc);
+    errdefer fn_return_types.deinit();
     var ref_fields = std.StringHashMap(void).init(alloc);
     errdefer ref_fields.deinit();
     var optional_ref_fields = std.StringHashMap(void).init(alloc);
@@ -474,8 +487,8 @@ pub fn extractModuleInterface(
     var list_field_elem_types = std.StringHashMap([]const u8).init(alloc);
     errdefer list_field_elem_types.deinit();
 
-    try extractFromDecls(module.decls, resolve, alloc, &methods, &fields, &types, &throws_methods, &boxed_variants, &variant_payload_types, &instance_field_types, &instance_method_return_types, &ref_fields, &optional_ref_fields, &struct_init_ref_params, &list_field_elem_types);
-    return .{ .methods = methods, .fields = fields, .types = types, .throws_methods = throws_methods, .boxed_variants = boxed_variants, .variant_payload_types = variant_payload_types, .instance_field_types = instance_field_types, .instance_method_return_types = instance_method_return_types, .ref_fields = ref_fields, .optional_ref_fields = optional_ref_fields, .struct_init_ref_params = struct_init_ref_params, .list_field_elem_types = list_field_elem_types };
+    try extractFromDecls(module.decls, resolve, alloc, &methods, &fields, &types, &throws_methods, &boxed_variants, &variant_payload_types, &instance_field_types, &instance_method_return_types, &fn_return_types, &ref_fields, &optional_ref_fields, &struct_init_ref_params, &list_field_elem_types);
+    return .{ .methods = methods, .fields = fields, .types = types, .throws_methods = throws_methods, .boxed_variants = boxed_variants, .variant_payload_types = variant_payload_types, .instance_field_types = instance_field_types, .instance_method_return_types = instance_method_return_types, .fn_return_types = fn_return_types, .ref_fields = ref_fields, .optional_ref_fields = optional_ref_fields, .struct_init_ref_params = struct_init_ref_params, .list_field_elem_types = list_field_elem_types };
 }
 
 fn extractFromDecls(
@@ -490,6 +503,7 @@ fn extractFromDecls(
     variant_payload_types:        *std.StringHashMap([]const u8),
     instance_field_types:         *std.StringHashMap([]const u8),
     instance_method_return_types: *std.StringHashMap([]const u8),
+    fn_return_types:              *std.StringHashMap([]const u8),
     ref_fields:                   *std.StringHashMap(void),
     optional_ref_fields:          *std.StringHashMap(void),
     struct_init_ref_params:       *std.StringHashMap([]bool),
@@ -544,17 +558,17 @@ fn extractFromDecls(
                 }
             }
         },
-        .namespace => |ns| try extractFromDecls(ns.decls, resolve, alloc, methods, fields, types, throws_methods, boxed_variants, variant_payload_types, instance_field_types, instance_method_return_types, ref_fields, optional_ref_fields, struct_init_ref_params, list_field_elem_types),
-        // Top-level functions: record return type name when it is a user-defined type.
-        // Key = function name (no class prefix); value = type name string.
-        // Used by inferCall so `analyzeEscapes(...)` return value can be typed as cross_module.
+        .namespace => |ns| try extractFromDecls(ns.decls, resolve, alloc, methods, fields, types, throws_methods, boxed_variants, variant_payload_types, instance_field_types, instance_method_return_types, fn_return_types, ref_fields, optional_ref_fields, struct_init_ref_params, list_field_elem_types),
+        // Top-level functions: record return type name in fn_return_types when it is a
+        // user-defined type.  Key = function name only (no class prefix) so there is no
+        // ambiguity with the "ClassName.methodName" keys in instance_method_return_types.
         .method => |m| {
             if (m.return_type) |*rt| {
                 if (namedTypeStr(rt, resolve)) |ret_name| {
                     const key = try alloc.dupe(u8, m.name);
                     errdefer alloc.free(key);
                     const val = try alloc.dupe(u8, ret_name);
-                    try instance_method_return_types.put(key, val);
+                    try fn_return_types.put(key, val);
                 }
             }
         },
@@ -2003,8 +2017,9 @@ const TypeChecker = struct {
                                     }
                                     // Exposed top-level function with a user-defined return type:
                                     // e.g. `analyzeEscapes` returns `StrSet`.
-                                    // The key is just the function name (no class prefix).
-                                    if (iface.instance_method_return_types.get(sym.name)) |ret_name| {
+                                    // Key is the function name only — stored in fn_return_types,
+                                    // not instance_method_return_types, to avoid key collision.
+                                    if (iface.fn_return_types.get(sym.name)) |ret_name| {
                                         return Type{ .cross_module = .{
                                             .module    = mod_alias,
                                             .type_name = ret_name,
