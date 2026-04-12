@@ -989,9 +989,10 @@ fn scanMutationsInExpr(
                         const needs_var: bool = blk: {
                             if (tc_opt) |tc| {
                                 const obj_type = tc.expr_types.get(obj) orelse .unknown;
-                                // User-defined class: conservative — methods take *self,
-                                // so ANY call may mutate the receiver.
-                                if (obj_type == .named or obj_type == .generic_named) break :blk true;
+                                // User-defined class or cross-module instance: conservative —
+                                // methods take *self, so ANY call may mutate the receiver.
+                                if (obj_type == .named or obj_type == .generic_named or
+                                    obj_type == .cross_module) break :blk true;
                                 // Strings are immutable values in Zebra — no method
                                 // mutates a string in-place.  `reverse` is in the
                                 // allow-list for List (which is in-place), but
@@ -4289,11 +4290,10 @@ const Generator = struct {
             if (n.init) |init| if (g.tc) |tc| break :blk tc.expr_types.get(init) orelse .unknown;
             break :blk .unknown;
         };
-        // Cross-module instances must be `var` even when not reassigned: their methods
-        // take `*Self` receivers, and Zig rejects passing `*const Self` to `*Self`.
-        // Same-module instances are handled per-method via normal mutation scanning.
-        const needs_var_for_methods = (tc_init_type == .cross_module or
-                                       tc_init_type == .timer_handle);
+        // Cross-module instances are handled by scanMutationsInExpr (which conservatively
+        // marks any receiver of a method call as mutated when TC type is .cross_module).
+        // timer_handle is opaque with always-mutable state — force var unconditionally.
+        const needs_var_for_methods = (tc_init_type == .timer_handle);
         const kw: []const u8 = if (n.is_const or (!is_mutated and !needs_var_for_methods)) "const" else "var";
 
         // StringBuilder constructor: `var sb as StringBuilder = StringBuilder()`

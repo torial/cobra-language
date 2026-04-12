@@ -1,0 +1,385 @@
+# tc_types.zbr -- TcType union: the type language of the Zebra TypeChecker.
+#
+# Mirrors TypeChecker.zig's Type union but uses Zebra-native representations
+# (str keys, enums) instead of Zig Symbol / DeclSig pointers.  This lets the
+# type language stand alone without depending on tc_scope.zbr.
+#
+# Naming convention:
+#   - All TypeChecker files use the tc_ prefix (tc_types, tc_scope, ...).
+#   - Class names keep the Tc prefix: TcType, TcTypes, TcScope, ...
+#   - Underscore suffix on names that clash with Zebra keywords (void_, file_,
+#     unknown_, class_, interface_, mixin_, etc.).
+
+# -- Symbol kind ---------------------------------------------------------------
+# Relevant subset of SymbolTable.SymbolKind for named-type classification.
+# Used by TcType.named and TcType.generic_named to distinguish class from union.
+# Note: class, interface, mixin are Zebra keywords -- use underscore suffix.
+
+enum TcSymbolKind
+    class_
+    interface_
+    struct_
+    mixin_
+    enum_
+    union_
+    namespace_
+    type_param
+
+# -- Helper structs ------------------------------------------------------------
+
+# Named user-defined type: symbol name + kind.
+# Replaces Zig's *const Symbol -- uses name equality instead of pointer identity.
+struct TcSymRef
+    var name as str
+    var kind as TcSymbolKind
+    cue init(n as str, k as TcSymbolKind)
+        name = n
+        kind = k
+
+# Cross-module type reference: (module_alias, type_name).
+# Mirrors TypeChecker.Type.cross_module.
+struct TcCrossRef
+    var module    as str
+    var type_name as str
+    cue init(mod as str, tname as str)
+        module    = mod
+        type_name = tname
+
+# Generic instantiation: named type + concrete type arguments.
+# E.g. Stack(int) -> TcGenericRef("Stack", class_, [TcType.int_])
+# Mirrors TypeChecker.Type.generic_named.
+struct TcGenericRef
+    var name as str
+    var kind as TcSymbolKind
+    var args as List(TcType)
+    cue init(n as str, k as TcSymbolKind, a as List(TcType))
+        name = n
+        kind = k
+        args = a
+
+# -- TcType union --------------------------------------------------------------
+
+union TcType
+    # Primitives
+    int_
+    uint_
+    float_
+    bool_
+    char_
+    string_
+    void_
+
+    # Sized numeric types (carry bit width as int payload)
+    int_n   as int
+    uint_n  as int
+    float_n as int
+
+    # User-defined types
+    named         as TcSymRef
+    generic_named as TcGenericRef
+
+    # Compound / recursive
+    optional as ^TcType
+    tuple    as List(TcType)
+
+    # Cross-module instance
+    cross_module as TcCrossRef
+
+    # Function types (carry name as str for diagnostics and equality)
+    fn_ref as str
+    fn_sig as str
+
+    # Stdlib opaque types
+    string_builder
+    http_request
+    http_response
+    tcp_conn
+    udp_socket
+    regex
+    gui_context
+    shell
+    file_
+    str_slice
+    sys_run_result
+    json_value
+    json_array
+    date_time
+    calendar_view
+    csv_table
+    csv_writer
+    csv_row
+    arg_result
+    uri_result
+    timer_handle
+
+    # Unknown: upstream error or unsupported construct; suppresses cascading errors.
+    unknown_
+
+# -- TcTypes helper class ------------------------------------------------------
+
+class TcTypes
+    shared
+        # Structural equality.
+        def eql(a as TcType, b as TcType) as bool
+            branch a
+                # Unit primitives.
+                on TcType.int_    return b == TcType.int_()
+                on TcType.uint_   return b == TcType.uint_()
+                on TcType.float_  return b == TcType.float_()
+                on TcType.bool_   return b == TcType.bool_()
+                on TcType.char_   return b == TcType.char_()
+                on TcType.string_ return b == TcType.string_()
+                on TcType.void_   return b == TcType.void_()
+
+                # Sized numerics: same variant + same width.
+                on TcType.int_n as wa
+                    branch b
+                        on TcType.int_n as wb
+                            return wa == wb
+                        else
+                            return false
+                on TcType.uint_n as wa
+                    branch b
+                        on TcType.uint_n as wb
+                            return wa == wb
+                        else
+                            return false
+                on TcType.float_n as wa
+                    branch b
+                        on TcType.float_n as wb
+                            return wa == wb
+                        else
+                            return false
+
+                # Named user-defined: same name and kind.
+                on TcType.named as na
+                    branch b
+                        on TcType.named as nb
+                            return na.name == nb.name and na.kind == nb.kind
+                        else
+                            return false
+
+                # Generic instantiation: same name, kind, and element-wise args.
+                on TcType.generic_named as ga
+                    branch b
+                        on TcType.generic_named as gb
+                            if ga.name != gb.name
+                                return false
+                            if ga.args.count() != gb.args.count()
+                                return false
+                            var i = 0
+                            while i < ga.args.count()
+                                if not TcTypes.eql(ga.args.at(i), gb.args.at(i))
+                                    return false
+                                i = i + 1
+                            return true
+                        else
+                            return false
+
+                # Optional: both optional, recursive inner equality.
+                on TcType.optional as ia
+                    branch b
+                        on TcType.optional as ib
+                            return TcTypes.eql(ia, ib)
+                        else
+                            return false
+
+                # Tuple: same length, element-wise equality.
+                on TcType.tuple as ea
+                    branch b
+                        on TcType.tuple as eb
+                            if ea.count() != eb.count()
+                                return false
+                            var i = 0
+                            while i < ea.count()
+                                if not TcTypes.eql(ea.at(i), eb.at(i))
+                                    return false
+                                i = i + 1
+                            return true
+                        else
+                            return false
+
+                # Cross-module: same module alias and type name.
+                on TcType.cross_module as ca
+                    branch b
+                        on TcType.cross_module as cb
+                            return ca.module == cb.module and ca.type_name == cb.type_name
+                        else
+                            return false
+
+                # Function types: name equality.
+                on TcType.fn_ref as fa
+                    branch b
+                        on TcType.fn_ref as fb
+                            return fa == fb
+                        else
+                            return false
+                on TcType.fn_sig as fa
+                    branch b
+                        on TcType.fn_sig as fb
+                            return fa == fb
+                        else
+                            return false
+
+                # Stdlib unit variants.
+                on TcType.string_builder return b == TcType.string_builder()
+                on TcType.http_request   return b == TcType.http_request()
+                on TcType.http_response  return b == TcType.http_response()
+                on TcType.tcp_conn       return b == TcType.tcp_conn()
+                on TcType.udp_socket     return b == TcType.udp_socket()
+                on TcType.regex          return b == TcType.regex()
+                on TcType.gui_context    return b == TcType.gui_context()
+                on TcType.shell          return b == TcType.shell()
+                on TcType.file_          return b == TcType.file_()
+                on TcType.str_slice      return b == TcType.str_slice()
+                on TcType.sys_run_result return b == TcType.sys_run_result()
+                on TcType.json_value     return b == TcType.json_value()
+                on TcType.json_array     return b == TcType.json_array()
+                on TcType.date_time      return b == TcType.date_time()
+                on TcType.calendar_view  return b == TcType.calendar_view()
+                on TcType.csv_table      return b == TcType.csv_table()
+                on TcType.csv_writer     return b == TcType.csv_writer()
+                on TcType.csv_row        return b == TcType.csv_row()
+                on TcType.arg_result     return b == TcType.arg_result()
+                on TcType.uri_result     return b == TcType.uri_result()
+                on TcType.timer_handle   return b == TcType.timer_handle()
+                on TcType.unknown_       return b == TcType.unknown_()
+
+        # Assignment compatibility.
+        # a (source) can be assigned where b (target) is expected.
+        # unknown on either side bypasses the check (error already reported).
+        # All numeric types are mutually compatible -- Zig enforces range/precision.
+        def isAssignable(a as TcType, b as TcType) as bool
+            if a == TcType.unknown_() or b == TcType.unknown_()
+                return true
+
+            if TcTypes.isNumeric(a) and TcTypes.isNumeric(b)
+                return true
+
+            # char <-> integer compatibility (char IS a u21 codepoint).
+            if b == TcType.char_() and (TcTypes.isNumeric(a) or a == TcType.char_())
+                return true
+            if a == TcType.char_() and TcTypes.isNumeric(b)
+                return true
+
+            # fn_ref and fn_sig: all compatible with each other.
+            branch a
+                on TcType.fn_ref
+                    branch b
+                        on TcType.fn_ref
+                            return true
+                        on TcType.fn_sig
+                            return true
+                        else
+                            pass
+                on TcType.fn_sig
+                    branch b
+                        on TcType.fn_sig
+                            return true
+                        else
+                            pass
+                else
+                    pass
+
+            # optional(T) <-> optional(U): recursive on inners.
+            # nil (optional(void_)) is assignable to any optional.
+            branch a
+                on TcType.optional as a_inner
+                    branch b
+                        on TcType.optional as b_inner
+                            if a_inner == TcType.void_()
+                                return true
+                            return TcTypes.isAssignable(a_inner, b_inner)
+                        else
+                            return false
+                else
+                    pass
+
+            # T -> ?T: any type is assignable into its optional wrapper.
+            branch b
+                on TcType.optional as b_inner
+                    return TcTypes.isAssignable(a, b_inner)
+                else
+                    pass
+
+            return TcTypes.eql(a, b)
+
+        # Human-readable type name for diagnostics.
+        def typeName(t as TcType) as str
+            branch t
+                on TcType.int_    return "int"
+                on TcType.uint_   return "uint"
+                on TcType.float_  return "float"
+                on TcType.bool_   return "bool"
+                on TcType.char_   return "char"
+                on TcType.string_ return "String"
+                on TcType.void_   return "void"
+                on TcType.int_n   return "int<N>"
+                on TcType.uint_n  return "uint<N>"
+                on TcType.float_n return "float<N>"
+                on TcType.named as n
+                    return n.name
+                on TcType.generic_named as g
+                    return g.name
+                on TcType.optional as inner
+                    return "?" + TcTypes.typeName(inner)
+                on TcType.tuple
+                    return "tuple"
+                on TcType.cross_module as c
+                    return c.type_name
+                on TcType.fn_ref as f
+                    return f
+                on TcType.fn_sig as s
+                    return s
+                on TcType.string_builder return "StringBuilder"
+                on TcType.http_request   return "HttpRequest"
+                on TcType.http_response  return "HttpResponse"
+                on TcType.tcp_conn       return "TcpConn"
+                on TcType.udp_socket     return "UdpSocket"
+                on TcType.regex          return "Regex"
+                on TcType.gui_context    return "Gui"
+                on TcType.shell          return "Shell"
+                on TcType.file_          return "File"
+                on TcType.str_slice      return "[]str"
+                on TcType.sys_run_result return "SysRunResult"
+                on TcType.json_value     return "JsonValue"
+                on TcType.json_array     return "[]JsonValue"
+                on TcType.date_time      return "DateTime"
+                on TcType.calendar_view  return "CalendarView"
+                on TcType.csv_table      return "CsvTable"
+                on TcType.csv_writer     return "CsvWriter"
+                on TcType.csv_row        return "CsvRow"
+                on TcType.arg_result     return "ArgResult"
+                on TcType.uri_result     return "UriResult"
+                on TcType.timer_handle   return "TimerHandle"
+                on TcType.unknown_       return "<unknown>"
+
+        def isIntFamily(t as TcType) as bool
+            branch t
+                on TcType.int_
+                    return true
+                on TcType.int_n
+                    return true
+                else
+                    return false
+
+        def isUintFamily(t as TcType) as bool
+            branch t
+                on TcType.uint_
+                    return true
+                on TcType.uint_n
+                    return true
+                else
+                    return false
+
+        def isFloatFamily(t as TcType) as bool
+            branch t
+                on TcType.float_
+                    return true
+                on TcType.float_n
+                    return true
+                else
+                    return false
+
+        def isNumeric(t as TcType) as bool
+            return TcTypes.isIntFamily(t) or TcTypes.isUintFamily(t) or TcTypes.isFloatFamily(t)

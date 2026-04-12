@@ -1,0 +1,140 @@
+# tc_types_test.zbr -- smoke test for tc_types.zbr
+# Verifies TcType eql, isAssignable, typeName, and numeric predicates.
+
+use tc_types exposing TcType, TcTypes, TcSymRef, TcSymbolKind, TcGenericRef, TcCrossRef
+
+class Main
+    shared
+        def main
+            # 1. Unit primitive eql
+            assert TcTypes.eql(TcType.int_(), TcType.int_())
+            assert not TcTypes.eql(TcType.int_(), TcType.string_())
+            assert TcTypes.eql(TcType.string_(), TcType.string_())
+            assert not TcTypes.eql(TcType.int_(), TcType.string_())
+            assert TcTypes.eql(TcType.unknown_(), TcType.unknown_())
+            assert not TcTypes.eql(TcType.int_(), TcType.unknown_())
+            assert TcTypes.eql(TcType.bool_(), TcType.bool_())
+            assert TcTypes.eql(TcType.void_(), TcType.void_())
+            print "1. unit primitive eql OK"
+
+            # 2. Sized numeric eql
+            assert TcTypes.eql(TcType.int_n(32), TcType.int_n(32))
+            assert not TcTypes.eql(TcType.int_n(32), TcType.int_n(64))
+            assert not TcTypes.eql(TcType.int_n(32), TcType.uint_n(32))
+            assert TcTypes.eql(TcType.float_n(64), TcType.float_n(64))
+            print "2. sized numeric eql OK"
+
+            # 3. Named type eql
+            var sym_int  = TcSymRef("MyInt",  TcSymbolKind.class_)
+            var sym_int2 = TcSymRef("MyInt",  TcSymbolKind.class_)
+            var sym_str  = TcSymRef("MyStr",  TcSymbolKind.class_)
+            var sym_uni  = TcSymRef("MyUnion", TcSymbolKind.union_)
+            assert     TcTypes.eql(TcType.named(sym_int),  TcType.named(sym_int2))
+            assert not TcTypes.eql(TcType.named(sym_int),  TcType.named(sym_str))
+            assert not TcTypes.eql(TcType.named(sym_int),  TcType.named(sym_uni))
+            print "3. named eql OK"
+
+            # 4. Optional (recursive ^TcType) eql
+            var opt_int  = TcType.optional(TcType.int_())
+            var opt_int2 = TcType.optional(TcType.int_())
+            var opt_str  = TcType.optional(TcType.string_())
+            assert     TcTypes.eql(opt_int, opt_int2)
+            assert not TcTypes.eql(opt_int, opt_str)
+            assert not TcTypes.eql(opt_int, TcType.int_())
+            # Doubly nested
+            var opt_opt_int  = TcType.optional(TcType.optional(TcType.int_()))
+            var opt_opt_int2 = TcType.optional(TcType.optional(TcType.int_()))
+            assert TcTypes.eql(opt_opt_int, opt_opt_int2)
+            print "4. optional eql OK"
+
+            # 5. Tuple (List(TcType)) eql
+            var ta = List(TcType)()
+            ta.add(TcType.int_())
+            ta.add(TcType.string_())
+            var tb = List(TcType)()
+            tb.add(TcType.int_())
+            tb.add(TcType.string_())
+            var tc = List(TcType)()
+            tc.add(TcType.int_())
+            tc.add(TcType.int_())
+            assert     TcTypes.eql(TcType.tuple(ta), TcType.tuple(tb))
+            assert not TcTypes.eql(TcType.tuple(ta), TcType.tuple(tc))
+            print "5. tuple eql OK"
+
+            # 6. Cross-module eql
+            var ca = TcCrossRef("Ast", "Expr")
+            var cb = TcCrossRef("Ast", "Expr")
+            var cc = TcCrossRef("Ast", "Stmt")
+            assert     TcTypes.eql(TcType.cross_module(ca), TcType.cross_module(cb))
+            assert not TcTypes.eql(TcType.cross_module(ca), TcType.cross_module(cc))
+            print "6. cross_module eql OK"
+
+            # 7. isNumeric predicates
+            assert TcTypes.isIntFamily(TcType.int_())
+            assert TcTypes.isIntFamily(TcType.int_n(32))
+            assert not TcTypes.isIntFamily(TcType.uint_())
+            assert TcTypes.isUintFamily(TcType.uint_())
+            assert TcTypes.isUintFamily(TcType.uint_n(8))
+            assert not TcTypes.isUintFamily(TcType.int_())
+            assert TcTypes.isFloatFamily(TcType.float_())
+            assert TcTypes.isFloatFamily(TcType.float_n(32))
+            assert not TcTypes.isFloatFamily(TcType.int_())
+            assert TcTypes.isNumeric(TcType.int_())
+            assert TcTypes.isNumeric(TcType.uint_n(64))
+            assert TcTypes.isNumeric(TcType.float_())
+            assert not TcTypes.isNumeric(TcType.bool_())
+            assert not TcTypes.isNumeric(TcType.string_())
+            print "7. numeric predicates OK"
+
+            # 8. isAssignable
+            assert TcTypes.isAssignable(TcType.int_(), TcType.unknown_())
+            assert TcTypes.isAssignable(TcType.unknown_(), TcType.int_())
+            assert TcTypes.isAssignable(TcType.int_(), TcType.float_())
+            assert TcTypes.isAssignable(TcType.int_n(32), TcType.int_n(64))
+            assert TcTypes.isAssignable(TcType.bool_(), TcType.bool_())
+            assert not TcTypes.isAssignable(TcType.bool_(), TcType.int_())
+            # T -> ?T
+            assert TcTypes.isAssignable(TcType.int_(), TcType.optional(TcType.int_()))
+            # ?T -> ?T
+            assert TcTypes.isAssignable(opt_int, opt_int2)
+            # nil -> ?T
+            var nil_t = TcType.optional(TcType.void_())
+            assert TcTypes.isAssignable(nil_t, TcType.optional(TcType.string_()))
+            # fn_ref -> fn_sig
+            assert TcTypes.isAssignable(TcType.fn_ref("foo"), TcType.fn_sig("MySig"))
+            assert TcTypes.isAssignable(TcType.fn_ref("foo"), TcType.fn_ref("bar"))
+            assert TcTypes.isAssignable(TcType.fn_sig("A"), TcType.fn_sig("B"))
+            print "8. isAssignable OK"
+
+            # 9. typeName
+            assert TcTypes.typeName(TcType.int_())    == "int"
+            assert TcTypes.typeName(TcType.string_()) == "String"
+            assert TcTypes.typeName(TcType.void_())   == "void"
+            assert TcTypes.typeName(TcType.unknown_()) == "<unknown>"
+            assert TcTypes.typeName(TcType.optional(TcType.int_())) == "?int"
+            assert TcTypes.typeName(TcType.optional(TcType.optional(TcType.string_()))) == "??String"
+            var sym_point = TcSymRef("Point", TcSymbolKind.struct_)
+            assert TcTypes.typeName(TcType.named(sym_point)) == "Point"
+            var cross = TcCrossRef("Ast", "DeclMethod")
+            assert TcTypes.typeName(TcType.cross_module(cross)) == "DeclMethod"
+            assert TcTypes.typeName(TcType.fn_ref("myFn")) == "myFn"
+            assert TcTypes.typeName(TcType.regex()) == "Regex"
+            print "9. typeName OK"
+
+            # 10. Generic TcGenericRef eql
+            var ga_args = List(TcType)()
+            ga_args.add(TcType.int_())
+            var gb_args = List(TcType)()
+            gb_args.add(TcType.int_())
+            var gc_args = List(TcType)()
+            gc_args.add(TcType.string_())
+            var ga = TcGenericRef("Stack", TcSymbolKind.class_, ga_args)
+            var gb = TcGenericRef("Stack", TcSymbolKind.class_, gb_args)
+            var gc = TcGenericRef("Stack", TcSymbolKind.class_, gc_args)
+            var gd = TcGenericRef("Queue", TcSymbolKind.class_, ga_args)
+            assert     TcTypes.eql(TcType.generic_named(ga), TcType.generic_named(gb))
+            assert not TcTypes.eql(TcType.generic_named(ga), TcType.generic_named(gc))
+            assert not TcTypes.eql(TcType.generic_named(ga), TcType.generic_named(gd))
+            print "10. generic_named eql OK"
+
+            print "tc_types_test: all OK"
