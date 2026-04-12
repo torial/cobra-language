@@ -376,3 +376,38 @@ This is the correct model for any program using a Zig `std.heap.ArenaAllocator`.
 3. **`resolveFieldTypeRef` struct fix** — `withStruct` never set `owner_class`, so `^T` field boxing in `genAssign` silently skipped struct fields. Now falls back to `owner_members`.
 4. **Union `==` / `!=` via `std.meta.eql`** — Zig forbids `==` on tagged unions with payloads. When LHS TC type is a named union (`sym.kind == .union_`), generates `std.meta.eql(a, b)`.
 5. **`^T` struct field read auto-deref** — Accessing `pair.left` where `left: ^Expr` gives `*Expr` in Zig but `Expr` in Zebra. In `genExpr(.member)`, appends `.*` when field TypeRef is `ref_to`.
+
+---
+
+## Phase 5: Type Checker — Completed 2026-04-11
+
+**Status:** All 6 files written; all tests pass.
+**Lines of Zebra:** 1272 total (tc_types: 395, tc_scope: 150, tc_stdlib: 274, tc_infer: 215, tc_check: 141, typechecker: 97)
+**Tests:** tc_types_test, tc_scope_test, tc_stdlib_test, tc_infer_test, tc_check_test, typechecker_test — all OK.
+
+### Bugs fixed during Phase 5 (6 additional bugs, total now 27)
+
+1. **`cue init()` requires parens for classes** — `cue init` (no parens) is valid for structs only; class constructors need `cue init()`. Error was `syntax error near 'init'`.
+2. **`list.remove(i)` usize cast** — CodeGen.zig emitted `orderedRemove(i)` with `i64` arg; Zig requires `usize`. Fixed with `@as(usize, @intCast(...))`, matching the existing `at(i)` pattern.
+3. **`==` on cross-module union via `TcTypes.eql`** — The `==` operator isn't defined cross-module on TcType (a union); must use `TcTypes.eql(a, b)` as in all local union comparisons.
+4. **Multi-line `if` continuation indentation** — Continuation lines in `if` conditions must be at a multiple-of-4 indentation; misaligned `or` clauses at 23 spaces caused `SpaceIndentNotMultipleOfFour`.
+5. **Cross-module `^T` branch-binding return type mismatch** — `on TcType.optional as inner_t` in tc_infer.zbr; the binding's symbol pointer differed from tc_types.zbr's `TcType` symbol pointer across module boundaries. Workaround: added `TcTypes.optionalInner(t)` in tc_types.zbr (same module as TcType).
+6. **Cross-module `.named` vs `.cross_module` type mismatch in `isAssignable`** — A constructor call `TcScope()` on an exposed type yields `Type{ .cross_module = ... }` while a field declaration `var _scope as TcScope` resolves to `Type{ .named = exposed_sym }`. These are the same type in two representations; added bidirectional name-match compatibility to `Type.eql()` in TypeChecker.zig.
+
+### Flat parallel-array scope stack
+
+`tc_scope.zbr` avoids `List(HashMap(...))` (which has mutation-via-copy problems) by using three parallel arrays:
+- `_names as List(str)` — symbol names in insertion order
+- `_syms as List(TcSymbol)` — corresponding symbols
+- `_limits as List(int)` — frame-start indices (frame N covers `_limits[N].._limits[N+1]-1`)
+- `_kinds as List(TcScopeKind)` — frame kinds
+
+`push(kind)` records the current `_names.count()` as the new frame boundary. `pop()` truncates both `_names` and `_syms` back to that boundary. Linear scan for lookup is fine for the small scopes used in type checking.
+
+### Class copy semantics — scope setup must precede TcInfer construction
+
+`var inf = TcInfer(sc)` copies `sc` at construction time (Zebra class copy semantics). Any `sc.push(...)` or `sc.define(...)` calls done AFTER that copy are invisible to `inf`. Restructured all tests to complete scope setup before constructing TcInfer.
+
+### Cross-module class field assignment pattern
+
+When a class field has a cross-module class type (`var _scope as TcScope` in typechecker.zbr), assignment from a locally-constructed instance (`var s = TcScope()`) fails with a spurious type mismatch because the constructor returns `.cross_module` while the annotation resolves to `.named`. The fix (compiler bug #6 above) makes `eql` and `isAssignable` treat these as compatible. The local-variable intermediate was still needed to allow `s.push(...)` before `_scope = s`.
