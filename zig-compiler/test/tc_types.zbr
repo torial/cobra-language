@@ -383,3 +383,13 @@ class TcTypes
 
         def isNumeric(t as TcType) as bool
             return TcTypes.isIntFamily(t) or TcTypes.isUintFamily(t) or TcTypes.isFloatFamily(t)
+
+        # Extract the inner type from an optional, or unknown_ if not optional.
+        # Must live in tc_types.zbr (same module as TcType) so the ^T binding
+        # resolves without cross-module pointer-identity issues.
+        def optionalInner(t as TcType) as TcType
+            branch t
+                on TcType.optional as inner
+                    return inner
+                else
+                    return TcType.unknown_()

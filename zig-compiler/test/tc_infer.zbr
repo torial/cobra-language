@@ -1,0 +1,215 @@
+# tc_infer.zbr -- TcInfer: expression type inference for the self-hosted TC.
+#
+# Defines a minimal TcExpr union (literals, ident, member, call, binary,
+# unary, cast) and a TcInfer class that walks it to produce a TcType.
+#
+# Design notes:
+#   - TcExpr is a simplified representation: it covers the cases the TC needs
+#     to handle.  The real AST (selfhost/ast.zbr) will replace it when the
+#     tc_* modules are moved to selfhost/.
+#   - inferExpr returns TcType.unknown_() rather than raising for any pattern
+#     it cannot resolve.  Diagnostics are out of scope for this module.
+#   - Member access on opaque stdlib types delegates to TcStdlib.memberType.
+#   - Member access on named/user types returns unknown_ (full class scope
+#     lookup requires the resolver output, which is wired in typechecker.zbr).
+#   - Static calls (Http.get, Csv.parse, …) are recognised by inferCall when
+#     the callee is `member { ident("Http"), "get" }`.
+
+use tc_types  exposing TcType, TcTypes
+use tc_scope  exposing TcScope, TcSymbol
+use tc_stdlib exposing TcStdlib
+
+# ── TcExpr helper structs ─────────────────────────────────────────────────────
+
+# obj.member — field or method access on an instance.
+struct TcExprMember
+    var obj    as ^TcExpr
+    var member as str
+    cue init(o as TcExpr, m as str)
+        obj    = o
+        member = m
+
+# callee(args) — function or method call.  Args are carried as a List of
+# TcExpr values so that infer can walk them (needed for side-effect tracking).
+struct TcExprCall
+    var callee as ^TcExpr
+    var args   as List(TcExpr)
+    cue init(c as TcExpr, a as List(TcExpr))
+        callee = c
+        args   = a
+
+# left op right — binary expression.
+struct TcExprBinary
+    var op    as str
+    var left  as ^TcExpr
+    var right as ^TcExpr
+    cue init(op as str, l as TcExpr, r as TcExpr)
+        this.op = op
+        left    = l
+        right   = r
+
+# op operand — unary prefix expression.
+struct TcExprUnary
+    var op      as str
+    var operand as ^TcExpr
+    cue init(op as str, o as TcExpr)
+        this.op = op
+        operand = o
+
+# expr as TcType — explicit type cast / coercion.
+struct TcExprCast
+    var target as TcType
+    cue init(t as TcType)
+        target = t
+
+# ── TcExpr union ─────────────────────────────────────────────────────────────
+# Minimal expression representation for type inference.
+
+union TcExpr
+    # Literal values — no payload needed for type inference.
+    int_lit
+    float_lit
+    bool_lit
+    string_lit
+    char_lit
+    nil_
+
+    # `this` reference — type resolved by caller, not tracked here.
+    this_
+
+    # Identifier lookup — name to resolve in scope.
+    ident as str
+
+    # obj.member — recursive struct carrier.
+    member as ^TcExprMember
+
+    # callee(args) — call expression.
+    call as ^TcExprCall
+
+    # Binary / unary operators.
+    binary as ^TcExprBinary
+    unary  as ^TcExprUnary
+
+    # Explicit cast: `expr as SomeType`.
+    cast as TcExprCast
+
+    # expr? — safe optional unwrap; result is the inner type, not optional.
+    optional_chain as ^TcExpr
+
+# ── TcInfer class ─────────────────────────────────────────────────────────────
+
+class TcInfer
+    var _scope as TcScope
+    cue init(scope as TcScope)
+        _scope = scope
+
+    # Infer the TcType of expression `e`.
+    # Returns TcType.unknown_() for any unresolvable pattern.
+    def inferExpr(e as TcExpr) as TcType
+        branch e
+            # Literal primitives.
+            on TcExpr.int_lit    return TcType.int_()
+            on TcExpr.float_lit  return TcType.float_()
+            on TcExpr.bool_lit   return TcType.bool_()
+            on TcExpr.string_lit return TcType.string_()
+            on TcExpr.char_lit   return TcType.char_()
+            on TcExpr.nil_
+                return TcType.optional(TcType.void_())
+            on TcExpr.this_
+                return TcType.unknown_()
+
+            # Identifier: look up in the scope chain.
+            on TcExpr.ident as name
+                if _scope.hasSymbol(name)
+                    return _scope.lookup(name).type_
+                return TcType.unknown_()
+
+            # Member access: `obj.field`.
+            on TcExpr.member as m
+                var obj_t = inferExpr(m.obj)
+                return inferMember(obj_t, m.member)
+
+            # Call expression.
+            on TcExpr.call as c
+                return inferCall(c)
+
+            # Binary operators.
+            on TcExpr.binary as b
+                var lt = inferExpr(b.left)
+                var rt = inferExpr(b.right)
+                return inferBinary(b.op, lt, rt)
+
+            # Unary operators.
+            on TcExpr.unary as u
+                if u.op == "not"
+                    return TcType.bool_()
+                # Numeric negation: preserve type.
+                return inferExpr(u.operand)
+
+            # Explicit cast: result is the declared target type.
+            on TcExpr.cast as c
+                return c.target
+
+            # Safe optional chain `expr?`: strips the outer optional wrapper.
+            on TcExpr.optional_chain as inner
+                var t = inferExpr(inner)
+                return TcTypes.optionalInner(t)
+
+    # Infer return type of a method call on a known receiver type.
+    # Handles both stdlib dispatch (via TcStdlib) and user-defined scope lookup.
+    def inferMember(obj_t as TcType, member as str) as TcType
+        var stdlib_t = TcStdlib.memberType(obj_t, member)
+        if not TcTypes.eql(stdlib_t, TcType.unknown_())
+            return stdlib_t
+        # Named user-defined type: scope-level field lookup is deferred to
+        # typechecker.zbr which has access to the resolver symbol table.
+        return TcType.unknown_()
+
+    # Infer the return type of a call expression.
+    def inferCall(c as TcExprCall) as TcType
+        # Static call pattern: `ClassName.method(args)` where the callee is a
+        # member expression with an ident receiver that names a stdlib class.
+        branch c.callee
+            on TcExpr.member as m
+                branch m.obj
+                    on TcExpr.ident as class_name
+                        var sc_t = TcStdlib.staticCall(class_name, m.member)
+                        if not TcTypes.eql(sc_t, TcType.unknown_())
+                            return sc_t
+                    else
+                        pass
+            else
+                pass
+        # Instance call: infer callee type, dispatch memberType on receiver.
+        branch c.callee
+            on TcExpr.member as m
+                var obj_t = inferExpr(m.obj)
+                return inferMember(obj_t, m.member)
+            else
+                pass
+        # Bare ident call: look up return type via scope (fn_ref / fn_sig).
+        # At this level we only know the function exists, not its return type.
+        return TcType.unknown_()
+
+    # Return the type of a binary operator applied to operands of the given types.
+    def inferBinary(op as str, lt as TcType, rt as TcType) as TcType
+        # Comparison operators always produce bool.
+        if op == "==" or op == "!=" or op == "<" or op == "<=" or op == ">" or op == ">="
+            return TcType.bool_()
+        # Logical operators always produce bool.
+        if op == "and" or op == "or"
+            return TcType.bool_()
+        # String concatenation.
+        if op == "+"
+            if TcTypes.eql(lt, TcType.string_()) or TcTypes.eql(rt, TcType.string_())
+                return TcType.string_()
+        # Arithmetic: if both sides are numeric, result follows left-hand type.
+        if TcTypes.isNumeric(lt) and TcTypes.isNumeric(rt)
+            return lt
+        # Float if either side is float.
+        if TcTypes.isFloatFamily(lt) or TcTypes.isFloatFamily(rt)
+            return TcType.float_()
+        # Unknown operand: suppress cascading errors.
+        if TcTypes.eql(lt, TcType.unknown_()) or TcTypes.eql(rt, TcType.unknown_())
+            return TcType.unknown_()
+        return TcType.unknown_()
