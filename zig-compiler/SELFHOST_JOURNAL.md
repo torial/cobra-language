@@ -506,3 +506,59 @@ When a class field has a cross-module class type (`var _scope as TcScope` in typ
 **Ownership in StringBuilder:** `toOwnedSlice` is the correct combinator — it returns an owned slice and drains the ArrayList (so `deinit` is harmless). Using `.items` after `deinit` is a use-after-free.
 
 **Cross-module class fields need pointer types in generated Zig:** A field `var x as SomeModule.SomeClass` must emit `x: *SomeModule.SomeClass` in the Zig struct because classes are heap-allocated reference types. The `genType` function needed a cross-module class check analogous to the local `g.class_names.contains(...)` check.
+
+---
+
+## Phase 7a: Code Generator — Writer/Generator/genType/genEnum/genUnion/genStruct/genClass (codegen.zbr)
+**Completed:** 2026-04-12
+**Lines of Zebra / Lines of Zig (approximate):** 518 Zebra, maps to ~2,000 Zig lines of the same logic
+
+### Where Zebra felt better than Zig
+
+- **`struct except` context-forking** is the defining win of this phase. `withOwner`, `indented`, `asMethod`, `withThrows`, `withTryLabel` are each one-liners. In Zig every field must be spelled out in the copy constructor. `this except owner = new_owner` is dramatically more concise.
+- **`branch` on `TypeRef`** reads exactly like the grammar spec. Each arm is self-contained; the Zig `switch` required careful `unreachable` placement and more visual noise from all the inline struct destructuring.
+- **`class Writer` for shared output state** across struct context forks was a clean idiom — no raw pointers or interface fat-pointers needed.
+- **StringBuilder as a class field** worked correctly after a CodeGen fix (see bugs). The Zebra `StringBuilder()` constructor in `cue init` is natural; the generated `std.ArrayList(u8){}` is correct.
+
+### Where Zebra felt worse or missing
+
+- **Method chaining on temporaries is banned.** `indented().withOwner(n.name).asStructOwner()` fails because the intermediate temporary is `*const Generator`. Must break into named intermediate variables. Zig doesn't have this problem (temporaries are value types, not tracked as const pointers). This was the biggest ergonomic friction in this phase.
+- **No type annotation inference for local vars holding cross-module return values.** `var g2 = g.withOwner("Foo")` — the compiler couldn't initially infer that `g2` needs `var` because the TC returned `.unknown` for the call result (see bugs). Required a TC fix.
+
+### Did `branch` / union dispatch do its job?
+
+Yes, cleanly. The `genType` method's `branch tr` with 8 arms reads like a transformation table. The `genStruct` for-loop pattern of `branch decl on Decl.var_ as fld` is exactly as readable as in Phase 5/6.
+
+### Error propagation (`?` / Result) — did it read naturally?
+
+Not exercised significantly in Phase 7a — the generator methods are pure emitters with no error paths. Phase 7b (method body codegen) will stress `throws` propagation.
+
+### Allocator model — did it get in the way?
+
+No allocator threading required at all in Phase 7a. `List(TypeRef)` and `List(Param)` are created and used locally; no manual `deinit` or `create` calls needed. This is the biggest compression source vs Zig (which needs `alloc.alloc(...)` for every intermediate slice).
+
+### Surprise wins
+
+**`StrSet` from `cg_helpers` worked first try** as a struct field in `Generator` — the cross-module struct inclusion worked cleanly.
+
+**All 10 tests passed on first attempt after fixing compiler bugs.** The test file was written speculatively without running the codegen, and only needed mechanical fixes (not logic changes).
+
+### Bugs found and fixed
+
+1. **`StringBuilder()` in `cue init` not handled in genCall** (`src/CodeGen.zig`) — `buf = StringBuilder()` inside a class `cue init` body was reaching `genCall` without hitting the existing StringBuilder special case (which was only in `genLocalVar`). Added explicit guard: if callee name is `"StringBuilder"` and 0 args, emit `std.ArrayList(u8){}` directly.
+
+2. **Method chaining on temporaries: `indented().withOwner(n.name).asStructOwner()`** (`selfhost/codegen.zbr`) — intermediate temporary is `*const Generator`. Zig refuses `withOwner(self: *Generator)` on a const pointer. Fixed by breaking chains into named intermediate vars: `var ig0 = indented(); var ig1 = ig0.withOwner(...); var ig = ig1.asStructOwner()`.
+
+3. **Exposed-type instance method return-type inference** (`src/TypeChecker.zig`) — `var g2 = g.withOwner("Foo")` returned `.unknown` for `g2`'s type. Root cause: symbols from `use codegen exposing Generator` have kind `.module` with `own_scope = null`. The `inferCall` `.named` branch checked `own_scope` (null) and fell through. Fix: added a module-interface lookup path for `kind == .module and decl == .use` symbols, recovering the cross_module return type via the module alias in `decl.use.path`. This propagates `Generator.withOwner` → `.cross_module{codegen, Generator}`, enabling the mutation scanner to correctly mark `g2` as `var`.
+
+4. **Symbols with kind=.module in mutation scanner** (`src/CodeGen.zig`) — exposed type names (kind `.module`) need `var` for method calls, same as structs. Added to the mutation scanner's `needs_var` check: `if (sym.kind == .module) break :blk true;`.
+
+5. **`endsWith` not resolved for string locals** (`selfhost/codegen_test.zbr`) — `var out = g.w.result()` gives `out` type `.cross_module` (result of `Writer.result()`). The TC couldn't resolve `out.endsWith(...)` because string extension methods are only dispatched for `.string` typed exprs. Changed to `"};\n\n" in out` which uses the `in` operator (works for substrings regardless of type).
+
+### Key architectural insight from Phase 7a
+
+The `Generator` struct's context-forking pattern works well in Zebra but requires discipline: **never chain method calls on temporaries**. Write `var g1 = g.indented()` then `var g2 = g1.withOwner(...)` — always materialize the intermediate.
+
+The `Writer` class as a reference-type shared output buffer is the right choice: all `Generator` value copies share the same `Writer` pointer and write to the same underlying buffer. This is the Zebra equivalent of Zig's `AnyWriter` fat pointer, but without any manual vtable setup.
+
+**Compiler bug count for Phase 7a:** 5 new bugs (running total: ~46+)
