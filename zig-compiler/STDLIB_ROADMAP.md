@@ -7,7 +7,7 @@ Each module follows Zebra's ergonomic pattern: one-liner API, no allocator args 
 
 ## Implementation Queue
 
-### 1. `Hash` — Cryptographic hashing ✅ TODO
+### 1. `Hash` — Cryptographic hashing ✅ DONE
 **Zig backing:** `std.crypto.hash` (Sha256, Sha512, Md5, Blake3)
 
 ```zebra
@@ -24,7 +24,7 @@ Test: `test/hash_test.zbr`
 
 ---
 
-### 2. `Random` — Pseudo-random and secure random ✅ TODO
+### 2. `Random` — Pseudo-random and secure random ✅ DONE
 **Zig backing:** `std.Random.DefaultPrng` (Xoshiro256), `std.crypto.random`
 
 ```zebra
@@ -43,7 +43,7 @@ Test: `test/random_test.zbr`
 
 ---
 
-### 3. `Arg` — CLI argument parsing ✅ TODO
+### 3. `Arg` — CLI argument parsing ✅ DONE
 **Zig backing:** `std.process.argsWithAllocator`
 
 ```zebra
@@ -63,7 +63,7 @@ Test: `test/arg_test.zbr`
 
 ---
 
-### 4. `Terminal` — Color output and terminal queries ✅ TODO
+### 4. `Terminal` — Color output and terminal queries ✅ DONE
 **Zig backing:** `std.io.tty`, ANSI escape sequences
 
 ```zebra
@@ -86,7 +86,7 @@ Test: `test/terminal_test.zbr`
 
 ---
 
-### 5. `Log` — Structured leveled logging ✅ TODO
+### 5. `Log` — Structured leveled logging ✅ DONE
 **Zig backing:** `std.io.getStdErr()`, timestamp from `std.time`
 
 ```zebra
@@ -108,9 +108,9 @@ Test: `test/log_test.zbr`
 
 ---
 
-## Backlog (implement after the above 5)
+## Phase 2 Stdlib (shipped in 0.10)
 
-### 6. `Uri` — URL parsing
+### 6. `Uri` — URL parsing ✅ DONE
 **Zig backing:** `std.Uri`
 ```zebra
 var u = Uri.parse("https://api.example.com/v1/users?page=2")
@@ -119,22 +119,25 @@ print u.host      # "api.example.com"
 print u.path      # "/v1/users"
 print u.query     # "page=2"
 ```
+Implemented: `UriResult{scheme, host, path, query, port}`; backed by `std.Uri` Component union.
 
-### 7. `Compress` — gzip compress/decompress
-**Zig backing:** `std.compress.gzip`
+### 7. `Compress` — gzip compress/decompress ✅ DONE (partial)
+**Zig backing:** `std.compress.flate`
 ```zebra
 var compressed = Compress.gzip(data)       # str → str
 var original   = Compress.gunzip(data)     # str → str?
 ```
+Note: `gzip` stubbed (`@panic("TODO")` in Zig 0.15.2 `std.compress.flate.Compress`); `gunzip` fully works via `std.compress.flate.Decompress` + `std.Io.Reader.fixed`. Will unblock on Zig 0.16.
 
-### 8. `Mime` — MIME type lookup
+### 8. `Mime` — MIME type lookup ✅ DONE
 **Zig backing:** static compile-time map
 ```zebra
 var mime = Mime.fromExt(".png")            # "image/png"
 var ext  = Mime.toExt("text/html")        # ".html"
 ```
+30-entry static table covering common web, media, document, and data formats.
 
-### 9. `Timer` — High-resolution timing
+### 9. `Timer` — High-resolution timing ✅ DONE
 **Zig backing:** `std.time.nanoTimestamp()`
 ```zebra
 var t = Timer.start()
@@ -143,6 +146,7 @@ var ms = t.elapsed()                       # float (milliseconds)
 var us = t.elapsedMicros()                 # int (microseconds)
 t.reset()
 ```
+Returns `timer_handle` opaque type; `elapsed()` → float ms; `elapsedMicros()` → int µs.
 
 ### 10. `Chan(T)` — Message-passing channels (language feature)
 **Zig backing:** `std.Thread`, mutex + condvar queue
@@ -204,4 +208,4 @@ the same pattern used for `Http`, `File`, `Json`, `Math`, etc.
 ---
 
 *Created: 2026-04-10*
-*Status: Implementing in order listed above*
+*Status: All 9 core modules shipped in 0.10. `Chan(T)` and `Test` deferred to 1.0.*
