@@ -1,0 +1,141 @@
+# tc_check.zbr -- TcCheck: statement type-checking for the self-hosted TC.
+#
+# Defines TcStmt (minimal statement union) and TcCheck which validates that
+# statements are type-consistent using TcInfer for expression inference and
+# TcScope for variable tracking.
+#
+# Design notes:
+#   - TcStmt is a simplified representation covering the statements the TC
+#     needs to validate.  Real AST integration happens in typechecker.zbr.
+#   - Errors are collected in a List(str) rather than using `throws`; the
+#     caller inspects TcCheck.errors after running.
+#   - Zig-level type enforcement is out of scope here; we check Zebra-level
+#     semantics (bool conditions, return-type compatibility, assign compatibility).
+
+use tc_types  exposing TcType, TcTypes
+use tc_scope  exposing TcScope, TcScopeKind, TcSymbol, TcSymKind
+use tc_infer  exposing TcInfer, TcExpr
+
+# ── TcStmt helper structs ─────────────────────────────────────────────────────
+
+# return expr? — return statement with optional value.
+struct TcStmtReturn
+    var value as ^TcExpr
+    cue init(v as TcExpr)
+        value = v
+
+# var name as Type = expr — variable declaration.
+struct TcStmtVarDecl
+    var name       as str
+    var decl_type  as TcType
+    var init_expr  as ^TcExpr
+    cue init(n as str, t as TcType, e as TcExpr)
+        name      = n
+        decl_type = t
+        init_expr = e
+
+# target = rhs — assignment.
+struct TcStmtAssign
+    var target_name as str
+    var rhs_expr    as ^TcExpr
+    cue init(name as str, rhs as TcExpr)
+        target_name = name
+        rhs_expr    = rhs
+
+# if cond { ... } — condition check only (body not walked here; kept simple).
+struct TcStmtIf
+    var cond as ^TcExpr
+    cue init(c as TcExpr)
+        cond = c
+
+# assert cond — boolean assertion.
+struct TcStmtAssert
+    var cond as ^TcExpr
+    cue init(c as TcExpr)
+        cond = c
+
+# ── TcStmt union ─────────────────────────────────────────────────────────────
+
+union TcStmt
+    # return expr
+    return_ as TcStmtReturn
+    # return (void / no value)
+    return_void
+    # var name as Type = expr
+    var_decl as TcStmtVarDecl
+    # name = rhs
+    assign as TcStmtAssign
+    # if cond
+    if_ as TcStmtIf
+    # assert cond
+    assert_ as TcStmtAssert
+    # pass / break / continue — no type constraints
+    pass_
+
+# ── TcCheck class ─────────────────────────────────────────────────────────────
+
+class TcCheck
+    var errors      as List(str)
+    var _infer      as TcInfer
+    var _ret_type   as TcType      # expected return type for the current method
+    cue init(infer as TcInfer, ret_type as TcType)
+        errors    = List(str)()
+        _infer    = infer
+        _ret_type = ret_type
+
+    # True if no errors were recorded.
+    def ok() as bool
+        return errors.count() == 0
+
+    # Append a diagnostic string.
+    def report(msg as str)
+        errors.add(msg)
+
+    # Type-check a single statement.
+    def checkStmt(s as TcStmt)
+        branch s
+            on TcStmt.return_ as r
+                var actual = _infer.inferExpr(r.value)
+                if not TcTypes.isAssignable(actual, _ret_type)
+                    report("return type mismatch: expected " + TcTypes.typeName(_ret_type) + ", got " + TcTypes.typeName(actual))
+
+            on TcStmt.return_void
+                if not TcTypes.eql(_ret_type, TcType.void_())
+                    if not TcTypes.eql(_ret_type, TcType.unknown_())
+                        report("return without value in non-void method (expected " + TcTypes.typeName(_ret_type) + ")")
+
+            on TcStmt.var_decl as d
+                var actual = _infer.inferExpr(d.init_expr)
+                if not TcTypes.isAssignable(actual, d.decl_type)
+                    report("type mismatch in var '" + d.name + "': expected " + TcTypes.typeName(d.decl_type) + ", got " + TcTypes.typeName(actual))
+
+            on TcStmt.assign as a
+                var rhs = _infer.inferExpr(a.rhs_expr)
+                var lhs = _infer.inferMember(TcType.unknown_(), a.target_name)
+                if TcTypes.eql(lhs, TcType.unknown_())
+                    pass  # can't verify; suppress
+                else
+                    if not TcTypes.isAssignable(rhs, lhs)
+                        report("assign type mismatch for '" + a.target_name + "': expected " + TcTypes.typeName(lhs) + ", got " + TcTypes.typeName(rhs))
+
+            on TcStmt.if_ as i
+                var cond_t = _infer.inferExpr(i.cond)
+                if not TcTypes.eql(cond_t, TcType.bool_())
+                    if not TcTypes.eql(cond_t, TcType.unknown_())
+                        report("if condition must be bool, got " + TcTypes.typeName(cond_t))
+
+            on TcStmt.assert_ as a
+                var cond_t = _infer.inferExpr(a.cond)
+                if not TcTypes.eql(cond_t, TcType.bool_())
+                    if not TcTypes.eql(cond_t, TcType.unknown_())
+                        report("assert condition must be bool, got " + TcTypes.typeName(cond_t))
+
+            on TcStmt.pass_
+                pass
+
+    # Type-check a list of statements.
+    def checkStmts(stmts as List(TcStmt))
+        var i = 0
+        while i < stmts.count()
+            checkStmt(stmts.at(i))
+            i = i + 1
