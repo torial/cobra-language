@@ -1,0 +1,274 @@
+# tc_stdlib.zbr -- TcStdlib: return-type registry for Zebra stdlib APIs.
+#
+# Mirrors the opaque-type dispatch in TypeChecker.zig's inferMember /
+# inferCall, but expressed in pure Zebra so the self-hosted type-checker
+# can consult it without depending on Zig symbols or pointer identity.
+#
+# Two entry points:
+#   TcStdlib.memberType(t, member)    -- field / property / method on an instance
+#   TcStdlib.staticCall(class_, meth) -- static / factory call (Http.get, etc.)
+#
+# Both return TcType.unknown_() when the combination is not recognised.
+
+use tc_types exposing TcType
+
+class TcStdlib
+    shared
+        # Return type of accessing `member` on a value of type `t`.
+        # Covers opaque stdlib types (string_builder, http_response, …).
+        # User-defined classes are NOT handled here; use TcScope for those.
+        def memberType(t as TcType, member as str) as TcType
+            branch t
+                on TcType.string_builder
+                    if member == "len"
+                        return TcType.int_()
+                    if member == "toString" or member == "build"
+                        return TcType.string_()
+                    # append / appendLine / appendInt / appendFloat / appendBool / clear / reset
+                    return TcType.void_()
+                on TcType.http_request
+                    if member == "method"  or member == "path" or member == "content"
+                        return TcType.string_()
+                    return TcType.unknown_()
+                on TcType.http_response
+                    if member == "status"
+                        return TcType.uint_()
+                    if member == "text"
+                        return TcType.string_()
+                    return TcType.unknown_()
+                on TcType.tcp_conn
+                    if member == "read"
+                        return TcType.string_()
+                    # write / close / writeLine
+                    return TcType.void_()
+                on TcType.udp_socket
+                    if member == "recv"
+                        return TcType.string_()
+                    # send / close
+                    return TcType.void_()
+                on TcType.regex
+                    if member == "match" or member == "test_"
+                        return TcType.bool_()
+                    if member == "findAll" or member == "groups"
+                        return TcType.str_slice()
+                    if member == "find" or member == "replace"
+                        return TcType.string_()
+                    return TcType.unknown_()
+                on TcType.shell
+                    if member == "run"
+                        return TcType.string_()
+                    return TcType.void_()
+                on TcType.file_
+                    if member == "read" or member == "readAll"
+                        return TcType.string_()
+                    if member == "name" or member == "path" or member == "ext" or member == "stem" or member == "dir" or member == "dirname"
+                        return TcType.string_()
+                    # write / writeLine / close / flush
+                    return TcType.void_()
+                on TcType.sys_run_result
+                    if member == "exit_code"
+                        return TcType.int_()
+                    if member == "stdout" or member == "stderr"
+                        return TcType.string_()
+                    return TcType.unknown_()
+                on TcType.json_value
+                    if member == "string_" or member == "asString"
+                        return TcType.string_()
+                    if member == "int_" or member == "asInt"
+                        return TcType.int_()
+                    if member == "float_" or member == "asFloat"
+                        return TcType.float_()
+                    if member == "bool_" or member == "asBool"
+                        return TcType.bool_()
+                    if member == "object" or member == "array" or member == "get"
+                        return TcType.json_value()
+                    if member == "getList"
+                        return TcType.json_array()
+                    if member == "keys"
+                        return TcType.str_slice()
+                    if member == "isNull" or member == "has"
+                        return TcType.bool_()
+                    return TcType.unknown_()
+                on TcType.json_array
+                    if member == "at"
+                        return TcType.json_value()
+                    if member == "count" or member == "len"
+                        return TcType.int_()
+                    return TcType.unknown_()
+                on TcType.date_time
+                    if member == "year" or member == "month" or member == "day" or member == "hour" or member == "minute" or member == "second" or member == "weekday" or member == "epoch"
+                        return TcType.int_()
+                    if member == "format" or member == "toIso"
+                        return TcType.string_()
+                    if member == "toCalendarView"
+                        return TcType.calendar_view()
+                    return TcType.unknown_()
+                on TcType.calendar_view
+                    if member == "year" or member == "month" or member == "day" or member == "weekday"
+                        return TcType.int_()
+                    if member == "monthName" or member == "era" or member == "dayName"
+                        return TcType.string_()
+                    return TcType.unknown_()
+                on TcType.csv_table
+                    if member == "len" or member == "count"
+                        return TcType.int_()
+                    if member == "header" or member == "row"
+                        return TcType.csv_row()
+                    # rows / dataRows returned as for-in iterables → element type is csv_row
+                    # (handled by TcInfer.inferForInElem)
+                    return TcType.unknown_()
+                on TcType.csv_writer
+                    # write / writeRow / flush / close → void
+                    return TcType.void_()
+                on TcType.csv_row
+                    if member == "at"
+                        return TcType.string_()
+                    if member == "len" or member == "count"
+                        return TcType.int_()
+                    return TcType.unknown_()
+                on TcType.arg_result
+                    if member == "flag" or member == "contains" or member == "has"
+                        return TcType.bool_()
+                    if member == "option" or member == "usage" or member == "positional"
+                        return TcType.string_()
+                    if member == "optionInt"
+                        return TcType.int_()
+                    return TcType.unknown_()
+                on TcType.uri_result
+                    if member == "scheme" or member == "host" or member == "path" or member == "query"
+                        return TcType.string_()
+                    if member == "port"
+                        return TcType.int_()
+                    return TcType.unknown_()
+                on TcType.timer_handle
+                    if member == "elapsed"
+                        return TcType.float_()
+                    if member == "elapsedMicros"
+                        return TcType.int_()
+                    # reset / stop → void
+                    return TcType.void_()
+                on TcType.gui_context
+                    if member == "width" or member == "height"
+                        return TcType.int_()
+                    # All widget methods (button, text, input, slider, …) → void
+                    return TcType.void_()
+                else
+                    return TcType.unknown_()
+
+        # Return type of a STATIC call `class_.method(...)`.
+        # class_ is the bare name of the stdlib singleton (e.g. "Http", "Csv").
+        # Returns TcType.unknown_() when the combination is not recognised.
+        def staticCall(class_ as str, method as str) as TcType
+            if class_ == "Http"
+                if method == "get" or method == "post"
+                    return TcType.optional(TcType.http_response())
+                if method == "json" or method == "postJson"
+                    return TcType.optional(TcType.json_value())
+                # serve → void
+                return TcType.void_()
+            if class_ == "HttpResponse"
+                # ok / notFound / new / redirect → http_response
+                return TcType.http_response()
+            if class_ == "Tcp"
+                if method == "connect"
+                    return TcType.optional(TcType.tcp_conn())
+                return TcType.void_()
+            if class_ == "Udp"
+                if method == "socket"
+                    return TcType.udp_socket()
+                return TcType.void_()
+            if class_ == "Json"
+                if method == "parse"
+                    return TcType.optional(TcType.json_value())
+                if method == "stringify"
+                    return TcType.string_()
+                if method == "object" or method == "array"
+                    return TcType.json_value()
+                return TcType.void_()
+            if class_ == "Csv"
+                if method == "parse" or method == "parseFile"
+                    return TcType.csv_table()
+                if method == "writer"
+                    return TcType.csv_writer()
+                return TcType.void_()
+            if class_ == "Regex"
+                if method == "compile"
+                    return TcType.regex()
+                return TcType.void_()
+            if class_ == "DateTime"
+                # now / fromEpoch / of
+                return TcType.date_time()
+            if class_ == "Calendar"
+                return TcType.string_()
+            if class_ == "Arg"
+                if method == "parse"
+                    return TcType.arg_result()
+                return TcType.void_()
+            if class_ == "Uri"
+                if method == "parse"
+                    return TcType.uri_result()
+                return TcType.unknown_()
+            if class_ == "Timer"
+                if method == "start"
+                    return TcType.timer_handle()
+                return TcType.unknown_()
+            if class_ == "Shell"
+                if method == "run"
+                    return TcType.string_()
+                return TcType.void_()
+            if class_ == "Hash"
+                # sha256 / sha512 / md5 / blake3 / hmac256 → hex string
+                return TcType.string_()
+            if class_ == "Random"
+                if method == "randInt"
+                    return TcType.int_()
+                if method == "randFloat"
+                    return TcType.float_()
+                if method == "randBool"
+                    return TcType.bool_()
+                if method == "bytes"
+                    return TcType.string_()
+                # shuffle / seed / choice → void or unknown
+                return TcType.void_()
+            if class_ == "Compress"
+                if method == "gzip"
+                    return TcType.string_()
+                if method == "gunzip"
+                    return TcType.optional(TcType.string_())
+                return TcType.unknown_()
+            if class_ == "Mime"
+                # fromExt / fromContent → string
+                return TcType.string_()
+            if class_ == "Net"
+                if method == "resolve"
+                    return TcType.str_slice()
+                return TcType.void_()
+            if class_ == "Math"
+                if method == "isNaN" or method == "isInf"
+                    return TcType.bool_()
+                return TcType.float_()
+            if class_ == "sys"
+                if method == "run"
+                    return TcType.sys_run_result()
+                if method == "getenv"
+                    return TcType.unknown_()
+                if method == "args"
+                    return TcType.unknown_()
+                return TcType.void_()
+            if class_ == "Terminal"
+                if method == "width" or method == "height"
+                    return TcType.int_()
+                if method == "isTty"
+                    return TcType.bool_()
+                return TcType.void_()
+            if class_ == "Log"
+                return TcType.void_()
+            if class_ == "Reflect"
+                if method == "className"
+                    return TcType.string_()
+                if method == "fieldNames" or method == "fieldTypes"
+                    return TcType.str_slice()
+                return TcType.unknown_()
+            if class_ == "Gui"
+                return TcType.void_()
+            return TcType.unknown_()

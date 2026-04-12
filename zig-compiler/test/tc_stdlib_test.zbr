@@ -1,0 +1,140 @@
+# tc_stdlib_test.zbr -- smoke test for tc_stdlib.zbr
+# Verifies TcStdlib.memberType and TcStdlib.staticCall return the expected types.
+
+use tc_types  exposing TcType, TcTypes
+use tc_stdlib exposing TcStdlib
+
+class Main
+    shared
+        def main
+            # 1. memberType on opaque types
+            var sb_len   = TcStdlib.memberType(TcType.string_builder(), "len")
+            assert TcTypes.eql(sb_len, TcType.int_())
+            var sb_ts    = TcStdlib.memberType(TcType.string_builder(), "toString")
+            assert TcTypes.eql(sb_ts, TcType.string_())
+            var sb_app   = TcStdlib.memberType(TcType.string_builder(), "append")
+            assert TcTypes.eql(sb_app, TcType.void_())
+            print "1. string_builder memberType OK"
+
+            var hr_status = TcStdlib.memberType(TcType.http_response(), "status")
+            assert TcTypes.eql(hr_status, TcType.uint_())
+            var hr_text   = TcStdlib.memberType(TcType.http_response(), "text")
+            assert TcTypes.eql(hr_text, TcType.string_())
+            print "2. http_response memberType OK"
+
+            var req_path = TcStdlib.memberType(TcType.http_request(), "path")
+            assert TcTypes.eql(req_path, TcType.string_())
+            print "3. http_request memberType OK"
+
+            var jv_str = TcStdlib.memberType(TcType.json_value(), "asString")
+            assert TcTypes.eql(jv_str, TcType.string_())
+            var jv_int = TcStdlib.memberType(TcType.json_value(), "asInt")
+            assert TcTypes.eql(jv_int, TcType.int_())
+            var jv_get = TcStdlib.memberType(TcType.json_value(), "get")
+            assert TcTypes.eql(jv_get, TcType.json_value())
+            var jv_lst = TcStdlib.memberType(TcType.json_value(), "getList")
+            assert TcTypes.eql(jv_lst, TcType.json_array())
+            print "4. json_value memberType OK"
+
+            var dt_year = TcStdlib.memberType(TcType.date_time(), "year")
+            assert TcTypes.eql(dt_year, TcType.int_())
+            var dt_fmt  = TcStdlib.memberType(TcType.date_time(), "format")
+            assert TcTypes.eql(dt_fmt, TcType.string_())
+            print "5. date_time memberType OK"
+
+            var uri_host = TcStdlib.memberType(TcType.uri_result(), "host")
+            assert TcTypes.eql(uri_host, TcType.string_())
+            var uri_port = TcStdlib.memberType(TcType.uri_result(), "port")
+            assert TcTypes.eql(uri_port, TcType.int_())
+            print "6. uri_result memberType OK"
+
+            var tm_el  = TcStdlib.memberType(TcType.timer_handle(), "elapsed")
+            assert TcTypes.eql(tm_el, TcType.float_())
+            var tm_us  = TcStdlib.memberType(TcType.timer_handle(), "elapsedMicros")
+            assert TcTypes.eql(tm_us, TcType.int_())
+            print "7. timer_handle memberType OK"
+
+            var csv_len = TcStdlib.memberType(TcType.csv_table(), "len")
+            assert TcTypes.eql(csv_len, TcType.int_())
+            var csv_row = TcStdlib.memberType(TcType.csv_table(), "row")
+            assert TcTypes.eql(csv_row, TcType.csv_row())
+            var row_at  = TcStdlib.memberType(TcType.csv_row(), "at")
+            assert TcTypes.eql(row_at, TcType.string_())
+            print "8. csv_table/csv_row memberType OK"
+
+            var arg_flag = TcStdlib.memberType(TcType.arg_result(), "flag")
+            assert TcTypes.eql(arg_flag, TcType.bool_())
+            var arg_opt  = TcStdlib.memberType(TcType.arg_result(), "option")
+            assert TcTypes.eql(arg_opt, TcType.string_())
+            print "9. arg_result memberType OK"
+
+            # unknown member returns unknown
+            var unk = TcStdlib.memberType(TcType.http_response(), "bogus")
+            assert TcTypes.eql(unk, TcType.unknown_())
+            # unknown type returns unknown
+            var unk2 = TcStdlib.memberType(TcType.int_(), "anything")
+            assert TcTypes.eql(unk2, TcType.unknown_())
+            print "10. unknown fallthrough OK"
+
+            # 2. staticCall
+            var http_get   = TcStdlib.staticCall("Http", "get")
+            assert TcTypes.eql(http_get, TcType.optional(TcType.http_response()))
+            var http_json  = TcStdlib.staticCall("Http", "json")
+            assert TcTypes.eql(http_json, TcType.optional(TcType.json_value()))
+            print "11. Http staticCall OK"
+
+            var csv_parse  = TcStdlib.staticCall("Csv", "parse")
+            assert TcTypes.eql(csv_parse, TcType.csv_table())
+            var csv_writer = TcStdlib.staticCall("Csv", "writer")
+            assert TcTypes.eql(csv_writer, TcType.csv_writer())
+            print "12. Csv staticCall OK"
+
+            var json_parse = TcStdlib.staticCall("Json", "parse")
+            assert TcTypes.eql(json_parse, TcType.optional(TcType.json_value()))
+            var json_str   = TcStdlib.staticCall("Json", "stringify")
+            assert TcTypes.eql(json_str, TcType.string_())
+            print "13. Json staticCall OK"
+
+            var rx_compile = TcStdlib.staticCall("Regex", "compile")
+            assert TcTypes.eql(rx_compile, TcType.regex())
+            print "14. Regex staticCall OK"
+
+            var arg_parse  = TcStdlib.staticCall("Arg", "parse")
+            assert TcTypes.eql(arg_parse, TcType.arg_result())
+            print "15. Arg staticCall OK"
+
+            var uri_parse  = TcStdlib.staticCall("Uri", "parse")
+            assert TcTypes.eql(uri_parse, TcType.uri_result())
+            print "16. Uri staticCall OK"
+
+            var timer_st   = TcStdlib.staticCall("Timer", "start")
+            assert TcTypes.eql(timer_st, TcType.timer_handle())
+            print "17. Timer staticCall OK"
+
+            var rnd_int    = TcStdlib.staticCall("Random", "randInt")
+            assert TcTypes.eql(rnd_int, TcType.int_())
+            var rnd_flt    = TcStdlib.staticCall("Random", "randFloat")
+            assert TcTypes.eql(rnd_flt, TcType.float_())
+            print "18. Random staticCall OK"
+
+            var dt_now     = TcStdlib.staticCall("DateTime", "now")
+            assert TcTypes.eql(dt_now, TcType.date_time())
+            print "19. DateTime staticCall OK"
+
+            var math_sqrt  = TcStdlib.staticCall("Math", "sqrt")
+            assert TcTypes.eql(math_sqrt, TcType.float_())
+            var math_isnan = TcStdlib.staticCall("Math", "isNaN")
+            assert TcTypes.eql(math_isnan, TcType.bool_())
+            print "20. Math staticCall OK"
+
+            var compress_gz  = TcStdlib.staticCall("Compress", "gzip")
+            assert TcTypes.eql(compress_gz, TcType.string_())
+            var compress_ung = TcStdlib.staticCall("Compress", "gunzip")
+            assert TcTypes.eql(compress_ung, TcType.optional(TcType.string_()))
+            print "21. Compress staticCall OK"
+
+            var unk_sc = TcStdlib.staticCall("NotAClass", "method")
+            assert TcTypes.eql(unk_sc, TcType.unknown_())
+            print "22. unknown class staticCall OK"
+
+            print "tc_stdlib_test: all OK"
