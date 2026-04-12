@@ -1,0 +1,97 @@
+# typechecker.zbr -- TypeChecker: public entry point for the self-hosted TC.
+#
+# Ties together the five tc_* modules into a single facade:
+#   - TcType / TcTypes (tc_types.zbr)     — the type language
+#   - TcScope          (tc_scope.zbr)     — lexical scope chain
+#   - TcStdlib         (tc_stdlib.zbr)    — stdlib type/method registry
+#   - TcInfer          (tc_infer.zbr)     — expression type inference
+#   - TcCheck          (tc_check.zbr)     — statement type-checking
+#
+# TypeChecker holds a TcScope that outlives the TcInfer/TcCheck snapshots.
+# Callers:
+#   1. Create a TypeChecker.
+#   2. Call defineSymbol() / enterScope() / leaveScope() to build up the
+#      environment for the code being checked.
+#   3. Call checkMethod(ret_type, stmts) to validate a method body.
+#   4. Inspect TypeChecker.errors for diagnostics.
+
+use tc_types  exposing TcType, TcTypes
+use tc_scope  exposing TcScope, TcScopeKind, TcSymbol, TcSymKind
+use tc_stdlib exposing TcStdlib
+use tc_infer  exposing TcInfer, TcExpr
+use tc_check  exposing TcCheck, TcStmt
+
+class TypeChecker
+    var errors   as List(str)
+    var _scope   as TcScope
+    cue init()
+        errors = List(str)()
+        var s = TcScope()
+        s.push(TcScopeKind.module_)
+        _scope = s
+
+    # -- Scope management -----------------------------------------------------
+
+    def enterScope(kind as TcScopeKind)
+        _scope.push(kind)
+
+    def leaveScope()
+        _scope.pop()
+
+    def defineSymbol(name as str, kind as TcSymKind, type_ as TcType) as bool
+        return _scope.define(name, TcSymbol(name, kind, type_))
+
+    def hasSymbol(name as str) as bool
+        return _scope.hasSymbol(name)
+
+    def symbolType(name as str) as TcType
+        if _scope.hasSymbol(name)
+            return _scope.lookup(name).type_
+        return TcType.unknown_()
+
+    def currentDepth() as int
+        return _scope.depth()
+
+    # -- Type queries (thin wrappers) -----------------------------------------
+
+    def memberType(t as TcType, member as str) as TcType
+        return TcStdlib.memberType(t, member)
+
+    def staticCallType(class_ as str, method as str) as TcType
+        return TcStdlib.staticCall(class_, method)
+
+    def typeName(t as TcType) as str
+        return TcTypes.typeName(t)
+
+    def isNumeric(t as TcType) as bool
+        return TcTypes.isNumeric(t)
+
+    def isAssignable(src as TcType, dst as TcType) as bool
+        return TcTypes.isAssignable(src, dst)
+
+    # -- Method body checking -------------------------------------------------
+
+    # Type-check a list of statements as a method body.
+    # `ret_type` is the declared return type.
+    # Errors are appended to TypeChecker.errors.
+    def checkMethod(ret_type as TcType, stmts as List(TcStmt))
+        _scope.push(TcScopeKind.method_)
+        var infer = TcInfer(_scope)
+        var chk   = TcCheck(infer, ret_type)
+        chk.checkStmts(stmts)
+        var i = 0
+        while i < chk.errors.count()
+            errors.add(chk.errors.at(i))
+            i = i + 1
+        _scope.pop()
+
+    # True if no errors have been collected.
+    def ok() as bool
+        return errors.count() == 0
+
+    # Clear all collected errors.
+    def clearErrors()
+        var i = errors.count() - 1
+        while i >= 0
+            errors.remove(i)
+            i = i - 1

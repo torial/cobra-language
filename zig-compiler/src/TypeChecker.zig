@@ -157,7 +157,15 @@ pub const Type = union(enum) {
             .int_n   => |wa| switch (b) { .int_n   => |wb| wa == wb, else => false },
             .uint_n  => |wa| switch (b) { .uint_n  => |wb| wa == wb, else => false },
             .float_n => |wa| switch (b) { .float_n => |wb| wa == wb, else => false },
-            .named          => |sa| switch (b) { .named   => |sb| sa == sb, else => false },
+            .named          => |sa| switch (b) {
+                .named        => |sb| sa == sb,
+                // cross_module and named are the same user type in two representations.
+                // A constructor call `TcScope()` yields .cross_module; a type annotation
+                // `as TcScope` on an exposed import yields .named.  Treat them as equal
+                // when the type_name matches the symbol name.
+                .cross_module => |cm| std.mem.eql(u8, sa.name, cm.type_name),
+                else          => false,
+            },
             .generic_named  => |ga| switch (b) {
                 .generic_named => |gb| blk: {
                     if (ga.sym != gb.sym) break :blk false;
@@ -200,6 +208,8 @@ pub const Type = union(enum) {
             .cross_module   => |cm_a| switch (b) {
                 .cross_module => |cm_b| std.mem.eql(u8, cm_a.module, cm_b.module) and
                                         std.mem.eql(u8, cm_a.type_name, cm_b.type_name),
+                // Symmetric: named ↔ cross_module when type names match.
+                .named        => |sb| std.mem.eql(u8, cm_a.type_name, sb.name),
                 else => false,
             },
             .fn_ref         => |sa| switch (b) { .fn_ref => |sb| sa == sb, else => false },

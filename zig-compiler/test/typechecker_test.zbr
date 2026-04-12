@@ -1,0 +1,113 @@
+# typechecker_test.zbr -- integration test for typechecker.zbr
+# Exercises the full TypeChecker facade across scope, inference, and checking.
+
+use tc_types     exposing TcType, TcTypes
+use tc_scope     exposing TcScopeKind, TcSymKind
+use tc_infer     exposing TcExpr, TcExprBinary, TcExprUnary, TcExprMember, TcExprCall
+use tc_check     exposing TcStmt, TcStmtReturn, TcStmtVarDecl, TcStmtIf, TcStmtAssert
+use typechecker  exposing TypeChecker
+
+class Main
+    shared
+        def main
+            # 1. Basic lifecycle and scope management
+            var tc = TypeChecker()
+            assert tc.currentDepth() == 1       # module frame
+            assert tc.ok()
+            tc.enterScope(TcScopeKind.type_)
+            assert tc.currentDepth() == 2
+            tc.leaveScope()
+            assert tc.currentDepth() == 1
+            print "1. lifecycle OK"
+
+            # 2. Symbol definition and lookup
+            assert tc.defineSymbol("PI", TcSymKind.var_, TcType.float_())
+            assert tc.hasSymbol("PI")
+            assert TcTypes.eql(tc.symbolType("PI"), TcType.float_())
+            assert not tc.hasSymbol("undefined_name")
+            assert TcTypes.eql(tc.symbolType("undefined_name"), TcType.unknown_())
+            # Duplicate define returns false
+            assert not tc.defineSymbol("PI", TcSymKind.var_, TcType.int_())
+            print "2. symbol define/lookup OK"
+
+            # 3. memberType and staticCallType wrappers
+            var t_text = tc.memberType(TcType.http_response(), "text")
+            assert TcTypes.eql(t_text, TcType.string_())
+            var t_csv  = tc.staticCallType("Csv", "parse")
+            assert TcTypes.eql(t_csv, TcType.csv_table())
+            print "3. memberType/staticCallType OK"
+
+            # 4. checkMethod — valid int method returning int
+            var stmts_ok = List(TcStmt)()
+            stmts_ok.add(TcStmt.return_(TcStmtReturn(TcExpr.int_lit())))
+            tc.checkMethod(TcType.int_(), stmts_ok)
+            assert tc.ok(), "int method returning int should be valid"
+            print "4. checkMethod valid int return OK"
+
+            # 5. checkMethod — type mismatch accumulates in errors
+            var stmts_bad = List(TcStmt)()
+            stmts_bad.add(TcStmt.return_(TcStmtReturn(TcExpr.string_lit())))
+            tc.checkMethod(TcType.int_(), stmts_bad)
+            assert not tc.ok(), "int method returning string should have error"
+            assert tc.errors.count() == 1
+            print "5. checkMethod type mismatch reported OK"
+
+            tc.clearErrors()
+            assert tc.ok()
+            print "6. clearErrors OK"
+
+            # 7. checkMethod — void method with no-value return
+            var stmts_void = List(TcStmt)()
+            stmts_void.add(TcStmt.return_void())
+            tc.checkMethod(TcType.void_(), stmts_void)
+            assert tc.ok()
+            print "7. void method return OK"
+
+            # 8. checkMethod — if condition must be bool
+            var stmts_if = List(TcStmt)()
+            stmts_if.add(TcStmt.if_(TcStmtIf(TcExpr.int_lit())))    # int cond — error
+            tc.checkMethod(TcType.void_(), stmts_if)
+            assert not tc.ok()
+            assert tc.errors.count() == 1
+            tc.clearErrors()
+            print "8. if non-bool condition reported OK"
+
+            # 9. checkMethod — assert with bool condition (valid)
+            var stmts_assert = List(TcStmt)()
+            var bi_cmp = TcExprBinary("==", TcExpr.float_lit(), TcExpr.float_lit())
+            stmts_assert.add(TcStmt.assert_(TcStmtAssert(TcExpr.binary(bi_cmp))))
+            tc.checkMethod(TcType.void_(), stmts_assert)
+            assert tc.ok()
+            print "9. assert with bool cond OK"
+
+            # 10. checkMethod — multiple stmts, multiple errors
+            var stmts_multi = List(TcStmt)()
+            stmts_multi.add(TcStmt.var_decl(TcStmtVarDecl("a", TcType.int_(), TcExpr.string_lit())))
+            stmts_multi.add(TcStmt.var_decl(TcStmtVarDecl("b", TcType.bool_(), TcExpr.float_lit())))
+            stmts_multi.add(TcStmt.pass_())
+            tc.checkMethod(TcType.void_(), stmts_multi)
+            assert tc.errors.count() == 2
+            tc.clearErrors()
+            print "10. multiple errors in checkMethod OK"
+
+            # 11. typeQuery helpers
+            assert tc.typeName(TcType.string_()) == "String"
+            assert tc.typeName(TcType.optional(TcType.int_())) == "?int"
+            assert tc.isNumeric(TcType.int_())
+            assert not tc.isNumeric(TcType.bool_())
+            assert tc.isAssignable(TcType.int_(), TcType.float_())
+            assert not tc.isAssignable(TcType.bool_(), TcType.string_())
+            print "11. type query helpers OK"
+
+            # 12. Nested scope: symbols in inner scope visible during checkMethod
+            tc.enterScope(TcScopeKind.type_)
+            assert tc.defineSymbol("count", TcSymKind.var_, TcType.int_())
+            # Method inside type scope — count is visible
+            var stmts_inner = List(TcStmt)()
+            stmts_inner.add(TcStmt.return_(TcStmtReturn(TcExpr.int_lit())))
+            tc.checkMethod(TcType.int_(), stmts_inner)
+            assert tc.ok()
+            tc.leaveScope()
+            print "12. nested scope checkMethod OK"
+
+            print "typechecker_test: all OK"
