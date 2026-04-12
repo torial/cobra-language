@@ -295,7 +295,36 @@ These fail WITH A COMPILER ERROR — that IS the test passing:
 
 ---
 
-*Last updated: 2026-04-11*
+### BUG-026: `instance_method_return_types` gaps for exposed-type method chains
+- **Severity:** Medium
+- **Status:** Open
+- **Target:** Phase 7b / post-audit
+- **Symptom:** When a variable holds an exposed cross-module struct (from `use Mod exposing TypeName`) and you call a method whose return type is itself a user-defined type, the TC fix added in Phase 7a (commit dcdf70fd) looks up the method in `ModuleInterface.instance_method_return_types`. If that map is not fully populated for a given method (e.g., a method returning another struct that isn't tracked), the TC still returns `.unknown` for the chained call result. This means `var b = a.someMethod()` may still produce `const b` in generated Zig if `someMethod` isn't in `instance_method_return_types`.
+- **Root cause:** `instance_method_return_types` is populated by `buildModuleInterface` in `main.zig`. It only captures methods whose return type resolves to a `.named` symbol with a non-primitive type. Methods that return generic types, optionals, or cross-module types are not captured. The coverage is sufficient for Phase 7a's test suite but may be incomplete for deeper chains.
+- **Reproduce:** Call `g.withOwner("Foo").indented()` where the intermediate `.withOwner` result is an exposed struct — test still fails because the chained intermediate is anonymous and not tracked.
+- **Fix direction:** Populate `instance_method_return_types` more comprehensively in `buildModuleInterface`, including for methods that return the same type as the receiver (`-> Self`). Or convert `instance_method_return_types` to a map from method key to full `TypeRef` rather than just a string type name.
+- **Found by:** Phase 7a review — "least confident about" from self-assessment.
+
+---
+
+### BUG-027: Method chaining on struct temporaries requires manual intermediate vars
+- **Severity:** Low (ergonomic / language design)
+- **Status:** Open — language limitation, not a compiler bug per se
+- **Target:** Deferred (requires compiler or language change)
+- **Symptom:** In Zebra, calling a method on the return value of another method — `g.indented().withOwner(n.name)` — fails if the intermediate result is a struct (value type). The compiler emits the intermediate as a `*const StructType` (temporary pointer), and the next method call which requires `self: *StructType` (mutable) rejects the const pointer. Users must manually break the chain:
+  ```zebra
+  var g0 = g.indented()
+  var g1 = g0.withOwner(n.name)
+  ```
+- **Root cause:** Zig temporary value semantics: when a function returns a struct by value, the caller's stack slot is `const`. Zebra's generated code doesn't create a mutable local for intermediate results in method chains.
+- **Impact:** Discovered repeatedly in `selfhost/codegen.zbr` where Generator context-forking methods are naturally chained. Every chain must be manually flattened.
+- **Fix direction (option A):** When codegen detects a `.call` where the callee is itself a `.call` returning a struct type, emit an anonymous mutable local (`var _tmp = ...; _tmp.next()`) instead of chaining directly.
+- **Fix direction (option B):** Language change — allow `let` chains in Zebra that make each step explicit but without requiring named vars (`g.indented() |g0| g0.withOwner(x)`).
+- **Found by:** Phase 7a — "least proud of" from self-assessment.
+
+---
+
+*Last updated: 2026-04-12*
 
 ---
 

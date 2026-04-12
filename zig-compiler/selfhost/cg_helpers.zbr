@@ -796,6 +796,8 @@ def scanMutationsInto(stmts as List(Stmt), out as StrSet)
                     scanMutationsInto(cl.stmts, out)
             on Stmt.guard_ as g
                 scanMutationsInto(g.else_stmts, out)
+            on Stmt.assert_ as a
+                scanMutationsInExpr(a.cond, out)
             else
                 pass
 
