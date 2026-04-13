@@ -672,11 +672,17 @@ fn extractFromMembers(
         },
         .init => |ci| {
             // Record per-param boxing flags for cross-module constructor calls.
-            // For each param, true iff the param is `^T` (ref_to).
+            // For each param, true iff the param is `^T` (ref_to) or `^T?` (nilable(ref_to)).
             if (ci.params.len > 0) {
                 var flags = try alloc.alloc(bool, ci.params.len);
                 for (ci.params, 0..) |p, i| {
-                    flags[i] = if (p.type_) |pt| pt == .ref_to else false;
+                    // true iff param is `^T` (ref_to) OR `^T?` (nilable wrapping ref_to).
+                    // Both require allocator boxing at cross-module call sites.
+                    flags[i] = if (p.type_) |pt| blk: {
+                        if (pt == .ref_to) break :blk true;
+                        if (pt == .nilable and pt.nilable.* == .ref_to) break :blk true;
+                        break :blk false;
+                    } else false;
                 }
                 // Only store if at least one param needs boxing.
                 const any_ref = for (flags) |f| { if (f) break true; } else false;

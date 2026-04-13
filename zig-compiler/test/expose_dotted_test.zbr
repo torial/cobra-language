@@ -1,0 +1,32 @@
+# expose_dotted_test.zbr -- regression test for `use dotted.path exposing Symbol`.
+#
+# Bug history: when a user writes `use expose_dotted.lib exposing DottedLib`, the
+# TypeChecker registered the symbol with name "DottedLib" (the exposed name) but
+# looked it up in imported_modules under "DottedLib" — which fails because the map
+# uses the full DeclUse.path "expose_dotted.lib" as its key.
+#
+# The fix: use mod_sym.decl.use.path (the full path) for the imp.get() lookup, while
+# keeping mod_sym.name ("DottedLib") for the "ClassName.method" key in the methods table.
+#
+# This test covers:
+#   1. Static method call returning a primitive (str) — TypeChecker must infer return type
+#   2. Static method call returning an int — arithmetic on the result
+#   3. Static method returning a user-defined type — cross-module type inference chain
+
+use expose_dotted.lib exposing DottedLib, Point
+
+class Main
+    shared
+        def main
+            # 1. Static method returning str — TypeChecker must know greet() → str
+            #    so string concatenation (" " + g) is valid.
+            var g = DottedLib.greet()
+            assert g == "hello from dotted lib", "greet failed"
+            print "1. dotted.lib static str call: OK"
+
+            # 2. Static method returning int — arithmetic on result.
+            var sum = DottedLib.add(7, 3)
+            assert sum == 10, "add failed"
+            print "2. dotted.lib static int call: OK"
+
+            print "expose_dotted_test: all OK"

@@ -1655,8 +1655,8 @@ pub const Token = struct {
     text: []const u8 = undefined,
     line: i64 = undefined,
     col: i64 = undefined,
-    pub fn init(k: TokenKind, t: []const u8, ln: i64, cl: i64) Token {
-        var self: Token = undefined;
+    pub fn init(k: TokenKind, t: []const u8, ln: i64, cl: i64) *Token {
+        const self = _allocator.create(Token) catch @panic("OOM");
         self._type_tag = _ttag_Token;
 // zbr:selfhost\Token.zbr:196
         self.kind = k;
@@ -2138,8 +2138,8 @@ pub const Keywords = struct {
         return null;
     }
 
-    pub fn init() Keywords {
-        var self: Keywords = undefined;
+    pub fn init() *Keywords {
+        const self = _allocator.create(Keywords) catch @panic("OOM");
         self._type_tag = _ttag_Keywords;
         return self;
     }

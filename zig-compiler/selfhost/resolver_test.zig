@@ -1701,8 +1701,8 @@ pub const ResolverTest = struct {
         std.debug.print("{s}\n", .{"testTryCatch: OK"});
     }
 
-    pub fn init() ResolverTest {
-        var self: ResolverTest = undefined;
+    pub fn init() *ResolverTest {
+        const self = _allocator.create(ResolverTest) catch @panic("OOM");
         self._type_tag = _ttag_ResolverTest;
         return self;
     }
@@ -1721,9 +1721,9 @@ pub const Main = struct {
         var _try_err_3b30: ?anyerror = null;
         _try_blk_3b30: {
 // zbr:selfhost/resolver_test.zbr:130
-            var t = ResolverTest.init();
+            const t = ResolverTest.init();
 // zbr:selfhost/resolver_test.zbr:131
-            t.run() catch |_tc_1d642063af0| { _try_err_3b30 = _tc_1d642063af0; break :_try_blk_3b30; };
+            t.run() catch |_tc_12a199f3af0| { _try_err_3b30 = _tc_12a199f3af0; break :_try_blk_3b30; };
             break :_try_blk_3b30;
         }
         if (_try_err_3b30 != null) {
@@ -1732,8 +1732,8 @@ pub const Main = struct {
         }
     }
 
-    pub fn init() Main {
-        var self: Main = undefined;
+    pub fn init() *Main {
+        const self = _allocator.create(Main) catch @panic("OOM");
         self._type_tag = _ttag_Main;
         return self;
     }

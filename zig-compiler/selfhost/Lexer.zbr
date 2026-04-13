@@ -66,6 +66,7 @@ class Lexer
     var lineStart   as int
     var indentDepth as int
     var blockDepth  as int
+    var parenDepth  as int
     var out         as List(Token.Token)
 
     cue init()
@@ -75,6 +76,7 @@ class Lexer
         lineStart   = 0
         indentDepth = 0
         blockDepth  = 0
+        parenDepth  = 0
         out         = List()
 
     shared def tokenize(source as str) as List(Token.Token) throws
@@ -272,6 +274,7 @@ class Lexer
         # open_call: identifier immediately followed by (
         if peek() == c'('
             pos = pos + 1
+            parenDepth = parenDepth + 1
             emit(TokenKind.open_call(), word, ln, cl)
             return
 
@@ -696,15 +699,19 @@ class Lexer
             emit(TokenKind.comma(), ",", ln, cl)
             return
         if c == c'('
+            parenDepth = parenDepth + 1
             emit(TokenKind.lparen(), "(", ln, cl)
             return
         if c == c')'
+            parenDepth = parenDepth - 1
             emit(TokenKind.rparen(), ")", ln, cl)
             return
         if c == c'['
+            parenDepth = parenDepth + 1
             emit(TokenKind.lbracket(), "[", ln, cl)
             return
         if c == c']'
+            parenDepth = parenDepth - 1
             emit(TokenKind.rbracket(), "]", ln, cl)
             return
         if c == c'{'
@@ -752,7 +759,8 @@ class Lexer
                         var ln = line
                         var cl = col()
                         advanceNewline()
-                        emit(TokenKind.eol(), "\n", ln, cl)
+                        if parenDepth == 0
+                            emit(TokenKind.eol(), "\n", ln, cl)
                         atLineStart = true
                         continue
                     on LineKind.whitespace_only
@@ -770,7 +778,8 @@ class Lexer
                         atLineStart = true
                         continue
                     on LineKind.has_content
-                        processIndentation()?
+                        if parenDepth == 0
+                            processIndentation()?
 
             var c = src[pos]
 
@@ -782,7 +791,8 @@ class Lexer
                 var ln = line
                 var cl = col()
                 advanceNewline()
-                emit(TokenKind.eol(), "\n", ln, cl)
+                if parenDepth == 0
+                    emit(TokenKind.eol(), "\n", ln, cl)
                 atLineStart = true
                 continue
 

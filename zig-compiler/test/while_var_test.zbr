@@ -1,0 +1,33 @@
+class WhileVarTest
+    def testScanAlpha() as str
+        var src = "hello123"
+        var pos = 0
+        var word = ""
+        while var c = src[pos], c >= c'a' and c <= c'z'
+            word = word + src[pos..pos+1]
+            pos  = pos + 1
+        return word
+
+    def testScanDigits() as str
+        var src = "42abc"
+        var pos = 0
+        var digits = ""
+        while var c = src[pos], c >= c'0' and c <= c'9'
+            digits = digits + src[pos..pos+1]
+            pos    = pos + 1
+        return digits
+
+    def testEmpty() as int
+        var src = "!xyz"
+        var pos = 0
+        while var c = src[pos], c >= c'a' and c <= c'z'
+            pos = pos + 1
+        return pos
+
+class Main
+    shared def main()
+        var t = WhileVarTest()
+        assert t.testScanAlpha()  == "hello"
+        assert t.testScanDigits() == "42"
+        assert t.testEmpty()      == 0
+        print "while_var_test: all OK"

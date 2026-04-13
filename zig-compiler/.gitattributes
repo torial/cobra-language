@@ -1,0 +1,3 @@
+# Force LF line endings for Zebra source files on all platforms.
+# The Zebra tokenizer only handles LF; CRLF causes error.UnexpectedCharacter.
+*.zbr text eol=lf

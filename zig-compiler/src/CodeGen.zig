@@ -8410,11 +8410,29 @@ const Generator = struct {
                     // ① Same-module named type: inspect the scope directly.
                     if (obj_type == .named) {
                         const sym = obj_type.named;
-                        const scope = sym.own_scope orelse break :blk false;
-                        const field_sym = scope.lookupLocal(e.member) orelse break :blk false;
-                        if (field_sym.decl != .var_) break :blk false;
-                        const field_tr = field_sym.decl.var_.type_ orelse break :blk false;
-                        break :blk field_tr == .ref_to;
+                        if (sym.own_scope) |scope| {
+                            const field_sym = scope.lookupLocal(e.member) orelse break :blk false;
+                            if (field_sym.decl != .var_) break :blk false;
+                            const field_tr = field_sym.decl.var_.type_ orelse break :blk false;
+                            break :blk field_tr == .ref_to;
+                        }
+                        // Exposed cross-module type (`use Mod exposing T`): sym.own_scope is null.
+                        // Fall through to look up ref_fields in the imported interface.
+                        if (sym.kind == .module and sym.decl == .use) {
+                            const use_decl = sym.decl.use;
+                            const last_dot = std.mem.lastIndexOf(u8, use_decl.path, ".");
+                            const mod_alias = if (last_dot) |d| use_decl.path[d + 1 ..] else use_decl.path;
+                            if (!std.mem.eql(u8, sym.name, mod_alias)) {
+                                if (g.imported_modules) |imp| {
+                                    if (imp.get(mod_alias)) |iface| {
+                                        const key = std.fmt.allocPrint(g.alloc, "{s}.{s}", .{ sym.name, e.member }) catch break :blk false;
+                                        defer g.alloc.free(key);
+                                        break :blk iface.ref_fields.contains(key);
+                                    }
+                                }
+                            }
+                        }
+                        break :blk false;
                     }
                     // ② Cross-module type: consult ref_fields in the imported interface.
                     if (obj_type == .cross_module) {
@@ -8510,13 +8528,31 @@ const Generator = struct {
                     const mem = e.expr.member;
                     const tc = g.tc orelse break :blk false;
                     const obj_type = tc.expr_types.get(mem.object) orelse break :blk false;
-                    if (obj_type != .cross_module) break :blk false;
-                    const cm = obj_type.cross_module;
-                    const imp = g.imported_modules orelse break :blk false;
-                    const iface = imp.get(cm.module) orelse break :blk false;
-                    const key = std.fmt.allocPrint(g.alloc, "{s}.{s}", .{ cm.type_name, mem.member }) catch break :blk false;
-                    defer g.alloc.free(key);
-                    break :blk iface.optional_ref_fields.contains(key);
+                    // Cross-module type via module.Type syntax.
+                    if (obj_type == .cross_module) {
+                        const cm = obj_type.cross_module;
+                        const imp = g.imported_modules orelse break :blk false;
+                        const iface = imp.get(cm.module) orelse break :blk false;
+                        const key = std.fmt.allocPrint(g.alloc, "{s}.{s}", .{ cm.type_name, mem.member }) catch break :blk false;
+                        defer g.alloc.free(key);
+                        break :blk iface.optional_ref_fields.contains(key);
+                    }
+                    // Exposed cross-module type (`use Mod exposing T`): sym.own_scope is null.
+                    if (obj_type == .named) {
+                        const sym = obj_type.named;
+                        if (sym.own_scope != null) break :blk false;
+                        if (sym.kind != .module or sym.decl != .use) break :blk false;
+                        const use_decl = sym.decl.use;
+                        const last_dot = std.mem.lastIndexOf(u8, use_decl.path, ".");
+                        const mod_alias = if (last_dot) |d| use_decl.path[d + 1 ..] else use_decl.path;
+                        if (std.mem.eql(u8, sym.name, mod_alias)) break :blk false;
+                        const imp = g.imported_modules orelse break :blk false;
+                        const iface = imp.get(mod_alias) orelse break :blk false;
+                        const key = std.fmt.allocPrint(g.alloc, "{s}.{s}", .{ sym.name, mem.member }) catch break :blk false;
+                        defer g.alloc.free(key);
+                        break :blk iface.optional_ref_fields.contains(key);
+                    }
+                    break :blk false;
                 };
                 try g.genExpr(e.expr);
                 if (!already_unwrapped) try g.w.writeAll(".?");

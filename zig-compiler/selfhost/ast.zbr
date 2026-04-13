@@ -418,13 +418,14 @@ union Stmt
     guard_ as ^StmtGuard
     destruct as ^StmtDestruct
     arena_scope as ^StmtArenaScope
+    print_ as ^StmtPrint
 
 struct ElseIf
     var span as Span
-    var cond as ^Expr
+    var cond as Expr
     var stmts as List(Stmt)
 
-    cue init(span as Span, cond as ^Expr, stmts as List(Stmt))
+    cue init(span as Span, cond as Expr, stmts as List(Stmt))
         this.span = span
         this.cond = cond
         this.stmts = stmts
@@ -483,11 +484,11 @@ struct StmtForNum
 
 struct BranchOn
     var span as Span
-    var values as List(^Expr)
+    var values as List(Expr)
     var stmts as List(Stmt)
     var binding as String?
 
-    cue init(span as Span, values as List(^Expr), stmts as List(Stmt), binding as String?)
+    cue init(span as Span, values as List(Expr), stmts as List(Stmt), binding as String?)
         this.span = span
         this.values = values
         this.stmts = stmts
@@ -615,6 +616,16 @@ struct StmtArenaScope
         this.span = span
         this.stmts = stmts
 
+struct StmtPrint
+    var span as Span
+    var args as List(Expr)
+    var newline as bool
+
+    cue init(span as Span, args as List(Expr), newline as bool)
+        this.span = span
+        this.args = args
+        this.newline = newline
+
 # ── Expressions ───────────────────────────────────────────────────────────────
 #
 # Small value-type variants (no internal pointers) are stored inline.
@@ -653,6 +664,7 @@ union Expr
     try_ as ^ExprTry
     tuple_lit as ^ExprTuple
     type_check as ^ExprTypeCheck
+    except_ as ^ExprExcept
 
 # integer literal
 
@@ -733,6 +745,26 @@ struct ExprStringInterp
         this.span = span
         this.parts = parts
 
+# except (struct update)
+
+struct ExceptField
+    var name as String
+    var value as Expr
+
+    cue init(name as String, value as Expr)
+        this.name = name
+        this.value = value
+
+struct ExprExcept
+    var span as Span
+    var base as Expr
+    var fields as List(ExceptField)
+
+    cue init(span as Span, base as Expr, fields as List(ExceptField))
+        this.span = span
+        this.base = base
+        this.fields = fields
+
 # identifier
 
 struct ExprIdent
@@ -760,19 +792,19 @@ struct ExprMember
 struct Arg
     var span as Span
     var name as String?
-    var value as ^Expr
+    var value as Expr
 
-    cue init(span as Span, name as String?, value as ^Expr)
+    cue init(span as Span, name as String?, value as Expr)
         this.span = span
         this.name = name
         this.value = value
 
 struct ExprCall
     var span as Span
-    var callee as ^Expr
+    var callee as Expr
     var args as List(Arg)
 
-    cue init(span as Span, callee as ^Expr, args as List(Arg))
+    cue init(span as Span, callee as Expr, args as List(Arg))
         this.span = span
         this.callee = callee
         this.args = args
@@ -970,9 +1002,9 @@ struct ExprLambda
 struct ExprListLit
     var span as Span
     var elem_type as TypeRef?
-    var elems as List(^Expr)
+    var elems as List(Expr)
 
-    cue init(span as Span, elem_type as TypeRef?, elems as List(^Expr))
+    cue init(span as Span, elem_type as TypeRef?, elems as List(Expr))
         this.span = span
         this.elem_type = elem_type
         this.elems = elems
@@ -995,9 +1027,9 @@ struct ExprDictLit
 
 struct ExprArrayLit
     var span as Span
-    var elems as List(^Expr)
+    var elems as List(Expr)
 
-    cue init(span as Span, elems as List(^Expr))
+    cue init(span as Span, elems as List(Expr))
         this.span = span
         this.elems = elems
 
@@ -1042,8 +1074,8 @@ struct ExprTry
 
 struct ExprTuple
     var span as Span
-    var elems as List(^Expr)
+    var elems as List(Expr)
 
-    cue init(span as Span, elems as List(^Expr))
+    cue init(span as Span, elems as List(Expr))
         this.span = span
         this.elems = elems

@@ -1,0 +1,278 @@
+# selfhost/main.zbr -- Phase 11: Zebra self-hosted compiler CLI
+#
+# This file is compiled by the Zig-compiled Zebra compiler to produce a binary
+# that provides the same CLI as `zig build run --` for .zbr files.
+#
+# Self-hosting pipeline status (Phase 11 complete):
+#   Phase 1  ✅ Lexer        (selfhost/Lexer.zbr)          — tokenizes source
+#   Phase 2  ✅ AST types    (selfhost/ast.zbr)             — node type definitions
+#   Phase 3  ✅ Parser       (selfhost/parser.zbr)          — builds PNode parse tree
+#   Phase 4  ✅ Resolver     (selfhost/resolver.zbr)        — scope + name checking
+#   Phase 5  ✅ TypeChecker  (selfhost/tc_*.zbr)            — type inference + checks
+#   Phase 6  ✅ CG helpers   (selfhost/cg_helpers.zbr)      — escape/mutation analysis
+#   Phase 7  ✅ CodeGen      (selfhost/codegen.zbr)         — Zig emission from ast.zbr
+#   Phase 8  ✅ Main / CLI   (this file)                    — argument parsing + delegation
+#   Phase 9  ✅ ASTBuilder   (selfhost/astbuilder.zbr)      — PNode → ast.zbr Module
+#   Phase 10 ✅ Full pipeline (this file)                   — Lex→Parse→ASTBuilder→CodeGen
+#   Phase 11 ✅ Complete output (this file)                 — preamble + decls + entry thunk;
+#                                                             Resolver wired; zig run invoked
+#
+# Pipeline modes:
+#   --emit-zig:         full selfhost pipeline; outputs complete Zig source to stdout
+#   --selfhost-compile: full selfhost pipeline; writes .zig file and invokes zig run/build-exe
+#   compile/run:        delegates to Zig backend via sys.run (trusted, produces correct output)
+#
+# Usage (run from zig-compiler/ where build.zig lives):
+#   zebra-selfhost <source.zbr>                 compile and run (Zig backend)
+#   zebra-selfhost -c <source.zbr>              compile only (Zig backend)
+#   zebra-selfhost --emit-zig <source.zbr>      print complete Zig source (selfhost pipeline)
+#   zebra-selfhost --selfhost-compile <source>  compile via selfhost pipeline + zig run
+#   zebra-selfhost --version                    print version and exit
+#
+# Preamble file: selfhost/stdlib_preamble.zig (~1465 lines)
+#   Update: zig build run -- --emit-zig /tmp/counter.zbr | head -1464 | tail -n +3 > selfhost/stdlib_preamble.zig
+
+# File, Arg, sys, Shell are built-in stdlib globals — no `use` needed.
+
+use Parser exposing PNode, PUse
+use Resolver
+use astbuilder exposing ASTBuilder
+use codegen exposing generateModule, generateFull, generateFullWith, generateEntryPoint, generateDep, generateDepWith
+
+# ── Multi-file compiler ──────────────────────────────────────────────────────
+
+class MultiCompiler
+    var visited as List(str)
+    var dep_class_names as List(str)
+    var preamble_path as str
+    var output_dir as str
+
+    cue init(preamble_path as str, output_dir as str)
+        this.visited = List(str)()
+        this.dep_class_names = List(str)()
+        this.preamble_path = preamble_path
+        this.output_dir = output_dir
+
+    def alreadyVisited(p as str) as bool
+        var i as int = 0
+        while i < visited.len
+            var v as str = visited.at(i)
+            if v == p
+                return true
+            i = i + 1
+        return false
+
+    def compileDep(zbr_path as str, is_root as bool) throws
+        if .alreadyVisited(zbr_path)
+            return
+        visited.add(zbr_path)
+        sys.errln("compiling: " + zbr_path)
+
+        var src as str = File.read(zbr_path)
+
+        # Step 1: Parse
+        sys.errln("  parsing...")
+        const pm_node = Parser.Parser.parse(src)?
+        sys.errln("  parsed OK")
+
+        # Step 2: Resolve names
+        var resolver = Resolver.Resolver()
+        resolver.resolve(pm_node)?
+        sys.errln("  resolved OK")
+        if resolver.errorCount() > 0
+            raise resolver.firstError()
+
+        # Step 3: Discover and compile dependencies first
+        branch pm_node
+            on PNode.module_ as pm
+                for decl in pm.decls
+                    branch decl
+                        on PNode.use_ as u
+                            .compileDep_use(u, zbr_path)?
+                        on PNode.class_ as cls
+                            var cname as str = "" + cls.name
+                            dep_class_names.add(cname)
+                        else
+                            pass
+
+                # Step 4: Build AST
+                const module = ASTBuilder.build(pm, zbr_path)?
+
+                # Step 5: Generate Zig
+                var zig_src as str = ""
+                if is_root
+                    zig_src = generateFullWith(module, zbr_path, preamble_path, dep_class_names)?
+                else
+                    zig_src = generateDepWith(module, zbr_path, preamble_path, dep_class_names)?
+
+                # Step 6: Write .zig file
+                var zig_path as str = .zbrToZig(zbr_path)
+                File.write(zig_path, zig_src)
+                sys.errln("wrote " + zig_path)
+            else
+                raise "expected module"
+
+    def compileDep_use(u as PUse, parent_path as str) throws
+        # Resolve dep path: same directory as parent, with .zbr extension
+        var src_dir as str = .dirOf(parent_path)
+        var dep_name as str = u.path
+        var dep_path as str = dep_name + ".zbr"
+        if src_dir != ""
+            dep_path = src_dir + "/" + dep_name + ".zbr"
+        if File.exists(dep_path)
+            .compileDep(dep_path, false)?
+
+    def zbrToZig(zbr_path as str) as str
+        # Replace ".zbr" extension with ".zig"
+        # If output_dir is set, write to output_dir/basename.zig
+        var stem as str = zbr_path
+        if zbr_path.endsWith(".zbr")
+            for s in zbr_path.split(".zbr")
+                stem = s
+                break
+        if output_dir != ""
+            # Extract just the filename part (after last /)
+            var base as str = stem
+            if stem.contains("/")
+                var parts as List(str) = List(str)()
+                for p in stem.split("/")
+                    parts.add(p)
+                base = parts.at(parts.len - 1)
+            return output_dir + "/" + base + ".zig"
+        return stem + ".zig"
+
+    def dirOf(path as str) as str
+        # Find directory part by splitting on "/"
+        if not path.contains("/")
+            return ""
+        var parts as List(str) = List(str)()
+        for part in path.split("/")
+            parts.add(part)
+        if parts.len <= 1
+            return ""
+        # Rejoin all parts except the last
+        var result as str = parts.at(0)
+        var i as int = 1
+        var last as int = parts.len - 1
+        while i < last
+            result = result + "/" + parts.at(i)
+            i = i + 1
+        return result
+
+class Main
+    shared def main()
+        var args = Arg.parse()
+
+        # -- Version -----------------------------------------------------------
+
+        if args.contains("--version")
+            sys.errln("zebra-selfhost 0.1 (Phase 11 complete: full selfhost pipeline with preamble + Resolver)")
+            sys.exit(0)
+
+        # -- Source path -------------------------------------------------------
+        # Scan positionals for the .zbr file (skip option values like --output-dir DIR)
+
+        var src_path as str? = nil
+        var pi as int = 0
+        while pi < 10
+            var candidate = args.positional(pi)
+            if candidate == nil
+                break
+            var cval as str = candidate to!
+            if cval.endsWith(".zbr") or cval.endsWith(".cobra")
+                src_path = cval
+                break
+            pi = pi + 1
+        if src_path == nil
+            sys.errln("usage:")
+            sys.errln("  zebra-selfhost <source.zbr>                 compile and run (Zig backend)")
+            sys.errln("  zebra-selfhost -c <source.zbr>              compile only (Zig backend)")
+            sys.errln("  zebra-selfhost --emit-zig <source.zbr>      print complete Zig source (selfhost)")
+            sys.errln("  zebra-selfhost --emit-zig --output-dir DIR  emit .zig files to DIR")
+            sys.errln("  zebra-selfhost --selfhost-compile <source>  selfhost pipeline + zig run")
+            sys.errln("  zebra-selfhost --version                    print version and exit")
+            sys.exit(1)
+
+        var path = src_path to!
+
+        # -- Validate file exists ----------------------------------------------
+
+        if not File.exists(path)
+            sys.errln("zebra: source file not found: '" + path + "'")
+            sys.exit(1)
+
+        # -- Pipeline selection ------------------------------------------------
+
+        var mode_c               = args.contains("-c")
+        var mode_emit            = args.contains("--emit-zig")
+        var mode_selfhost        = args.contains("--selfhost-compile")
+        var release              = args.contains("--release")
+        const preamble_path      = "selfhost/stdlib_preamble.zig"
+        # --output-dir=DIR style to avoid positional arg confusion
+        var output_dir as str    = args.option("--output-dir", "")
+
+        if mode_emit or mode_selfhost
+            # ── Selfhost pipeline: Lex → Resolve → Parse → ASTBuilder → CodeGen ──
+            # Multi-file: discovers dependencies via `use` decls, compiles each to .zig.
+            try
+                # Compile the root file and all its dependencies
+                var mc = MultiCompiler(preamble_path, output_dir)
+                mc.compileDep(path, true)?
+
+                if mode_emit
+                    # --emit-zig: print root file's Zig source to stdout
+                    var zig_path as str = mc.zbrToZig(path)
+                    var zig_src as str = File.read(zig_path)
+                    print zig_src
+                    sys.exit(0)
+
+                # --selfhost-compile: invoke zig to compile/run the generated file
+                var zig_path as str = mc.zbrToZig(path)
+
+                var argv2 = List(str)()
+                argv2.add("zig")
+                if mode_c
+                    argv2.add("build-exe")
+                    argv2.add(zig_path)
+                    if release
+                        argv2.add("-OReleaseFast")
+                else
+                    argv2.add("run")
+                    argv2.add(zig_path)
+
+                var r2 = sys.run(argv2)
+                if r2.stdout != ""
+                    print r2.stdout
+                if r2.stderr != ""
+                    sys.errln(r2.stderr)
+                if r2.exit_code != 0
+                    sys.exit(1)
+
+            catch |e|
+                sys.errln("zebra: selfhost pipeline error: " + e.message)
+                sys.exit(1)
+            sys.exit(0)
+
+        # -- Zig backend delegation --------------------------------------------
+        # Compile and/or run via the Zig-compiled backend.
+        # Produces correct complete programs.
+        # Requires running from zig-compiler/ (where build.zig lives).
+
+        var argv = List(str)()
+        argv.add("zig")
+        argv.add("build")
+        argv.add("run")
+        argv.add("--")
+        if mode_c
+            argv.add("-c")
+        if release
+            argv.add("--release")
+        argv.add(path)
+
+        var r = sys.run(argv)
+        if r.stdout != ""
+            print r.stdout
+        if r.stderr != ""
+            sys.errln(r.stderr)
+        if r.exit_code != 0
+            sys.exit(1)

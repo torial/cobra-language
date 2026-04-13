@@ -1673,13 +1673,13 @@ pub fn testTypeRefStrBoxed() anyerror!void {
 // zbr:selfhost/cg_helpers_test.zbr:118
     const inner = TypeRef{ .named = NamedTypeRef.init(sp, "str") };
 // zbr:selfhost/cg_helpers_test.zbr:119
-    std.debug.assert(std.mem.eql(u8, typeRefStr(TypeRef{ .nilable = _box_1ebc3c22608: { const _bp_1ebc3c22608 = _allocator.create(ast.TypeRef) catch @panic("OOM"); _bp_1ebc3c22608.* = inner; break :_box_1ebc3c22608 _bp_1ebc3c22608; } }), "?str"));
+    std.debug.assert(std.mem.eql(u8, typeRefStr(TypeRef{ .nilable = _box_2f0be3d2608: { const _bp_2f0be3d2608 = _allocator.create(ast.TypeRef) catch @panic("OOM"); _bp_2f0be3d2608.* = inner; break :_box_2f0be3d2608 _bp_2f0be3d2608; } }), "?str"));
 // zbr:selfhost/cg_helpers_test.zbr:120
-    std.debug.assert(std.mem.eql(u8, typeRefStr(TypeRef{ .stream = _box_1ebc3c22870: { const _bp_1ebc3c22870 = _allocator.create(ast.TypeRef) catch @panic("OOM"); _bp_1ebc3c22870.* = inner; break :_box_1ebc3c22870 _bp_1ebc3c22870; } }), "str*"));
+    std.debug.assert(std.mem.eql(u8, typeRefStr(TypeRef{ .stream = _box_2f0be3d2870: { const _bp_2f0be3d2870 = _allocator.create(ast.TypeRef) catch @panic("OOM"); _bp_2f0be3d2870.* = inner; break :_box_2f0be3d2870 _bp_2f0be3d2870; } }), "str*"));
 // zbr:selfhost/cg_helpers_test.zbr:121
-    std.debug.assert(std.mem.eql(u8, typeRefStr(TypeRef{ .error_union = _box_1ebc3c22ad8: { const _bp_1ebc3c22ad8 = _allocator.create(ast.TypeRef) catch @panic("OOM"); _bp_1ebc3c22ad8.* = inner; break :_box_1ebc3c22ad8 _bp_1ebc3c22ad8; } }), "!str"));
+    std.debug.assert(std.mem.eql(u8, typeRefStr(TypeRef{ .error_union = _box_2f0be3d2ad8: { const _bp_2f0be3d2ad8 = _allocator.create(ast.TypeRef) catch @panic("OOM"); _bp_2f0be3d2ad8.* = inner; break :_box_2f0be3d2ad8 _bp_2f0be3d2ad8; } }), "!str"));
 // zbr:selfhost/cg_helpers_test.zbr:122
-    std.debug.assert(std.mem.eql(u8, typeRefStr(TypeRef{ .ref_to = _box_1ebc3c22d40: { const _bp_1ebc3c22d40 = _allocator.create(ast.TypeRef) catch @panic("OOM"); _bp_1ebc3c22d40.* = inner; break :_box_1ebc3c22d40 _bp_1ebc3c22d40; } }), "^str"));
+    std.debug.assert(std.mem.eql(u8, typeRefStr(TypeRef{ .ref_to = _box_2f0be3d2d40: { const _bp_2f0be3d2d40 = _allocator.create(ast.TypeRef) catch @panic("OOM"); _bp_2f0be3d2d40.* = inner; break :_box_2f0be3d2d40 _bp_2f0be3d2d40; } }), "^str"));
 // zbr:selfhost/cg_helpers_test.zbr:123
     std.debug.print("{s}\n", .{"4d. typeRefStr boxed: OK"});
 }
@@ -1705,25 +1705,25 @@ pub fn testNilNarrowVar() anyerror!void {
 // zbr:selfhost/cg_helpers_test.zbr:138
     const nil_ = Expr{ .nil_ = sp };
 // zbr:selfhost/cg_helpers_test.zbr:140
-    const ne = Expr{ .binary = _box_1ebc3c24188: { const _bp_1ebc3c24188 = _allocator.create(ast.ExprBinary) catch @panic("OOM"); _bp_1ebc3c24188.* = ExprBinary.init(sp, BinaryOp.ne, _box_1ebc3c24010: { const _bp_1ebc3c24010 = blk2: { break :blk2 _allocator.create(@TypeOf(id_x)) catch @panic("OOM"); }; _bp_1ebc3c24010.* = id_x; break :_box_1ebc3c24010 _bp_1ebc3c24010; }, _box_1ebc3c24038: { const _bp_1ebc3c24038 = blk2: { break :blk2 _allocator.create(@TypeOf(nil_)) catch @panic("OOM"); }; _bp_1ebc3c24038.* = nil_; break :_box_1ebc3c24038 _bp_1ebc3c24038; }); break :_box_1ebc3c24188 _bp_1ebc3c24188; } };
+    const ne = Expr{ .binary = _box_2f0be3d4188: { const _bp_2f0be3d4188 = _allocator.create(ast.ExprBinary) catch @panic("OOM"); _bp_2f0be3d4188.* = ExprBinary.init(sp, BinaryOp.ne, _box_2f0be3d4010: { const _bp_2f0be3d4010 = blk2: { break :blk2 _allocator.create(@TypeOf(id_x)) catch @panic("OOM"); }; _bp_2f0be3d4010.* = id_x; break :_box_2f0be3d4010 _bp_2f0be3d4010; }, _box_2f0be3d4038: { const _bp_2f0be3d4038 = blk2: { break :blk2 _allocator.create(@TypeOf(nil_)) catch @panic("OOM"); }; _bp_2f0be3d4038.* = nil_; break :_box_2f0be3d4038 _bp_2f0be3d4038; }); break :_box_2f0be3d4188 _bp_2f0be3d4188; } };
 // zbr:selfhost/cg_helpers_test.zbr:141
     std.debug.assert(std.mem.eql(u8, nilNarrowVar(ne, true).?, "x"));
 // zbr:selfhost/cg_helpers_test.zbr:142
     std.debug.assert((nilNarrowVar(ne, false) == null));
 // zbr:selfhost/cg_helpers_test.zbr:144
-    const eq = Expr{ .binary = _box_1ebc3c24980: { const _bp_1ebc3c24980 = _allocator.create(ast.ExprBinary) catch @panic("OOM"); _bp_1ebc3c24980.* = ExprBinary.init(sp, BinaryOp.eq, _box_1ebc3c24808: { const _bp_1ebc3c24808 = blk2: { break :blk2 _allocator.create(@TypeOf(id_x)) catch @panic("OOM"); }; _bp_1ebc3c24808.* = id_x; break :_box_1ebc3c24808 _bp_1ebc3c24808; }, _box_1ebc3c24830: { const _bp_1ebc3c24830 = blk2: { break :blk2 _allocator.create(@TypeOf(nil_)) catch @panic("OOM"); }; _bp_1ebc3c24830.* = nil_; break :_box_1ebc3c24830 _bp_1ebc3c24830; }); break :_box_1ebc3c24980 _bp_1ebc3c24980; } };
+    const eq = Expr{ .binary = _box_2f0be3d4980: { const _bp_2f0be3d4980 = _allocator.create(ast.ExprBinary) catch @panic("OOM"); _bp_2f0be3d4980.* = ExprBinary.init(sp, BinaryOp.eq, _box_2f0be3d4808: { const _bp_2f0be3d4808 = blk2: { break :blk2 _allocator.create(@TypeOf(id_x)) catch @panic("OOM"); }; _bp_2f0be3d4808.* = id_x; break :_box_2f0be3d4808 _bp_2f0be3d4808; }, _box_2f0be3d4830: { const _bp_2f0be3d4830 = blk2: { break :blk2 _allocator.create(@TypeOf(nil_)) catch @panic("OOM"); }; _bp_2f0be3d4830.* = nil_; break :_box_2f0be3d4830 _bp_2f0be3d4830; }); break :_box_2f0be3d4980 _bp_2f0be3d4980; } };
 // zbr:selfhost/cg_helpers_test.zbr:145
     std.debug.assert(std.mem.eql(u8, nilNarrowVar(eq, false).?, "x"));
 // zbr:selfhost/cg_helpers_test.zbr:146
     std.debug.assert((nilNarrowVar(eq, true) == null));
 // zbr:selfhost/cg_helpers_test.zbr:148
-    const ne2 = Expr{ .binary = _box_1ebc3c252b8: { const _bp_1ebc3c252b8 = _allocator.create(ast.ExprBinary) catch @panic("OOM"); _bp_1ebc3c252b8.* = ExprBinary.init(sp, BinaryOp.ne, _box_1ebc3c25140: { const _bp_1ebc3c25140 = blk2: { break :blk2 _allocator.create(@TypeOf(nil_)) catch @panic("OOM"); }; _bp_1ebc3c25140.* = nil_; break :_box_1ebc3c25140 _bp_1ebc3c25140; }, _box_1ebc3c25168: { const _bp_1ebc3c25168 = blk2: { break :blk2 _allocator.create(@TypeOf(id_x)) catch @panic("OOM"); }; _bp_1ebc3c25168.* = id_x; break :_box_1ebc3c25168 _bp_1ebc3c25168; }); break :_box_1ebc3c252b8 _bp_1ebc3c252b8; } };
+    const ne2 = Expr{ .binary = _box_2f0be3d52b8: { const _bp_2f0be3d52b8 = _allocator.create(ast.ExprBinary) catch @panic("OOM"); _bp_2f0be3d52b8.* = ExprBinary.init(sp, BinaryOp.ne, _box_2f0be3d5140: { const _bp_2f0be3d5140 = blk2: { break :blk2 _allocator.create(@TypeOf(nil_)) catch @panic("OOM"); }; _bp_2f0be3d5140.* = nil_; break :_box_2f0be3d5140 _bp_2f0be3d5140; }, _box_2f0be3d5168: { const _bp_2f0be3d5168 = blk2: { break :blk2 _allocator.create(@TypeOf(id_x)) catch @panic("OOM"); }; _bp_2f0be3d5168.* = id_x; break :_box_2f0be3d5168 _bp_2f0be3d5168; }); break :_box_2f0be3d52b8 _bp_2f0be3d52b8; } };
 // zbr:selfhost/cg_helpers_test.zbr:149
     std.debug.assert(std.mem.eql(u8, nilNarrowVar(ne2, true).?, "x"));
 // zbr:selfhost/cg_helpers_test.zbr:151
     const lit = Expr{ .int_lit = ExprIntLit.init(sp, "0", IntBase.decimal) };
 // zbr:selfhost/cg_helpers_test.zbr:152
-    const add = Expr{ .binary = _box_1ebc3c25c00: { const _bp_1ebc3c25c00 = _allocator.create(ast.ExprBinary) catch @panic("OOM"); _bp_1ebc3c25c00.* = ExprBinary.init(sp, BinaryOp.add, _box_1ebc3c25a88: { const _bp_1ebc3c25a88 = blk2: { break :blk2 _allocator.create(@TypeOf(id_x)) catch @panic("OOM"); }; _bp_1ebc3c25a88.* = id_x; break :_box_1ebc3c25a88 _bp_1ebc3c25a88; }, _box_1ebc3c25ab0: { const _bp_1ebc3c25ab0 = blk2: { break :blk2 _allocator.create(@TypeOf(lit)) catch @panic("OOM"); }; _bp_1ebc3c25ab0.* = lit; break :_box_1ebc3c25ab0 _bp_1ebc3c25ab0; }); break :_box_1ebc3c25c00 _bp_1ebc3c25c00; } };
+    const add = Expr{ .binary = _box_2f0be3d5c00: { const _bp_2f0be3d5c00 = _allocator.create(ast.ExprBinary) catch @panic("OOM"); _bp_2f0be3d5c00.* = ExprBinary.init(sp, BinaryOp.add, _box_2f0be3d5a88: { const _bp_2f0be3d5a88 = blk2: { break :blk2 _allocator.create(@TypeOf(id_x)) catch @panic("OOM"); }; _bp_2f0be3d5a88.* = id_x; break :_box_2f0be3d5a88 _bp_2f0be3d5a88; }, _box_2f0be3d5ab0: { const _bp_2f0be3d5ab0 = blk2: { break :blk2 _allocator.create(@TypeOf(lit)) catch @panic("OOM"); }; _bp_2f0be3d5ab0.* = lit; break :_box_2f0be3d5ab0 _bp_2f0be3d5ab0; }); break :_box_2f0be3d5c00 _bp_2f0be3d5c00; } };
 // zbr:selfhost/cg_helpers_test.zbr:153
     std.debug.assert((nilNarrowVar(add, true) == null));
 // zbr:selfhost/cg_helpers_test.zbr:154
@@ -1744,17 +1744,17 @@ pub fn testExprHasTry() anyerror!void {
 // zbr:selfhost/cg_helpers_test.zbr:166
     const inner = Expr{ .ident = ExprIdent.init(sp, "f") };
 // zbr:selfhost/cg_helpers_test.zbr:167
-    const try_e = Expr{ .try_ = _box_1ebc3c302f0: { const _bp_1ebc3c302f0 = _allocator.create(ast.ExprTry) catch @panic("OOM"); _bp_1ebc3c302f0.* = ExprTry.init(sp, _box_1ebc3c30240: { const _bp_1ebc3c30240 = blk2: { break :blk2 _allocator.create(@TypeOf(inner)) catch @panic("OOM"); }; _bp_1ebc3c30240.* = inner; break :_box_1ebc3c30240 _bp_1ebc3c30240; }); break :_box_1ebc3c302f0 _bp_1ebc3c302f0; } };
+    const try_e = Expr{ .try_ = _box_2f0be3e02f0: { const _bp_2f0be3e02f0 = _allocator.create(ast.ExprTry) catch @panic("OOM"); _bp_2f0be3e02f0.* = ExprTry.init(sp, _box_2f0be3e0240: { const _bp_2f0be3e0240 = blk2: { break :blk2 _allocator.create(@TypeOf(inner)) catch @panic("OOM"); }; _bp_2f0be3e0240.* = inner; break :_box_2f0be3e0240 _bp_2f0be3e0240; }); break :_box_2f0be3e02f0 _bp_2f0be3e02f0; } };
 // zbr:selfhost/cg_helpers_test.zbr:168
     std.debug.assert(exprHasTry(try_e));
 // zbr:selfhost/cg_helpers_test.zbr:170
     const lhs = Expr{ .int_lit = ExprIntLit.init(sp, "0", IntBase.decimal) };
 // zbr:selfhost/cg_helpers_test.zbr:171
-    std.debug.assert(exprHasTry(Expr{ .binary = _box_1ebc3c30c78: { const _bp_1ebc3c30c78 = _allocator.create(ast.ExprBinary) catch @panic("OOM"); _bp_1ebc3c30c78.* = ExprBinary.init(sp, BinaryOp.add, _box_1ebc3c30b00: { const _bp_1ebc3c30b00 = blk2: { break :blk2 _allocator.create(@TypeOf(lhs)) catch @panic("OOM"); }; _bp_1ebc3c30b00.* = lhs; break :_box_1ebc3c30b00 _bp_1ebc3c30b00; }, _box_1ebc3c30b28: { const _bp_1ebc3c30b28 = blk2: { break :blk2 _allocator.create(@TypeOf(try_e)) catch @panic("OOM"); }; _bp_1ebc3c30b28.* = try_e; break :_box_1ebc3c30b28 _bp_1ebc3c30b28; }); break :_box_1ebc3c30c78 _bp_1ebc3c30c78; } }));
+    std.debug.assert(exprHasTry(Expr{ .binary = _box_2f0be3e0c78: { const _bp_2f0be3e0c78 = _allocator.create(ast.ExprBinary) catch @panic("OOM"); _bp_2f0be3e0c78.* = ExprBinary.init(sp, BinaryOp.add, _box_2f0be3e0b00: { const _bp_2f0be3e0b00 = blk2: { break :blk2 _allocator.create(@TypeOf(lhs)) catch @panic("OOM"); }; _bp_2f0be3e0b00.* = lhs; break :_box_2f0be3e0b00 _bp_2f0be3e0b00; }, _box_2f0be3e0b28: { const _bp_2f0be3e0b28 = blk2: { break :blk2 _allocator.create(@TypeOf(try_e)) catch @panic("OOM"); }; _bp_2f0be3e0b28.* = try_e; break :_box_2f0be3e0b28 _bp_2f0be3e0b28; }); break :_box_2f0be3e0c78 _bp_2f0be3e0c78; } }));
 // zbr:selfhost/cg_helpers_test.zbr:173
     const rhs = Expr{ .int_lit = ExprIntLit.init(sp, "1", IntBase.decimal) };
 // zbr:selfhost/cg_helpers_test.zbr:174
-    std.debug.assert((!exprHasTry(Expr{ .binary = _box_1ebc3c31408: { const _bp_1ebc3c31408 = _allocator.create(ast.ExprBinary) catch @panic("OOM"); _bp_1ebc3c31408.* = ExprBinary.init(sp, BinaryOp.add, _box_1ebc3c31290: { const _bp_1ebc3c31290 = blk2: { break :blk2 _allocator.create(@TypeOf(lhs)) catch @panic("OOM"); }; _bp_1ebc3c31290.* = lhs; break :_box_1ebc3c31290 _bp_1ebc3c31290; }, _box_1ebc3c312b8: { const _bp_1ebc3c312b8 = blk2: { break :blk2 _allocator.create(@TypeOf(rhs)) catch @panic("OOM"); }; _bp_1ebc3c312b8.* = rhs; break :_box_1ebc3c312b8 _bp_1ebc3c312b8; }); break :_box_1ebc3c31408 _bp_1ebc3c31408; } })));
+    std.debug.assert((!exprHasTry(Expr{ .binary = _box_2f0be3e1408: { const _bp_2f0be3e1408 = _allocator.create(ast.ExprBinary) catch @panic("OOM"); _bp_2f0be3e1408.* = ExprBinary.init(sp, BinaryOp.add, _box_2f0be3e1290: { const _bp_2f0be3e1290 = blk2: { break :blk2 _allocator.create(@TypeOf(lhs)) catch @panic("OOM"); }; _bp_2f0be3e1290.* = lhs; break :_box_2f0be3e1290 _bp_2f0be3e1290; }, _box_2f0be3e12b8: { const _bp_2f0be3e12b8 = blk2: { break :blk2 _allocator.create(@TypeOf(rhs)) catch @panic("OOM"); }; _bp_2f0be3e12b8.* = rhs; break :_box_2f0be3e12b8 _bp_2f0be3e12b8; }); break :_box_2f0be3e1408 _bp_2f0be3e1408; } })));
 // zbr:selfhost/cg_helpers_test.zbr:175
     std.debug.print("{s}\n", .{"6. exprHasTry: OK"});
 }
@@ -1767,7 +1767,7 @@ pub fn testBodyHasRaise() anyerror!void {
 // zbr:selfhost/cg_helpers_test.zbr:184
     var with_raise = std.ArrayList(Stmt){};
 // zbr:selfhost/cg_helpers_test.zbr:185
-    with_raise.append(_allocator, Stmt{ .raise_ = _box_1ebc3c31d48: { const _bp_1ebc3c31d48 = _allocator.create(ast.StmtRaise) catch @panic("OOM"); _bp_1ebc3c31d48.* = StmtRaise.init(sp, null, null); break :_box_1ebc3c31d48 _bp_1ebc3c31d48; } }) catch unreachable;
+    with_raise.append(_allocator, Stmt{ .raise_ = _box_2f0be3e1d48: { const _bp_2f0be3e1d48 = _allocator.create(ast.StmtRaise) catch @panic("OOM"); _bp_2f0be3e1d48.* = StmtRaise.init(sp, null, null); break :_box_2f0be3e1d48 _bp_2f0be3e1d48; } }) catch unreachable;
 // zbr:selfhost/cg_helpers_test.zbr:186
     std.debug.assert(bodyHasRaise(with_raise));
 // zbr:selfhost/cg_helpers_test.zbr:188
@@ -1777,13 +1777,13 @@ pub fn testBodyHasRaise() anyerror!void {
 // zbr:selfhost/cg_helpers_test.zbr:190
     std.debug.assert((!bodyHasRaise(with_pass)));
 // zbr:selfhost/cg_helpers_test.zbr:192
-    const try_e = Expr{ .try_ = _box_1ebc3c327c8: { const _bp_1ebc3c327c8 = _allocator.create(ast.ExprTry) catch @panic("OOM"); _bp_1ebc3c327c8.* = ExprTry.init(sp, _box_1ebc3c32718: { const _bp_1ebc3c32718 = blk2: { break :blk2 _allocator.create(@TypeOf(Expr{ .ident = ExprIdent.init(sp, "f") })) catch @panic("OOM"); }; _bp_1ebc3c32718.* = Expr{ .ident = ExprIdent.init(sp, "f") }; break :_box_1ebc3c32718 _bp_1ebc3c32718; }); break :_box_1ebc3c327c8 _bp_1ebc3c327c8; } };
+    const try_e = Expr{ .try_ = _box_2f0be3e27c8: { const _bp_2f0be3e27c8 = _allocator.create(ast.ExprTry) catch @panic("OOM"); _bp_2f0be3e27c8.* = ExprTry.init(sp, _box_2f0be3e2718: { const _bp_2f0be3e2718 = blk2: { break :blk2 _allocator.create(@TypeOf(Expr{ .ident = ExprIdent.init(sp, "f") })) catch @panic("OOM"); }; _bp_2f0be3e2718.* = Expr{ .ident = ExprIdent.init(sp, "f") }; break :_box_2f0be3e2718 _bp_2f0be3e2718; }); break :_box_2f0be3e27c8 _bp_2f0be3e27c8; } };
 // zbr:selfhost/cg_helpers_test.zbr:193
-    const dv = DeclVar.init(sp, zmods(), "x", null, _box_1ebc3c32c88: { const _bp_1ebc3c32c88 = blk2: { break :blk2 _allocator.create(@TypeOf(try_e)) catch @panic("OOM"); }; _bp_1ebc3c32c88.* = try_e; break :_box_1ebc3c32c88 _bp_1ebc3c32c88; }, false);
+    const dv = DeclVar.init(sp, zmods(), "x", null, _box_2f0be3e2c88: { const _bp_2f0be3e2c88 = blk2: { break :blk2 _allocator.create(@TypeOf(try_e)) catch @panic("OOM"); }; _bp_2f0be3e2c88.* = try_e; break :_box_2f0be3e2c88 _bp_2f0be3e2c88; }, false);
 // zbr:selfhost/cg_helpers_test.zbr:194
     var with_try_var = std.ArrayList(Stmt){};
 // zbr:selfhost/cg_helpers_test.zbr:195
-    with_try_var.append(_allocator, Stmt{ .var_ = _box_1ebc3c33008: { const _bp_1ebc3c33008 = _allocator.create(ast.DeclVar) catch @panic("OOM"); _bp_1ebc3c33008.* = dv; break :_box_1ebc3c33008 _bp_1ebc3c33008; } }) catch unreachable;
+    with_try_var.append(_allocator, Stmt{ .var_ = _box_2f0be3e3008: { const _bp_2f0be3e3008 = _allocator.create(ast.DeclVar) catch @panic("OOM"); _bp_2f0be3e3008.* = dv; break :_box_2f0be3e3008 _bp_2f0be3e3008; } }) catch unreachable;
 // zbr:selfhost/cg_helpers_test.zbr:196
     std.debug.assert(bodyHasRaise(with_try_var));
 // zbr:selfhost/cg_helpers_test.zbr:198
@@ -1791,7 +1791,7 @@ pub fn testBodyHasRaise() anyerror!void {
 // zbr:selfhost/cg_helpers_test.zbr:199
     var with_return = std.ArrayList(Stmt){};
 // zbr:selfhost/cg_helpers_test.zbr:200
-    with_return.append(_allocator, Stmt{ .return_ = _box_1ebc3c338a8: { const _bp_1ebc3c338a8 = _allocator.create(ast.StmtReturn) catch @panic("OOM"); _bp_1ebc3c338a8.* = StmtReturn.init(sp, _box_1ebc3c337f8: { const _bp_1ebc3c337f8 = blk2: { break :blk2 _allocator.create(@TypeOf(ret_lit)) catch @panic("OOM"); }; _bp_1ebc3c337f8.* = ret_lit; break :_box_1ebc3c337f8 _bp_1ebc3c337f8; }); break :_box_1ebc3c338a8 _bp_1ebc3c338a8; } }) catch unreachable;
+    with_return.append(_allocator, Stmt{ .return_ = _box_2f0be3e38a8: { const _bp_2f0be3e38a8 = _allocator.create(ast.StmtReturn) catch @panic("OOM"); _bp_2f0be3e38a8.* = StmtReturn.init(sp, _box_2f0be3e37f8: { const _bp_2f0be3e37f8 = blk2: { break :blk2 _allocator.create(@TypeOf(ret_lit)) catch @panic("OOM"); }; _bp_2f0be3e37f8.* = ret_lit; break :_box_2f0be3e37f8 _bp_2f0be3e37f8; }); break :_box_2f0be3e38a8 _bp_2f0be3e38a8; } }) catch unreachable;
 // zbr:selfhost/cg_helpers_test.zbr:201
     std.debug.assert((!bodyHasRaise(with_return)));
 // zbr:selfhost/cg_helpers_test.zbr:202
@@ -1825,7 +1825,7 @@ pub fn testNameUsedInExprBinary() anyerror!void {
 // zbr:selfhost/cg_helpers_test.zbr:219
     const id_y = Expr{ .ident = ExprIdent.init(sp, "y") };
 // zbr:selfhost/cg_helpers_test.zbr:220
-    const bin = Expr{ .binary = _box_1ebc3c355b0: { const _bp_1ebc3c355b0 = _allocator.create(ast.ExprBinary) catch @panic("OOM"); _bp_1ebc3c355b0.* = ExprBinary.init(sp, BinaryOp.add, _box_1ebc3c35438: { const _bp_1ebc3c35438 = blk2: { break :blk2 _allocator.create(@TypeOf(id_x)) catch @panic("OOM"); }; _bp_1ebc3c35438.* = id_x; break :_box_1ebc3c35438 _bp_1ebc3c35438; }, _box_1ebc3c35460: { const _bp_1ebc3c35460 = blk2: { break :blk2 _allocator.create(@TypeOf(id_y)) catch @panic("OOM"); }; _bp_1ebc3c35460.* = id_y; break :_box_1ebc3c35460 _bp_1ebc3c35460; }); break :_box_1ebc3c355b0 _bp_1ebc3c355b0; } };
+    const bin = Expr{ .binary = _box_2f0be3e55b0: { const _bp_2f0be3e55b0 = _allocator.create(ast.ExprBinary) catch @panic("OOM"); _bp_2f0be3e55b0.* = ExprBinary.init(sp, BinaryOp.add, _box_2f0be3e5438: { const _bp_2f0be3e5438 = blk2: { break :blk2 _allocator.create(@TypeOf(id_x)) catch @panic("OOM"); }; _bp_2f0be3e5438.* = id_x; break :_box_2f0be3e5438 _bp_2f0be3e5438; }, _box_2f0be3e5460: { const _bp_2f0be3e5460 = blk2: { break :blk2 _allocator.create(@TypeOf(id_y)) catch @panic("OOM"); }; _bp_2f0be3e5460.* = id_y; break :_box_2f0be3e5460 _bp_2f0be3e5460; }); break :_box_2f0be3e55b0 _bp_2f0be3e55b0; } };
 // zbr:selfhost/cg_helpers_test.zbr:221
     std.debug.assert(nameUsedInExpr("x", bin));
 // zbr:selfhost/cg_helpers_test.zbr:222
@@ -1844,7 +1844,7 @@ pub fn testNameUsedInStmts() anyerror!void {
 // zbr:selfhost/cg_helpers_test.zbr:229
     var stmts = std.ArrayList(Stmt){};
 // zbr:selfhost/cg_helpers_test.zbr:230
-    stmts.append(_allocator, Stmt{ .return_ = _box_1ebc3c363c0: { const _bp_1ebc3c363c0 = _allocator.create(ast.StmtReturn) catch @panic("OOM"); _bp_1ebc3c363c0.* = StmtReturn.init(sp, _box_1ebc3c36310: { const _bp_1ebc3c36310 = blk2: { break :blk2 _allocator.create(@TypeOf(id_x)) catch @panic("OOM"); }; _bp_1ebc3c36310.* = id_x; break :_box_1ebc3c36310 _bp_1ebc3c36310; }); break :_box_1ebc3c363c0 _bp_1ebc3c363c0; } }) catch unreachable;
+    stmts.append(_allocator, Stmt{ .return_ = _box_2f0be3e63c0: { const _bp_2f0be3e63c0 = _allocator.create(ast.StmtReturn) catch @panic("OOM"); _bp_2f0be3e63c0.* = StmtReturn.init(sp, _box_2f0be3e6310: { const _bp_2f0be3e6310 = blk2: { break :blk2 _allocator.create(@TypeOf(id_x)) catch @panic("OOM"); }; _bp_2f0be3e6310.* = id_x; break :_box_2f0be3e6310 _bp_2f0be3e6310; }); break :_box_2f0be3e63c0 _bp_2f0be3e63c0; } }) catch unreachable;
 // zbr:selfhost/cg_helpers_test.zbr:231
     std.debug.assert(nameUsedInStmts("x", stmts));
 // zbr:selfhost/cg_helpers_test.zbr:232
@@ -1863,7 +1863,7 @@ pub fn testAnalyzeEscapes() anyerror!void {
 // zbr:selfhost/cg_helpers_test.zbr:242
     var stmts = std.ArrayList(Stmt){};
 // zbr:selfhost/cg_helpers_test.zbr:243
-    stmts.append(_allocator, Stmt{ .return_ = _box_1ebc3c372c8: { const _bp_1ebc3c372c8 = _allocator.create(ast.StmtReturn) catch @panic("OOM"); _bp_1ebc3c372c8.* = StmtReturn.init(sp, _box_1ebc3c37218: { const _bp_1ebc3c37218 = blk2: { break :blk2 _allocator.create(@TypeOf(id_x)) catch @panic("OOM"); }; _bp_1ebc3c37218.* = id_x; break :_box_1ebc3c37218 _bp_1ebc3c37218; }); break :_box_1ebc3c372c8 _bp_1ebc3c372c8; } }) catch unreachable;
+    stmts.append(_allocator, Stmt{ .return_ = _box_2f0be3e72c8: { const _bp_2f0be3e72c8 = _allocator.create(ast.StmtReturn) catch @panic("OOM"); _bp_2f0be3e72c8.* = StmtReturn.init(sp, _box_2f0be3e7218: { const _bp_2f0be3e7218 = blk2: { break :blk2 _allocator.create(@TypeOf(id_x)) catch @panic("OOM"); }; _bp_2f0be3e7218.* = id_x; break :_box_2f0be3e7218 _bp_2f0be3e7218; }); break :_box_2f0be3e72c8 _bp_2f0be3e72c8; } }) catch unreachable;
 // zbr:selfhost/cg_helpers_test.zbr:244
     var esc = analyzeEscapes(stmts);
 // zbr:selfhost/cg_helpers_test.zbr:245
@@ -1886,7 +1886,7 @@ pub fn testScanMutations() anyerror!void {
 // zbr:selfhost/cg_helpers_test.zbr:258
     var stmts = std.ArrayList(Stmt){};
 // zbr:selfhost/cg_helpers_test.zbr:259
-    stmts.append(_allocator, Stmt{ .assign = _box_1ebc3c38828: { const _bp_1ebc3c38828 = _allocator.create(ast.StmtAssign) catch @panic("OOM"); _bp_1ebc3c38828.* = StmtAssign.init(sp, _box_1ebc3c38638: { const _bp_1ebc3c38638 = blk2: { break :blk2 _allocator.create(@TypeOf(id_x)) catch @panic("OOM"); }; _bp_1ebc3c38638.* = id_x; break :_box_1ebc3c38638 _bp_1ebc3c38638; }, AssignOp.assign, _box_1ebc3c386d8: { const _bp_1ebc3c386d8 = blk2: { break :blk2 _allocator.create(@TypeOf(lit)) catch @panic("OOM"); }; _bp_1ebc3c386d8.* = lit; break :_box_1ebc3c386d8 _bp_1ebc3c386d8; }); break :_box_1ebc3c38828 _bp_1ebc3c38828; } }) catch unreachable;
+    stmts.append(_allocator, Stmt{ .assign = _box_2f0be3e8828: { const _bp_2f0be3e8828 = _allocator.create(ast.StmtAssign) catch @panic("OOM"); _bp_2f0be3e8828.* = StmtAssign.init(sp, _box_2f0be3e8638: { const _bp_2f0be3e8638 = blk2: { break :blk2 _allocator.create(@TypeOf(id_x)) catch @panic("OOM"); }; _bp_2f0be3e8638.* = id_x; break :_box_2f0be3e8638 _bp_2f0be3e8638; }, AssignOp.assign, _box_2f0be3e86d8: { const _bp_2f0be3e86d8 = blk2: { break :blk2 _allocator.create(@TypeOf(lit)) catch @panic("OOM"); }; _bp_2f0be3e86d8.* = lit; break :_box_2f0be3e86d8 _bp_2f0be3e86d8; }); break :_box_2f0be3e8828 _bp_2f0be3e8828; } }) catch unreachable;
 // zbr:selfhost/cg_helpers_test.zbr:260
     var mut = scanMutations(stmts);
 // zbr:selfhost/cg_helpers_test.zbr:261

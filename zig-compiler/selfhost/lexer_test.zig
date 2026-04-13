@@ -1729,10 +1729,10 @@ pub const LexerTest = struct {
 
     pub fn testTokenKinds() void {
 // zbr:selfhost/lexer_test.zbr:100
-        var _try_err_3198: ?anyerror = null;
-        _try_blk_3198: {
+        var _try_err_3128: ?anyerror = null;
+        _try_blk_3128: {
 // zbr:selfhost/lexer_test.zbr:101
-            const toks = Lexer.tokenize("abc 123") catch |_e| { _try_err_3198 = _e; break :_try_blk_3198; };
+            const toks = Lexer.tokenize("abc 123") catch |_e| { _try_err_3128 = _e; break :_try_blk_3128; };
 // zbr:selfhost/lexer_test.zbr:102
             const idKind = toks.items[@as(usize, @intCast(0))].kind;
 // zbr:selfhost/lexer_test.zbr:103
@@ -1759,9 +1759,9 @@ pub const LexerTest = struct {
                     std.debug.print("{s}\n", .{"testTokenKinds FAILED: expected integer_lit kind"});
                 },
             }
-            break :_try_blk_3198;
+            break :_try_blk_3128;
         }
-        if (_try_err_3198 != null) {
+        if (_try_err_3128 != null) {
 // zbr:selfhost/lexer_test.zbr:115
             std.debug.print("{s}\n", .{_str_concat("testTokenKinds FAILED: ", _error_ctx.message, _allocator)});
         }
@@ -1769,10 +1769,10 @@ pub const LexerTest = struct {
 
     pub fn testExposing() void {
 // zbr:selfhost/lexer_test.zbr:119
-        var _try_err_3bc8: ?anyerror = null;
-        _try_blk_3bc8: {
+        var _try_err_3b20: ?anyerror = null;
+        _try_blk_3b20: {
 // zbr:selfhost/lexer_test.zbr:120
-            const toks = Lexer.tokenize("use Foo exposing Bar") catch |_e| { _try_err_3bc8 = _e; break :_try_blk_3bc8; };
+            const toks = Lexer.tokenize("use Foo exposing Bar") catch |_e| { _try_err_3b20 = _e; break :_try_blk_3b20; };
 // zbr:selfhost/lexer_test.zbr:121
             if (!(std.mem.eql(u8, toks.items[@as(usize, @intCast(2))].text, "exposing"))) {
                 std.debug.print("assertion failed\n", .{});
@@ -1789,9 +1789,9 @@ pub const LexerTest = struct {
                     std.debug.print("{s}\n", .{"testExposing FAILED: wrong kind for 'exposing'"});
                 },
             }
-            break :_try_blk_3bc8;
+            break :_try_blk_3b20;
         }
-        if (_try_err_3bc8 != null) {
+        if (_try_err_3b20 != null) {
 // zbr:selfhost/lexer_test.zbr:128
             std.debug.print("{s}\n", .{_str_concat("testExposing FAILED: ", _error_ctx.message, _allocator)});
         }
@@ -1826,8 +1826,8 @@ pub const LexerTest = struct {
         std.debug.print("{s}\n", .{"=== Tests complete ==="});
     }
 
-    pub fn init() LexerTest {
-        var self: LexerTest = undefined;
+    pub fn init() *LexerTest {
+        const self = _allocator.create(LexerTest) catch @panic("OOM");
         self._type_tag = _ttag_LexerTest;
         return self;
     }
@@ -1846,8 +1846,8 @@ pub const Main = struct {
         LexerTest.main();
     }
 
-    pub fn init() Main {
-        var self: Main = undefined;
+    pub fn init() *Main {
+        const self = _allocator.create(Main) catch @panic("OOM");
         self._type_tag = _ttag_Main;
         return self;
     }

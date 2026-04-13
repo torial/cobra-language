@@ -1,0 +1,578 @@
+# astbuilder.zbr — Phase 9/10: PNode parse tree → ast.zbr Module
+#
+# Converts the simplified PNode parse tree produced by selfhost/parser.zbr into
+# the full ast.zbr Module/Decl/Stmt/Expr representation consumed by
+# selfhost/codegen.zbr.
+#
+# Design notes:
+#   - All Spans are synthetic (0,0,0,0) — parser doesn't preserve source positions.
+#   - Modifiers default to all-false; is_shared comes from PMethod.is_shared.
+#   - TypeRef is parsed from the type_name string captured by the parser.
+#   - Phase 10: ^Expr? optional fields (return value, var init, assert/raise message)
+#     are now fully supported — TypeChecker.zig boxing fix extends struct_init_ref_params
+#     to flag nilable(ref_to) params in addition to plain ref_to params.
+#   - ^Expr non-optional fields are passed as Expr values and auto-boxed by the
+#     cross-module constructor boxing machinery.
+#   - For str.split() iteration the TC must see local List vars as List(str) —
+#     annotate explicitly where needed.
+
+use ast exposing Module, Decl, DeclUse, DeclClass, DeclStruct, DeclEnum, DeclUnion, DeclSig, DeclMethod, DeclInit, DeclVar, EnumMember, UnionVariant, TypeRef, NamedTypeRef, GenericTypeRef, Modifiers, Param, ParamMode, Span, TypeParam, Stmt, StmtIf, StmtWhile, StmtForIn, StmtReturn, StmtAssert, StmtAssign, StmtRaise, StmtTryCatch, StmtBranch, BranchOn, CatchClause, StmtPrint, AssignOp, ElseIf, Expr, ExprIdent, ExprMember, ExprCall, ExprIndex, ExprSlice, ExprBinary, ExprUnary, ExprBoolLit, ExprIntLit, ExprFloatLit, ExprCharLit, ExprStringLit, ExprStringInterp, ExprTry, ExprToNonNil, ExprExcept, ExceptField, IntBase, BinaryOp, UnaryOp, StringKind, StringPart, Arg
+use Parser exposing PNode, PModule, PClass, PEnum, PField, PMethod, PInit, PReturn, PIf, PWhile, PForIn, PVar, PAssign, PAssert, PRaise, PTryCatch, PMember, PCall, PIndex, PSlice, PBinary, PUnary, PParam, PUnionDecl, PUnionVariant, PSig, PBranch, PBranchOn, PExcept, PExceptField, PStringInterp
+
+def zspan() as Span
+    return Span(0, 0, 0, 0)
+
+def zmods() as Modifiers
+    return Modifiers(false, false, false, false, false, false)
+
+def zshared() as Modifiers
+    return Modifiers(false, false, false, true, false, false)
+
+# Strip surrounding quote characters from a string token text.
+# The selfhost Lexer captures token text including the surrounding " or '.
+# The ast.zbr ExprStringLit.text convention is content-only (no surrounding quotes),
+# matching the Zig backend's AST representation.
+# Slices from index 1 to len-1 to preserve internal escape sequences.
+def stripStringQuotes(text as str) as str
+    if text.len < 2
+        return text
+    if text.startsWith("\"") or text.startsWith("'")
+        # Slice off first and last character (the surrounding quotes).
+        # Split on the quote char, rejoin interior parts with the quote char.
+        # For "hello" → split gives ["", "hello", ""] → just take middle.
+        # For "say \"hi\"" → split gives ["", "say \\", "hi\\", ""] → rejoin with quote.
+        var quote as str = "\""
+        if text.startsWith("'")
+            quote = "'"
+        var parts as List(str) = List(str)()
+        for p in text.split(quote)
+            parts.add(p)
+        # Skip first (before opening quote) and last (after closing quote),
+        # rejoin interior parts with the original quote char.
+        if parts.count() <= 2
+            # No interior content (empty string like "" or '')
+            return ""
+        var result as str = parts.at(1)
+        var i as int = 2
+        while i < parts.count() - 1
+            result = result + quote + parts.at(i)
+            i = i + 1
+        return result
+    return text
+
+# Strip char literal: c'x' → x, c'\n' → \n
+def stripCharQuotes(text as str) as str
+    # text is e.g. "c'a'" or "c'\n'" — strip leading c' and trailing '
+    if text.len < 3
+        return text
+    # Split on "c'" to get ["", "a'"] then strip trailing '
+    var parts as List(str) = List(str)()
+    for p in text.split("'")
+        parts.add(p)
+    # For c'x': parts = ["c", "x", ""]
+    if parts.count() >= 2
+        return parts.at(1)
+    return text
+
+# ── ASTBuilder ────────────────────────────────────────────────────────────────
+
+class ASTBuilder
+    # Entry point: convert a parsed PModule into a full ast.zbr Module.
+    shared def build(pm as PModule, file as str) as Module throws
+        var ab = ASTBuilder()
+        var decls = ab.buildTopDecls(pm.decls)?
+        return Module(file, decls)
+
+    # ── Top-level declarations ────────────────────────────────────────────────
+
+    def buildTopDecls(nodes as List(PNode)) as List(Decl) throws
+        var decls as List(Decl) = List(Decl)()
+        for pn in nodes
+            decls.add(.buildTopDecl(pn)?)
+        return decls
+
+    def buildTopDecl(pn as PNode) as Decl throws
+        branch pn
+            on PNode.use_ as u
+                return Decl.use_(DeclUse(zspan(), u.path, u.exposed))
+            on PNode.class_ as c
+                return .buildClass(c)?
+            on PNode.struct_ as s
+                return .buildStruct(s)?
+            on PNode.enum_ as e
+                return .buildEnum(e)?
+            on PNode.union_decl as u
+                return .buildUnion(u)?
+            on PNode.sig_ as sg
+                return .buildSig(sg)?
+            on PNode.method_ as m
+                return .buildMethod(m, false)?
+            else
+                raise "buildTopDecl: unexpected PNode variant"
+
+    # ── Class ─────────────────────────────────────────────────────────────────
+
+    def buildClass(c as PClass) as Decl throws
+        var members as List(Decl) = List(Decl)()
+        for pn in c.members
+            members.add(.buildMember(pn)?)
+        var ifaces as List(TypeRef) = List(TypeRef)()
+        for iface in c.ifaces
+            ifaces.add(TypeRef.named(NamedTypeRef(zspan(), iface)))
+        var mixins as List(TypeRef) = List(TypeRef)()
+        var tparams as List(TypeParam) = List(TypeParam)()
+        return Decl.class_(DeclClass(zspan(), zmods(), c.name, tparams, ifaces, mixins, members))
+
+    # ── Struct ────────────────────────────────────────────────────────────────
+
+    def buildStruct(s as PClass) as Decl throws
+        var members as List(Decl) = List(Decl)()
+        for pn in s.members
+            members.add(.buildMember(pn)?)
+        var ifaces as List(TypeRef) = List(TypeRef)()
+        for iface in s.ifaces
+            ifaces.add(TypeRef.named(NamedTypeRef(zspan(), iface)))
+        return Decl.struct_(DeclStruct(zspan(), zmods(), s.name, ifaces, members))
+
+    # ── Union ─────────────────────────────────────────────────────────────────
+
+    def buildUnion(u as PUnionDecl) as Decl throws
+        var variants as List(UnionVariant) = List(UnionVariant)()
+        for pv in u.variants
+            var payload as TypeRef? = nil
+            if pv.type_name != ""
+                payload = .parseTypeRef(pv.type_name)
+            variants.add(UnionVariant(zspan(), pv.name, payload))
+        return Decl.union_(DeclUnion(zspan(), zmods(), u.name, variants))
+
+    # ── Sig ───────────────────────────────────────────────────────────────────
+
+    def buildSig(sg as PSig) as Decl throws
+        var params as List(Param) = List(Param)()
+        for p in sg.params
+            const ptype = .parseTypeRef(p.type_name)
+            params.add(Param(zspan(), ParamMode.normal, p.name, ptype, nil))
+        var ret_type = .parseTypeRef(sg.return_type)
+        return Decl.sig_(DeclSig(zspan(), sg.name, params, ret_type))
+
+    # ── Members ───────────────────────────────────────────────────────────────
+
+    def buildMember(pn as PNode) as Decl throws
+        branch pn
+            on PNode.field_ as f
+                const type_ref = .parseTypeRef(f.type_name)
+                return Decl.var_(DeclVar(zspan(), zmods(), f.name, type_ref, nil, f.is_const))
+            on PNode.method_ as m
+                return .buildMethod(m, true)?
+            on PNode.init_ as pinit
+                return .buildInit(pinit)?
+            else
+                raise "buildMember: unexpected PNode variant"
+
+    # ── Enum ──────────────────────────────────────────────────────────────────
+
+    def buildEnum(e as PEnum) as Decl throws
+        var members as List(EnumMember) = List(EnumMember)()
+        for v in e.variants
+            members.add(EnumMember(zspan(), v, nil))
+        return Decl.enum_(DeclEnum(zspan(), zmods(), e.name, nil, members))
+
+    # ── Method ────────────────────────────────────────────────────────────────
+
+    def buildMethod(m as PMethod, is_member as bool) as Decl throws
+        var params as List(Param) = List(Param)()
+        for p in m.params
+            const ptype = .parseTypeRef(p.type_name)
+            params.add(Param(zspan(), ParamMode.normal, p.name, ptype, nil))
+        var ret_type = .parseTypeRef(m.return_type)
+        var stmts_list = .buildStmts(m.stmts)?
+        var mods = Modifiers(false, false, false, m.is_shared, false, false)
+        # stmts as List(Stmt)? — pass directly; List(Stmt) → List(Stmt)? coercion
+        return Decl.method(DeclMethod(zspan(), mods, m.name, params, ret_type, stmts_list, false, m.throws_))
+
+    # ── Init (cue init) ───────────────────────────────────────────────────────
+
+    def buildInit(pinit as PInit) as Decl throws
+        var params as List(Param) = List(Param)()
+        for p in pinit.params
+            const ptype = .parseTypeRef(p.type_name)
+            params.add(Param(zspan(), ParamMode.normal, p.name, ptype, nil))
+        var stmts_list = .buildStmts(pinit.stmts)?
+        return Decl.init(DeclInit(zspan(), zmods(), params, stmts_list))
+
+    # ── Statements ────────────────────────────────────────────────────────────
+
+    def buildStmts(nodes as List(PNode)) as List(Stmt) throws
+        var stmts as List(Stmt) = List(Stmt)()
+        for pn in nodes
+            stmts.add(.buildStmt(pn)?)
+        return stmts
+
+    def buildStmt(pn as PNode) as Stmt throws
+        branch pn
+            on PNode.stmt_pass
+                return Stmt.pass_(zspan())
+
+            on PNode.stmt_break
+                return Stmt.break_(zspan())
+
+            on PNode.stmt_continue
+                return Stmt.continue_(zspan())
+
+            on PNode.stmt_return as pret
+                if pret.value.len > 0
+                    const rval = .buildExpr(pret.value.at(0))?
+                    return Stmt.return_(StmtReturn(zspan(), rval))
+                return Stmt.return_(StmtReturn(zspan(), nil))
+
+            on PNode.stmt_if as pif
+                const cond_expr = .buildExpr(pif.cond.at(0))?
+                var then_stmts = .buildStmts(pif.then_stmts)?
+                var else_ifs as List(ElseIf) = List(ElseIf)()
+                var else_stmts_built = .buildStmts(pif.else_stmts)?
+                var else_opt as List(Stmt)? = nil
+                if pif.else_stmts.len > 0
+                    else_opt = else_stmts_built
+                return Stmt.if_(StmtIf(zspan(), cond_expr, then_stmts, else_ifs, else_opt))
+
+            on PNode.stmt_while as pw
+                const cond_expr = .buildExpr(pw.cond.at(0))?
+                var stmts = .buildStmts(pw.stmts)?
+                return Stmt.while_(StmtWhile(zspan(), cond_expr, stmts))
+
+            on PNode.stmt_for_in as pfor
+                const iter_expr = .buildExpr(pfor.iter.at(0))?
+                var stmts = .buildStmts(pfor.stmts)?
+                var vars as List(str) = List(str)()
+                for vname in pfor.var_names
+                    vars.add(vname)
+                return Stmt.for_in(StmtForIn(zspan(), vars, iter_expr, stmts))
+
+            on PNode.stmt_var as pv
+                const type_ref = .parseTypeRef(pv.type_name)
+                if pv.init_expr.len > 0
+                    const initval = .buildExpr(pv.init_expr.at(0))?
+                    return Stmt.var_(DeclVar(zspan(), zmods(), pv.name, type_ref, initval, pv.is_const))
+                return Stmt.var_(DeclVar(zspan(), zmods(), pv.name, type_ref, nil, pv.is_const))
+
+            on PNode.stmt_assign as pa
+                const target_expr = .buildExpr(pa.target.at(0))?
+                const value_expr = .buildExpr(pa.value.at(0))?
+                const op = .toAssignOp(pa.op)?
+                return Stmt.assign(StmtAssign(zspan(), target_expr, op, value_expr))
+
+            on PNode.stmt_assert as pas
+                const cond_expr = .buildExpr(pas.cond.at(0))?
+                if pas.message.len > 0
+                    const msg = .buildExpr(pas.message.at(0))?
+                    return Stmt.assert_(StmtAssert(zspan(), cond_expr, msg))
+                return Stmt.assert_(StmtAssert(zspan(), cond_expr, nil))
+
+            on PNode.stmt_raise as pr
+                if pr.message.len > 0
+                    const msg = .buildExpr(pr.message.at(0))?
+                    return Stmt.raise_(StmtRaise(zspan(), msg, nil))
+                return Stmt.raise_(StmtRaise(zspan(), nil, nil))
+
+            on PNode.stmt_try_catch as ptc
+                var body_stmts = .buildStmts(ptc.body_stmts)?
+                var catch_stmts = .buildStmts(ptc.catch_stmts)?
+                var binding_opt as str? = nil
+                if ptc.catch_binding != ""
+                    binding_opt = ptc.catch_binding
+                var clause = CatchClause(zspan(), binding_opt, nil, catch_stmts)
+                var clauses as List(CatchClause) = List(CatchClause)()
+                clauses.add(clause)
+                return Stmt.try_catch(StmtTryCatch(zspan(), body_stmts, clauses))
+
+            on PNode.stmt_branch as pb
+                return .buildBranch(pb)?
+
+            on PNode.stmt_expr as inner
+                const expr = .buildExpr(inner)?
+                return Stmt.expr(expr)
+
+            on PNode.stmt_print as inner
+                const expr = .buildExpr(inner)?
+                var args = List(Expr)()
+                args.add(expr)
+                return Stmt.print_(StmtPrint(zspan(), args, true))
+
+            else
+                raise "buildStmt: unexpected PNode variant"
+
+    # ── Branch statement ─────────────────────────────────────────────────────
+
+    def buildBranch(pb as PBranch) as Stmt throws
+        const subject_expr = .buildExpr(pb.subject.at(0))?
+        var cases as List(BranchOn) = List(BranchOn)()
+        for arm in pb.arms
+            var values as List(Expr) = List(Expr)()
+            # Pattern is a dotted path like "TokenKind.eol" or "PNode.class_"
+            # or a range like "c'0'..c'9'"
+            var pat as str = arm.pattern
+            if ".." in pat
+                # Range pattern: split on ".." to get left and right
+                var range_parts as List(str) = List(str)()
+                for rp in pat.split("..")
+                    range_parts.add(rp)
+                if range_parts.count() >= 2
+                    var left_expr = .patternToExpr(range_parts.at(0))
+                    var right_expr = .patternToExpr(range_parts.at(1))
+                    values.add(Expr.binary(ExprBinary(zspan(), BinaryOp.dotdot, left_expr, right_expr)))
+                else
+                    values.add(Expr.ident(ExprIdent(zspan(), pat)))
+            else if "." in pat
+                var parts as List(str) = List(str)()
+                for p in pat.split(".")
+                    parts.add(p)
+                var base_name = parts.at(0)
+                var member_name = parts.at(1)
+                var base_expr = Expr.ident(ExprIdent(zspan(), base_name))
+                values.add(Expr.member(ExprMember(zspan(), base_expr, member_name)))
+            else
+                values.add(.patternToExpr(pat))
+            var arm_stmts = .buildStmts(arm.stmts)?
+            var binding_opt as str? = nil
+            if arm.binding != ""
+                binding_opt = arm.binding
+            cases.add(BranchOn(zspan(), values, arm_stmts, binding_opt))
+        var else_opt as List(Stmt)? = nil
+        if pb.else_stmts.len > 0
+            else_opt = .buildStmts(pb.else_stmts)?
+        return Stmt.branch_(StmtBranch(zspan(), subject_expr, cases, else_opt))
+
+    def patternToExpr(pat as str) as Expr
+        # Convert a branch pattern token to an Expr
+        if pat.startsWith("c'")
+            # Keep raw token text — codegen strips c prefix
+            return Expr.char_lit(ExprCharLit(zspan(), pat))
+        if pat.startsWith("\"") or pat.startsWith("'")
+            return Expr.string_lit(ExprStringLit(zspan(), StringKind.plain, stripStringQuotes(pat)))
+        return Expr.ident(ExprIdent(zspan(), pat))
+
+    # ── Expressions ───────────────────────────────────────────────────────────
+
+    def buildExpr(pn as PNode) as Expr throws
+        branch pn
+            on PNode.expr_int as text
+                return Expr.int_lit(ExprIntLit(zspan(), text, IntBase.decimal))
+
+            on PNode.expr_float as text
+                return Expr.float_lit(ExprFloatLit(zspan(), text))
+
+            on PNode.expr_bool as v
+                return Expr.bool_lit(ExprBoolLit(zspan(), v))
+
+            on PNode.expr_nil
+                return Expr.nil_(zspan())
+
+            on PNode.expr_this
+                return Expr.this_(zspan())
+
+            on PNode.expr_str as text
+                return Expr.string_lit(ExprStringLit(zspan(), StringKind.plain, stripStringQuotes(text)))
+
+            on PNode.expr_char as text
+                # Keep raw token text (e.g. c'A', c'\'') — codegen strips c prefix
+                return Expr.char_lit(ExprCharLit(zspan(), text))
+
+            on PNode.expr_id as name
+                return Expr.ident(ExprIdent(zspan(), name))
+
+            on PNode.expr_member as pm
+                # pm.base has 0 elements for self (.field), 1 element for obj.field
+                if pm.base.len == 0
+                    # self-member: .field → Expr.member(this, "field")
+                    var this_expr = Expr.this_(zspan())
+                    return Expr.member(ExprMember(zspan(), this_expr, pm.member))
+                const base_expr = .buildExpr(pm.base.at(0))?
+                return Expr.member(ExprMember(zspan(), base_expr, pm.member))
+
+            on PNode.expr_call as pc
+                const callee_expr = .buildExpr(pc.callee.at(0))?
+                var args as List(Arg) = List(Arg)()
+                for arg_pn in pc.args
+                    const av = .buildExpr(arg_pn)?
+                    args.add(Arg(zspan(), nil, av))
+                return Expr.call(ExprCall(zspan(), callee_expr, args))
+
+            on PNode.expr_index as pix
+                const obj_expr = .buildExpr(pix.object.at(0))?
+                const idx_expr = .buildExpr(pix.index.at(0))?
+                return Expr.index(ExprIndex(zspan(), obj_expr, idx_expr))
+
+            on PNode.expr_slice as psl
+                const obj_expr = .buildExpr(psl.object.at(0))?
+                # Always have both start and stop in our parse tree
+                const start_expr = .buildExpr(psl.start.at(0))?
+                const stop_expr = .buildExpr(psl.stop_.at(0))?
+                return Expr.slice(ExprSlice(zspan(), obj_expr, start_expr, stop_expr))
+
+            on PNode.expr_binary as pb
+                const left_expr = .buildExpr(pb.left.at(0))?
+                const right_expr = .buildExpr(pb.right.at(0))?
+                const op = .toBinaryOp(pb.op)?
+                return Expr.binary(ExprBinary(zspan(), op, left_expr, right_expr))
+
+            on PNode.expr_unary as pu
+                const operand_expr = .buildExpr(pu.operand.at(0))?
+                const op = .toUnaryOp(pu.op)?
+                return Expr.unary(ExprUnary(zspan(), op, operand_expr))
+
+            on PNode.expr_try as inner
+                const inner_expr = .buildExpr(inner)?
+                return Expr.try_(ExprTry(zspan(), inner_expr))
+
+            on PNode.expr_to_bang as inner
+                const inner_expr = .buildExpr(inner)?
+                return Expr.to_non_nil(ExprToNonNil(zspan(), inner_expr))
+
+            on PNode.expr_except as pex
+                const base_expr = .buildExpr(pex.base.at(0))?
+                var fields as List(ExceptField) = List(ExceptField)()
+                for pf in pex.fields
+                    const fval = .buildExpr(pf.value.at(0))?
+                    fields.add(ExceptField(pf.name, fval))
+                return Expr.except_(ExprExcept(zspan(), base_expr, fields))
+
+            on PNode.expr_string_interp as psi
+                var parts as List(StringPart) = List(StringPart)()
+                for part in psi.parts
+                    branch part
+                        on PNode.expr_str as text
+                            parts.add(StringPart.literal(stripStringQuotes(text)))
+                        else
+                            const part_expr = .buildExpr(part)?
+                            parts.add(StringPart.expr_(part_expr))
+                return Expr.string_interp(ExprStringInterp(zspan(), parts))
+
+            else
+                raise "buildExpr: unexpected PNode variant"
+
+    # ── Operator conversion ───────────────────────────────────────────────────
+
+    def toAssignOp(op as str) as AssignOp throws
+        if op == "="
+            return AssignOp.assign
+        if op == "+="
+            return AssignOp.plus_eq
+        if op == "-="
+            return AssignOp.minus_eq
+        if op == "*="
+            return AssignOp.star_eq
+        raise "toAssignOp: unknown op: " + op
+
+    def toBinaryOp(op as str) as BinaryOp throws
+        if op == "+"
+            return BinaryOp.add
+        if op == "-"
+            return BinaryOp.sub
+        if op == "*"
+            return BinaryOp.mul
+        if op == "/"
+            return BinaryOp.div
+        if op == "%"
+            return BinaryOp.mod
+        if op == "=="
+            return BinaryOp.eq
+        if op == "!="
+            return BinaryOp.ne
+        if op == "<"
+            return BinaryOp.lt
+        if op == "<="
+            return BinaryOp.le
+        if op == ">"
+            return BinaryOp.gt
+        if op == ">="
+            return BinaryOp.ge
+        if op == "and"
+            return BinaryOp.and_
+        if op == "or"
+            return BinaryOp.or_
+        if op == "in"
+            return BinaryOp.in_
+        raise "toBinaryOp: unknown op: " + op
+
+    def toUnaryOp(op as str) as UnaryOp throws
+        if op == "-"
+            return UnaryOp.neg
+        if op == "not"
+            return UnaryOp.not_
+        raise "toUnaryOp: unknown op: " + op
+
+    # ── Type reference parsing ────────────────────────────────────────────────
+    #
+    # Converts a type_name string produced by the parser into a TypeRef?.
+    # Returns nil for empty strings or "void" (no annotation).
+    #
+    # Patterns handled:
+    #   ""          → nil (no type)
+    #   "void"      → nil
+    #   "int"       → named("int")
+    #   "int?"      → nilable(named("int"))
+    #   "List(str)" → generic("List", [named("str")])
+    #   "^Type"     → ref_to(named("Type"))
+    #   "^Type?"    → nilable(ref_to(named("Type")))
+
+    def parseTypeRef(s as str) as TypeRef?
+        if s == "" or s == "void"
+            return nil
+
+        # Ref prefix: "^Type" → ref_to(inner)
+        if s.startsWith("^")
+            # Strip "^" prefix — collect chars after position 0
+            var rest_parts as List(str) = List(str)()
+            for p in s.split("^")
+                rest_parts.add(p)
+            var rest_s = ""
+            if rest_parts.len > 1
+                rest_s = rest_parts.at(1)
+            const inner = .parseTypeRefRequired(rest_s)
+            return TypeRef.ref_to(inner)
+
+        # Nilable suffix: "int?" → nilable(named("int"))
+        if s.endsWith("?")
+            # Get base by collecting split parts (avoids slice operations)
+            var parts as List(str) = List(str)()
+            for p in s.split("?")
+                parts.add(p)
+            var base_s = parts.at(0)
+            const inner = .parseTypeRefRequired(base_s)
+            return TypeRef.nilable(inner)
+
+        # Generic type: "List(str)", "HashMap(str,int)"
+        if s.contains("(")
+            var name_parts as List(str) = List(str)()
+            for p in s.split("(")
+                name_parts.add(p)
+            var gen_name = name_parts.at(0)
+            var rest = ""
+            if name_parts.len > 1
+                rest = name_parts.at(1)
+            # rest = "str)" → strip trailing ")"
+            var arg_parts as List(str) = List(str)()
+            for q in rest.split(")")
+                arg_parts.add(q)
+            var args_str = ""
+            if arg_parts.len > 0
+                args_str = arg_parts.at(0)
+            # Split args by "," — handles single and multi-arg generics
+            var args as List(TypeRef) = List(TypeRef)()
+            for a in args_str.split(",")
+                if a != ""
+                    args.add(.parseTypeRefRequired(a))
+            return TypeRef.generic(GenericTypeRef(zspan(), gen_name, args))
+
+        # Simple named type
+        return TypeRef.named(NamedTypeRef(zspan(), s))
+
+    def parseTypeRefRequired(s as str) as TypeRef
+        const tr = .parseTypeRef(s)
+        if tr == nil
+            return TypeRef.void_()
+        return tr to!
+
+class Main
+    shared def main
+        print "astbuilder.zbr: import-only module (use 'use astbuilder exposing ASTBuilder')"

@@ -35,7 +35,7 @@
 #   scanMutations -- list literal args are never direct mutation sites
 # Extend these if a real case materialises during Phase 6 stress-testing.
 
-use ast exposing Stmt, Expr, AssignOp, BinaryOp, TypeRef, StringPart, DeclVar, Arg, DictEntry, ElseIf, BranchOn, CatchClause, GenericTypeRef, TupleTypeRef, NamedTypeRef
+use ast exposing Stmt, Expr, AssignOp, BinaryOp, TypeRef, StringPart, DeclVar, Arg, DictEntry, ElseIf, BranchOn, CatchClause, GenericTypeRef, TupleTypeRef, NamedTypeRef, ExceptField
 
 # ── StrSet ────────────────────────────────────────────────────────────────────
 # Mutable reference-type string set.
@@ -381,6 +381,16 @@ def nameUsedInExpr(name as str, expr as Expr) as bool
             if nameUsedInExpr(name, i.object)
                 return true
             return nameUsedInExpr(name, i.index)
+        on Expr.slice as sl
+            if nameUsedInExpr(name, sl.object)
+                return true
+            if sl.start != nil and nameUsedInExpr(name, sl.start to!)
+                return true
+            if sl.stop_ != nil and nameUsedInExpr(name, sl.stop_ to!)
+                return true
+            return false
+        on Expr.try_ as t
+            return nameUsedInExpr(name, t.expr)
         on Expr.orelse_ as o
             if nameUsedInExpr(name, o.expr)
                 return true
@@ -405,8 +415,6 @@ def nameUsedInExpr(name as str, expr as Expr) as bool
             return nameUsedInExpr(name, c.expr)
         on Expr.type_check as t
             return nameUsedInExpr(name, t.expr)
-        on Expr.try_ as t
-            return nameUsedInExpr(name, t.expr)
         on Expr.dict_lit as d
             for entry in d.entries
                 if nameUsedInExpr(name, entry.key)
@@ -427,6 +435,13 @@ def nameUsedInExpr(name as str, expr as Expr) as bool
             if nameUsedInExpr(name, a.iter)
                 return true
             return nameUsedInExpr(name, a.cond)
+        on Expr.except_ as ex
+            if nameUsedInExpr(name, ex.base)
+                return true
+            for f in ex.fields
+                if nameUsedInExpr(name, f.value)
+                    return true
+            return false
         else
             # Literals, nil_, this_, zig_lit, list_lit, array_lit, tuple_lit -- no idents
             return false
@@ -496,6 +511,38 @@ def nameUsedInStmt(name as str, stmt as Stmt) as bool
             return nameUsedInExpr(name, d.init_expr)
         on Stmt.arena_scope as a
             return nameUsedInStmts(name, a.stmts)
+        on Stmt.print_ as p
+            var pi = 0
+            while pi < p.args.count()
+                if nameUsedInExpr(name, p.args.at(pi))
+                    return true
+                pi += 1
+            return false
+        on Stmt.branch_ as b
+            if nameUsedInExpr(name, b.expr)
+                return true
+            for c in b.cases
+                for cv in c.values
+                    if nameUsedInExpr(name, cv)
+                        return true
+                if nameUsedInStmts(name, c.stmts)
+                    return true
+            if b.else_ != nil
+                return nameUsedInStmts(name, b.else_ to!)
+            return false
+        on Stmt.try_catch as tc
+            if nameUsedInStmts(name, tc.stmts)
+                return true
+            for cl in tc.clauses
+                if nameUsedInStmts(name, cl.stmts)
+                    return true
+            return false
+        on Stmt.raise_ as r
+            if r.message != nil
+                return nameUsedInExpr(name, r.message to!)
+            return false
+        on Stmt.defer_ as d
+            return nameUsedInStmt(name, d.stmt)
         else
             return false
 
@@ -690,16 +737,36 @@ def analyzeEscapes(stmts as List(Stmt)) as StrSet
 # call on a local ident marks it as `var`.  The Zig implementation uses a
 # TC-driven allow-list; we add that refinement when TC integration is wired.
 
+def isReadOnlyMethod(name as str) as bool
+    # Methods that read but do not structurally mutate their receiver.
+    # Calls to these should NOT mark the receiver variable as `var`.
+    if name == "count" or name == "len" or name == "at" or name == "get"
+        return true
+    if name == "contains" or name == "fetch" or name == "keys" or name == "values"
+        return true
+    if name == "startsWith" or name == "endsWith" or name == "indexOf" or name == "contains_"
+        return true
+    if name == "toStr" or name == "toString" or name == "chars" or name == "concat"
+        return true
+    if name == "split" or name == "trim" or name == "upper" or name == "lower"
+        return true
+    if name == "format" or name == "join" or name == "iter" or name == "items"
+        return true
+    if name == "codePointCount" or name == "byteLen" or name == "isEmpty"
+        return true
+    return false
+
 def scanMutationsInExpr(expr as Expr, out as StrSet)
     branch expr
         on Expr.call as c
             branch c.callee
                 on Expr.member as m
-                    branch m.object
-                        on Expr.ident as id
-                            out.add(id.name)
-                        else
-                            pass
+                    if not isReadOnlyMethod(m.member)
+                        branch m.object
+                            on Expr.ident as id
+                                out.add(id.name)
+                            else
+                                pass
                 else
                     pass
             for arg in c.args
@@ -798,6 +865,11 @@ def scanMutationsInto(stmts as List(Stmt), out as StrSet)
                 scanMutationsInto(g.else_stmts, out)
             on Stmt.assert_ as a
                 scanMutationsInExpr(a.cond, out)
+            on Stmt.print_ as p
+                var pi = 0
+                while pi < p.args.count()
+                    scanMutationsInExpr(p.args.at(pi), out)
+                    pi += 1
             else
                 pass
 

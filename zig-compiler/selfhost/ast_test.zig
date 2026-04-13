@@ -1599,7 +1599,7 @@ pub const AstTest = struct {
 // zbr:selfhost/ast_test.zbr:78
         const inner = ast.TypeRef{ .named = nr };
 // zbr:selfhost/ast_test.zbr:79
-        const tr = ast.TypeRef{ .nilable = box: { const _p = try _allocator.create(ast.TypeRef); _p.* = inner; break :box _p; } };
+        const tr = ast.TypeRef{ .nilable = _box_1ee80ef0a78: { const _bp_1ee80ef0a78 = _allocator.create(ast.TypeRef) catch @panic("OOM"); _bp_1ee80ef0a78.* = inner; break :_box_1ee80ef0a78 _bp_1ee80ef0a78; } };
 // zbr:selfhost/ast_test.zbr:80
         switch (tr) {
             .nilable => {
@@ -1615,8 +1615,8 @@ pub const AstTest = struct {
         }
     }
 
-    pub fn init() AstTest {
-        var self: AstTest = undefined;
+    pub fn init() *AstTest {
+        const self = _allocator.create(AstTest) catch @panic("OOM");
         self._type_tag = _ttag_AstTest;
         return self;
     }
@@ -1632,13 +1632,13 @@ pub const Main = struct {
     _type_tag: u64 = _ttag_Main,
     pub fn main() void {
 // zbr:selfhost/ast_test.zbr:89
-        var t = AstTest.init();
+        const t = AstTest.init();
 // zbr:selfhost/ast_test.zbr:90
         t.run();
     }
 
-    pub fn init() Main {
-        var self: Main = undefined;
+    pub fn init() *Main {
+        const self = _allocator.create(Main) catch @panic("OOM");
         self._type_tag = _ttag_Main;
         return self;
     }

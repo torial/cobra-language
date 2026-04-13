@@ -1,8 +1,8 @@
-# Phase 3: Recursive-descent parser — parser.zbr
-# Self-hosting demo: token stream → PNode parse tree.
+# Phase 3: Recursive-descent parser - parser.zbr
+# Self-hosting demo: token stream - PNode parse tree.
 #
 # Design note: all recursive child references go through List(PNode) or union
-# ^T variant auto-boxing — struct fields are only String/bool/int/List(T).
+# ^T variant auto-boxing - struct fields are only String/bool/int/List(T).
 # This sidesteps the struct-field ^T auto-boxing gap (no compiler change needed).
 # The gap is documented in SELFHOST_JOURNAL.md Phase 3 "Where Zebra felt worse".
 #
@@ -12,19 +12,22 @@
 #   - List(PNode) accumulation in parse loops
 #   - branch dispatch on TokenKind union variants
 #   - String comparison for keyword/operator detection
-#   - Recursive method calls (parseExpr → parseAddSub → parseUnary → parsePostfix → parseAtom)
+#   - Recursive method calls (parseExpr - parseAddSub - parseUnary - parsePostfix - parseAtom)
 
 use Token exposing TokenKind
 use Lexer
 
-# ── Parse tree node types ─────────────────────────────────────────────────────
+# -- Parse tree node types -----------------------------------------------------
 
 union PNode
     # Top level
     module_ as ^PModule
-    use_ as str
+    use_ as ^PUse
     class_ as ^PClass
+    struct_ as ^PClass
     enum_ as ^PEnum
+    union_decl as ^PUnionDecl
+    sig_ as ^PSig
 
     # Members / declarations
     field_ as ^PField
@@ -45,27 +48,111 @@ union PNode
     stmt_raise as ^PRaise
     stmt_try_catch as ^PTryCatch
     stmt_expr as ^PNode
+    stmt_print as ^PNode
 
-    # Expressions (inline — no heap indirection)
+    # Expressions (inline - no heap indirection)
     expr_int as str
     expr_float as str
     expr_bool as bool
     expr_nil
     expr_this
     expr_str as str
+    expr_char as str
     expr_id as str
 
-    # Expressions (heap-boxed — recursive)
+    # Expressions (heap-boxed - recursive)
     expr_member as ^PMember
     expr_call as ^PCall
+    expr_index as ^PIndex
+    expr_slice as ^PSlice
     expr_binary as ^PBinary
     expr_unary as ^PUnary
     expr_try as ^PNode
+    expr_to_bang as ^PNode
+    expr_except as ^PExcept
+    expr_string_interp as ^PStringInterp
+
+    # Branch statement
+    stmt_branch as ^PBranch
+
+struct PUnionDecl
+    var name as str
+    var variants as List(PUnionVariant)
+    cue init(name as str, variants as List(PUnionVariant))
+        this.name = name
+        this.variants = variants
+
+struct PUnionVariant
+    var name as str
+    var type_name as str
+    cue init(name as str, type_name as str)
+        this.name = name
+        this.type_name = type_name
+
+struct PSig
+    var name as str
+    var params as List(PParam)
+    var return_type as str
+    cue init(name as str, params as List(PParam), return_type as str)
+        this.name = name
+        this.params = params
+        this.return_type = return_type
+
+struct PBranch
+    var subject as List(PNode)
+    var arms as List(PBranchOn)
+    var else_stmts as List(PNode)
+    cue init(subject as List(PNode), arms as List(PBranchOn), else_stmts as List(PNode))
+        this.subject = subject
+        this.arms = arms
+        this.else_stmts = else_stmts
+
+struct PBranchOn
+    var pattern as str
+    var binding as str
+    var stmts as List(PNode)
+    cue init(pattern as str, binding as str, stmts as List(PNode))
+        this.pattern = pattern
+        this.binding = binding
+        this.stmts = stmts
+
+struct PExcept
+    var base as List(PNode)
+    var fields as List(PExceptField)
+    cue init(base as List(PNode), fields as List(PExceptField))
+        this.base = base
+        this.fields = fields
+
+struct PExceptField
+    var name as str
+    var value as List(PNode)
+    cue init(name as str, value as List(PNode))
+        this.name = name
+        this.value = value
+
+struct PStringInterp
+    var parts as List(PNode)
+    cue init(parts as List(PNode))
+        this.parts = parts
+
+struct PUse
+    var path as str
+    var exposed as List(str)
+    cue init(path as str, exposed as List(str))
+        this.path = path
+        this.exposed = exposed
 
 struct PModule
     var decls as List(PNode)
     cue init(decls as List(PNode))
         this.decls = decls
+
+struct PParam
+    var name as str
+    var type_name as str
+    cue init(name as str, type_name as str)
+        this.name = name
+        this.type_name = type_name
 
 struct PClass
     var name as str
@@ -96,16 +183,22 @@ struct PMethod
     var name as str
     var is_shared as bool
     var throws_ as bool
+    var params as List(PParam)
+    var return_type as str
     var stmts as List(PNode)
-    cue init(name as str, is_shared as bool, throws_ as bool, stmts as List(PNode))
+    cue init(name as str, is_shared as bool, throws_ as bool, params as List(PParam), return_type as str, stmts as List(PNode))
         this.name = name
         this.is_shared = is_shared
         this.throws_ = throws_
+        this.params = params
+        this.return_type = return_type
         this.stmts = stmts
 
 struct PInit
+    var params as List(PParam)
     var stmts as List(PNode)
-    cue init(stmts as List(PNode))
+    cue init(params as List(PParam), stmts as List(PNode))
+        this.params = params
         this.stmts = stmts
 
 struct PReturn
@@ -193,6 +286,22 @@ struct PCall
         this.callee = callee
         this.args = args
 
+struct PIndex
+    var object as List(PNode)
+    var index as List(PNode)
+    cue init(object as List(PNode), index as List(PNode))
+        this.object = object
+        this.index = index
+
+struct PSlice
+    var object as List(PNode)
+    var start as List(PNode)
+    var stop_ as List(PNode)
+    cue init(object as List(PNode), start as List(PNode), stop_ as List(PNode))
+        this.object = object
+        this.start = start
+        this.stop_ = stop_
+
 struct PBinary
     var op as str
     var left as List(PNode)
@@ -209,7 +318,7 @@ struct PUnary
         this.op = op
         this.operand = operand
 
-# ── Parser class ──────────────────────────────────────────────────────────────
+# -- Parser class --------------------------------------------------------------
 
 class Parser
     var tokens as List(Token.Token)
@@ -219,7 +328,7 @@ class Parser
         this.tokens = tokens
         this.pos = 0
 
-    # ── Cursor ────────────────────────────────────────────────────────────────
+    # -- Cursor ----------------------------------------------------------------
 
     def peek() as Token.Token
         if this.pos < this.tokens.len
@@ -273,6 +382,22 @@ class Parser
             else
                 return false
 
+    # Type keywords used as expressions (e.g., List(int), HashMap(str, bool))
+    def isTypeKeyword() as bool
+        branch this.peek().kind
+            on TokenKind.kw_int
+                return true
+            on TokenKind.kw_uint
+                return true
+            on TokenKind.kw_float
+                return true
+            on TokenKind.kw_bool
+                return true
+            on TokenKind.kw_char
+                return true
+            else
+                return false
+
     def isOpenCall() as bool
         branch this.peek().kind
             on TokenKind.open_call
@@ -308,6 +433,49 @@ class Parser
             else
                 return false
 
+    def isCharLit() as bool
+        branch this.peek().kind
+            on TokenKind.char_lit_single
+                return true
+            on TokenKind.char_lit_double
+                return true
+            else
+                return false
+
+    def isStringStart() as bool
+        branch this.peek().kind
+            on TokenKind.string_start_single
+                return true
+            on TokenKind.string_start_double
+                return true
+            else
+                return false
+
+    def isStringPart() as bool
+        branch this.peek().kind
+            on TokenKind.string_part_single
+                return true
+            on TokenKind.string_part_double
+                return true
+            else
+                return false
+
+    def isStringStop() as bool
+        branch this.peek().kind
+            on TokenKind.string_stop_single
+                return true
+            on TokenKind.string_stop_double
+                return true
+            else
+                return false
+
+    def isRcurlySpecial() as bool
+        branch this.peek().kind
+            on TokenKind.rcurly_special
+                return true
+            else
+                return false
+
     def skipEol()
         while this.isEol()
             this.advance()
@@ -330,12 +498,53 @@ class Parser
             return text
         raise "expected name, got '" + this.peek().text + "' at line " + this.peek().line.toString()
 
-    # Consume a type-name token — accepts identifiers AND built-in type keywords
+    # Consume a type-name token - accepts identifiers AND built-in type keywords
     # (int, bool, str, float, char, void) which the lexer promotes to keywords.
+    # Also handles generic types like List(str) and HashMap(str,int) by consuming
+    # the open_call token and its argument list.
     def eatTypeName() as str throws
-        const text = this.peek().text
-        if .isId() or .isOpenCall()
+        # Handle ^Type (heap-pointer prefix)
+        if this.textIs("^")
             this.advance()
+            var inner as str = .eatTypeName()
+            var sb as StringBuilder = StringBuilder()
+            sb.append("^")
+            sb.append(inner)
+            return sb.build()
+        const text = this.peek().text
+        if .isOpenCall()
+            # Generic type: "List(str)" — open_call token is "Name(" (text is just "Name")
+            this.advance()  # consume "Name("
+            var args as List(str) = List(str)()
+            while not this.textIs(")")
+                if this.textIs(",")
+                    this.advance()
+                else
+                    args.add(.eatTypeName())
+            .expectText(")")
+            # Build "Name(arg1,arg2,...)" using StringBuilder to avoid cross-module str type issue
+            var sb as StringBuilder = StringBuilder()
+            sb.append(text)
+            sb.append("(")
+            var first = true
+            for arg in args
+                if not first
+                    sb.append(",")
+                sb.append(arg)
+                first = false
+            sb.append(")")
+            return sb.build()
+        if .isId()
+            this.advance()
+            # Handle dotted names: Token.Token, ast.Module, etc.
+            if this.textIs(".")
+                this.advance()
+                var rest as str = .eatTypeName()
+                var sb as StringBuilder = StringBuilder()
+                sb.append(text)
+                sb.append(".")
+                sb.append(rest)
+                return sb.build()
             return text
         # Accept built-in type keywords by text
         if text == "int" or text == "bool" or text == "str" or text == "float" or text == "char" or text == "void" or text == "any"
@@ -343,25 +552,34 @@ class Parser
             return text
         raise "expected type name, got '" + text + "' at line " + this.peek().line.toString()
 
-    # ── Module ────────────────────────────────────────────────────────────────
+    # -- Module ----------------------------------------------------------------
 
     def parseModule() as PNode throws
-        var decls as List(PNode)
+        var decls = List(PNode)()
         .skipEol()
         while not .isEof()
             decls.add(.parseTopDecl())
             .skipEol()
         return PNode.module_(PModule(decls))
 
-    # ── Top-level declarations ────────────────────────────────────────────────
+    # -- Top-level declarations ------------------------------------------------
 
     def parseTopDecl() as PNode throws
         if this.textIs("use")
             return .parseUseDecl()
         else if this.textIs("class")
             return .parseClassDecl()
+        else if this.textIs("struct")
+            return .parseStructDecl()
+        else if this.textIs("union")
+            return .parseUnionDecl()
         else if this.textIs("enum")
             return .parseEnumDecl()
+        else if this.textIs("sig")
+            return .parseSigDecl()
+        else if this.textIs("shared")
+            this.advance()
+            return .parseMethodDecl(true)
         else if this.textIs("def")
             return .parseMethodDecl(false)
         raise "unexpected top-level token: '" + this.peek().text + "' at line " + this.peek().line.toString()
@@ -372,19 +590,20 @@ class Parser
         while this.textIs(".")
             this.advance()
             path = path + "." + .eatId()
+        var exposed = List(str)()
         if this.textIs("exposing")
             this.advance()
-            this.advance()  # skip exposed name
+            exposed.add(.eatId())
             while this.textIs(",")
                 this.advance()
-                this.advance()  # skip additional exposed name
+                exposed.add(.eatId())
         .skipEol()
-        return PNode.use_(path)
+        return PNode.use_(PUse(path, exposed))
 
     def parseClassDecl() as PNode throws
         .expectText("class")
         const name = .eatId()
-        var ifaces as List(str)
+        var ifaces = List(str)()
         if this.textIs("implements")
             this.advance()
             ifaces.add(.eatId())
@@ -392,7 +611,7 @@ class Parser
                 this.advance()
                 ifaces.add(.eatId())
         .skipEol()
-        var members as List(PNode)
+        var members = List(PNode)()
         if .isIndent()
             this.advance()
             while not .isDedent() and not .isEof()
@@ -411,6 +630,9 @@ class Parser
                             members.add(.parseMemberDecl(true))
                         if .isDedent()
                             this.advance()
+                    else
+                        # Inline `shared def foo()` — no indented block
+                        members.add(.parseMemberDecl(true))
                 else
                     members.add(.parseMemberDecl(false))
             if .isDedent()
@@ -421,7 +643,7 @@ class Parser
         .expectText("enum")
         const name = .eatId()
         .skipEol()
-        var variants as List(str)
+        var variants = List(str)()
         if .isIndent()
             this.advance()
             while not .isDedent() and not .isEof()
@@ -434,7 +656,84 @@ class Parser
                 this.advance()
         return PNode.enum_(PEnum(name, variants))
 
-    # ── Member declarations ───────────────────────────────────────────────────
+    def parseStructDecl() as PNode throws
+        .expectText("struct")
+        const name = .eatId()
+        .skipEol()
+        var members = List(PNode)()
+        if .isIndent()
+            this.advance()
+            while not .isDedent() and not .isEof()
+                .skipEol()
+                if .isDedent()
+                    break
+                members.add(.parseMemberDecl(false))
+            if .isDedent()
+                this.advance()
+        var ifaces = List(str)()
+        return PNode.struct_(PClass(name, ifaces, members))
+
+    def parseUnionDecl() as PNode throws
+        .expectText("union")
+        const name = .eatId()
+        .skipEol()
+        var variants = List(PUnionVariant)()
+        if .isIndent()
+            this.advance()
+            while not .isDedent() and not .isEof()
+                .skipEol()
+                if .isDedent()
+                    break
+                const vname = .eatId()
+                var vtype as str = ""
+                if this.textIs("as")
+                    this.advance()
+                    # Handle ^Type prefix
+                    if this.textIs("^")
+                        this.advance()
+                        vtype = "^" + .eatTypeName()
+                    else
+                        vtype = .eatTypeName()
+                    if this.textIs("?")
+                        this.advance()
+                        vtype = vtype + "?"
+                .skipEol()
+                variants.add(PUnionVariant(vname, vtype))
+            if .isDedent()
+                this.advance()
+        return PNode.union_decl(PUnionDecl(name, variants))
+
+    def parseSigDecl() as PNode throws
+        .expectText("sig")
+        var name = ""
+        var has_params = false
+        if .isOpenCall()
+            name = this.peek().text
+            this.advance()
+            has_params = true
+        else
+            name = .eatId()
+        var params = List(PParam)()
+        if has_params
+            while not this.textIs(")")
+                if this.textIs(",")
+                    this.advance()
+                else
+                    const pname = .eatId()
+                    var ptype = ""
+                    if this.textIs("as")
+                        this.advance()
+                        ptype = .eatTypeName()
+                    params.add(PParam(pname, ptype))
+            .expectText(")")
+        var return_type = ""
+        if this.textIs("as")
+            this.advance()
+            return_type = .eatTypeName()
+        .skipEol()
+        return PNode.sig_(PSig(name, params, return_type))
+
+    # -- Member declarations ---------------------------------------------------
 
     def parseMemberDecl(is_shared as bool) as PNode throws
         if this.textIs("def")
@@ -471,27 +770,32 @@ class Parser
         this.advance()
         if not was_open_call
             .expectText("(")
-        # skip parameter list
+        var params = List(PParam)()
         while not this.textIs(")")
-            this.advance()  # skip param name
-            if this.textIs("as")
-                this.advance()
-                this.advance()  # skip param type
-                if this.textIs("?")
-                    this.advance()
             if this.textIs(",")
                 this.advance()
+            else
+                const pname = .eatId()
+                var ptype = ""
+                if this.textIs("as")
+                    this.advance()
+                    ptype = .eatTypeName()
+                    if this.textIs("?")
+                        this.advance()
+                        ptype = ptype + "?"
+                params.add(PParam(pname, ptype))
         .expectText(")")
         .skipEol()
-        var stmts as List(PNode)
+        var stmts = List(PNode)()
         if .isIndent()
             stmts = .parseBlock()
-        return PNode.init_(PInit(stmts))
+        return PNode.init_(PInit(params, stmts))
 
     def parseMethodDecl(is_shared as bool) as PNode throws
         .expectText("def")
-        var name as str = ""
-        var has_params as bool = false
+        var name = ""
+        var has_params = false
+        var params = List(PParam)()
         if .isOpenCall()
             name = this.peek().text
             this.advance()
@@ -500,37 +804,43 @@ class Parser
             name = .eatId()
         if has_params
             while not this.textIs(")")
-                this.advance()  # skip param name
-                if this.textIs("as")
-                    this.advance()
-                    this.advance()  # skip param type
-                    if this.textIs("?")
-                        this.advance()
                 if this.textIs(",")
                     this.advance()
+                else
+                    const pname = .eatId()
+                    var ptype = ""
+                    if this.textIs("as")
+                        this.advance()
+                        ptype = .eatTypeName()
+                        if this.textIs("?")
+                            this.advance()
+                            ptype = ptype + "?"
+                    params.add(PParam(pname, ptype))
             .expectText(")")
+        var return_type = ""
         if this.textIs("as")
             this.advance()
-            this.advance()  # skip return type name
+            return_type = .eatTypeName()
             if this.textIs("?")
                 this.advance()
-        var throws_ as bool = false
+                return_type = return_type + "?"
+        var throws_ = false
         if this.textIs("throws")
             this.advance()
             throws_ = true
         .skipEol()
-        var stmts as List(PNode)
+        var stmts = List(PNode)()
         if .isIndent()
             stmts = .parseBlock()
-        return PNode.method_(PMethod(name, is_shared, throws_, stmts))
+        return PNode.method_(PMethod(name, is_shared, throws_, params, return_type, stmts))
 
-    # ── Block and statements ──────────────────────────────────────────────────
+    # -- Block and statements --------------------------------------------------
 
     def parseBlock() as List(PNode) throws
         if not .isIndent()
             raise "expected indent, got '" + this.peek().text + "'"
         this.advance()
-        var stmts as List(PNode)
+        var stmts = List(PNode)()
         while not .isDedent() and not .isEof()
             .skipEol()
             if .isDedent()
@@ -571,17 +881,19 @@ class Parser
             return .parseRaiseStmt()
         else if this.textIs("try")
             return .parseTryCatch()
+        else if this.textIs("branch")
+            return .parseBranchStmt()
         else if this.textIs("print")
             this.advance()
             const expr = .parseExpr()
             .skipEol()
-            return PNode.stmt_expr(expr)
+            return PNode.stmt_print(expr)
         else
             return .parseExprOrAssignStmt()
 
     def parseReturnStmt() as PNode throws
         .expectText("return")
-        var value as List(PNode)
+        var value = List(PNode)()
         if not .isEol() and not .isEof() and not .isDedent()
             value.add(.parseExpr())
         .skipEol()
@@ -592,12 +904,16 @@ class Parser
         const cond_expr = .parseExpr()
         .skipEol()
         const then_stmts = .parseBlock()
-        var else_stmts as List(PNode)
+        var else_stmts = List(PNode)()
         if this.textIs("else")
             this.advance()
-            .skipEol()
-            else_stmts = .parseBlock()
-        var cond_list as List(PNode)
+            if this.textIs("if")
+                # else if → wrap as single-element else list
+                else_stmts.add(.parseIfStmt())
+            else
+                .skipEol()
+                else_stmts = .parseBlock()
+        var cond_list = List(PNode)()
         cond_list.add(cond_expr)
         return PNode.stmt_if(PIf(cond_list, then_stmts, else_stmts))
 
@@ -606,13 +922,13 @@ class Parser
         const cond_expr = .parseExpr()
         .skipEol()
         const stmts = .parseBlock()
-        var cond_list as List(PNode)
+        var cond_list = List(PNode)()
         cond_list.add(cond_expr)
         return PNode.stmt_while(PWhile(cond_list, stmts))
 
     def parseForInStmt() as PNode throws
         .expectText("for")
-        var var_names as List(str)
+        var var_names = List(str)()
         var_names.add(.eatId())
         while this.textIs(",")
             this.advance()
@@ -621,7 +937,7 @@ class Parser
         const iter_expr = .parseExpr()
         .skipEol()
         const stmts = .parseBlock()
-        var iter_list as List(PNode)
+        var iter_list = List(PNode)()
         iter_list.add(iter_expr)
         return PNode.stmt_for_in(PForIn(var_names, iter_list, stmts))
 
@@ -638,7 +954,7 @@ class Parser
             if this.textIs("?")
                 this.advance()
                 type_name = type_name + "?"
-        var init_expr as List(PNode)
+        var init_expr = List(PNode)()
         if this.textIs("=")
             this.advance()
             init_expr.add(.parseExpr())
@@ -648,9 +964,9 @@ class Parser
     def parseAssertStmt() as PNode throws
         .expectText("assert")
         const cond_expr = .parseExpr()
-        var cond_list as List(PNode)
+        var cond_list = List(PNode)()
         cond_list.add(cond_expr)
-        var msg_list as List(PNode)
+        var msg_list = List(PNode)()
         if this.textIs(",")
             this.advance()
             msg_list.add(.parseExpr())
@@ -659,7 +975,7 @@ class Parser
 
     def parseRaiseStmt() as PNode throws
         .expectText("raise")
-        var msg_list as List(PNode)
+        var msg_list = List(PNode)()
         if not .isEol() and not .isEof() and not .isDedent()
             msg_list.add(.parseExpr())
         .skipEol()
@@ -679,6 +995,70 @@ class Parser
         const catch_stmts = .parseBlock()
         return PNode.stmt_try_catch(PTryCatch(body_stmts, catch_binding, catch_stmts))
 
+    def parseBranchStmt() as PNode throws
+        .expectText("branch")
+        const subject = .parseExpr()
+        .skipEol()
+        var arms = List(PBranchOn)()
+        var else_stmts = List(PNode)()
+        if .isIndent()
+            this.advance()
+            while not .isDedent() and not .isEof()
+                .skipEol()
+                if .isDedent()
+                    break
+                if this.textIs("on")
+                    this.advance()
+                    # Parse pattern: collect tokens until `as`, eol, or indent
+                    var pattern = .eatBranchPattern()
+                    var binding = ""
+                    if this.textIs("as")
+                        this.advance()
+                        binding = .eatId()
+                    .skipEol()
+                    var stmts = List(PNode)()
+                    if .isIndent()
+                        stmts = .parseBlock()
+                    else if not .isEol() and not .isDedent() and not .isEof()
+                        # Inline single-line arm: `on Pattern  return value`
+                        stmts.add(.parseStmt())
+                    arms.add(PBranchOn(pattern, binding, stmts))
+                else if this.textIs("else")
+                    this.advance()
+                    .skipEol()
+                    if .isIndent()
+                        else_stmts = .parseBlock()
+                else
+                    break
+            if .isDedent()
+                this.advance()
+        var subj_list = List(PNode)()
+        subj_list.add(subject)
+        return PNode.stmt_branch(PBranch(subj_list, arms, else_stmts))
+
+    def eatBranchPattern() as str throws
+        # Collect pattern text: e.g., "TokenKind.eol", "PNode.class_", "c'0'..c'9'"
+        var sb as StringBuilder = StringBuilder()
+        # First token
+        sb.append(this.peek().text)
+        this.advance()
+        # Continue with . member access and range operators
+        var going as bool = true
+        while going
+            if this.textIs(".")
+                sb.append(".")
+                this.advance()
+                sb.append(this.peek().text)
+                this.advance()
+            else if this.textIs("..")
+                sb.append("..")
+                this.advance()
+                sb.append(this.peek().text)
+                this.advance()
+            else
+                going = false
+        return sb.build()
+
     def parseExprOrAssignStmt() as PNode throws
         const target_expr = .parseExpr()
         var op as str = ""
@@ -694,17 +1074,17 @@ class Parser
             this.advance()
             const value_expr = .parseExpr()
             .skipEol()
-            var tgt as List(PNode)
+            var tgt = List(PNode)()
             tgt.add(target_expr)
-            var val as List(PNode)
+            var val = List(PNode)()
             val.add(value_expr)
             return PNode.stmt_assign(PAssign(op, tgt, val))
         .skipEol()
         return PNode.stmt_expr(target_expr)
 
-    # ── Expressions ───────────────────────────────────────────────────────────
-    # Precedence (lowest → highest):
-    # or → and → not → comparison → add/sub → mul/div → unary − → postfix → atom
+    # -- Expressions -----------------------------------------------------------
+    # Precedence (lowest - highest):
+    # or - and - not - comparison - add/sub - mul/div - unary - - postfix - atom
 
     def parseExpr() as PNode throws
         return .parseOr()
@@ -714,9 +1094,9 @@ class Parser
         while this.textIs("or")
             this.advance()
             const right = .parseAnd()
-            var l as List(PNode)
+            var l = List(PNode)()
             l.add(left)
-            var r as List(PNode)
+            var r = List(PNode)()
             r.add(right)
             left = PNode.expr_binary(PBinary("or", l, r))
         return left
@@ -726,9 +1106,9 @@ class Parser
         while this.textIs("and")
             this.advance()
             const right = .parseNot()
-            var l as List(PNode)
+            var l = List(PNode)()
             l.add(left)
-            var r as List(PNode)
+            var r = List(PNode)()
             r.add(right)
             left = PNode.expr_binary(PBinary("and", l, r))
         return left
@@ -737,7 +1117,7 @@ class Parser
         if this.textIs("not")
             this.advance()
             const operand = .parseNot()
-            var ops as List(PNode)
+            var ops = List(PNode)()
             ops.add(operand)
             return PNode.expr_unary(PUnary("not", ops))
         return .parseComparison()
@@ -747,7 +1127,7 @@ class Parser
         var op as str = ""
         if this.textIs("==")
             op = "=="
-        else if this.textIs("!=")
+        else if this.textIs("!=") or this.textIs("<>")
             op = "!="
         else if this.textIs("<=")
             op = "<="
@@ -757,12 +1137,14 @@ class Parser
             op = "<"
         else if this.textIs(">")
             op = ">"
+        else if this.textIs("in")
+            op = "in"
         if op != ""
             this.advance()
             const right = .parseAddSub()
-            var l as List(PNode)
+            var l = List(PNode)()
             l.add(left)
-            var r as List(PNode)
+            var r = List(PNode)()
             r.add(right)
             return PNode.expr_binary(PBinary(op, l, r))
         return left
@@ -773,9 +1155,9 @@ class Parser
             const op = this.peek().text
             this.advance()
             const right = .parseMulDiv()
-            var l as List(PNode)
+            var l = List(PNode)()
             l.add(left)
-            var r as List(PNode)
+            var r = List(PNode)()
             r.add(right)
             left = PNode.expr_binary(PBinary(op, l, r))
         return left
@@ -786,9 +1168,9 @@ class Parser
             const op = this.peek().text
             this.advance()
             const right = .parseUnary()
-            var l as List(PNode)
+            var l = List(PNode)()
             l.add(left)
-            var r as List(PNode)
+            var r = List(PNode)()
             r.add(right)
             left = PNode.expr_binary(PBinary(op, l, r))
         return left
@@ -797,7 +1179,7 @@ class Parser
         if this.textIs("-")
             this.advance()
             const operand = .parseUnary()
-            var ops as List(PNode)
+            var ops = List(PNode)()
             ops.add(operand)
             return PNode.expr_unary(PUnary("-", ops))
         return .parsePostfix()
@@ -813,20 +1195,78 @@ class Parser
                     const mname = this.peek().text
                     this.advance()
                     const args = .parseCallArgs()
-                    var base as List(PNode)
+                    var base = List(PNode)()
                     base.add(expr)
-                    var callee as List(PNode)
+                    var callee = List(PNode)()
                     callee.add(PNode.expr_member(PMember(base, mname)))
                     expr = PNode.expr_call(PCall(callee, args))
                 else
                     # expr.field
                     const field = .eatId()
-                    var base as List(PNode)
+                    var base = List(PNode)()
                     base.add(expr)
                     expr = PNode.expr_member(PMember(base, field))
             else if this.textIs("?")
                 this.advance()
                 expr = PNode.expr_try(expr)
+            else if this.textIs("to")
+                # to! force-unwrap
+                this.advance()
+                .expectText("!")
+                expr = PNode.expr_to_bang(expr)
+            else if this.textIs("except")
+                # struct update: expr except \n field = value \n ...
+                this.advance()
+                .skipEol()
+                var fields = List(PExceptField)()
+                if .isIndent()
+                    this.advance()
+                    while not .isDedent() and not .isEof()
+                        .skipEol()
+                        if .isDedent()
+                            break
+                        const fname = .eatId()
+                        .expectText("=")
+                        const fval = .parseExpr()
+                        .skipEol()
+                        var vlist = List(PNode)()
+                        vlist.add(fval)
+                        fields.add(PExceptField(fname, vlist))
+                    if .isDedent()
+                        this.advance()
+                var base_list = List(PNode)()
+                base_list.add(expr)
+                expr = PNode.expr_except(PExcept(base_list, fields))
+            else if this.textIs("[")
+                # index or slice: expr[index] or expr[start..stop]
+                this.advance()
+                const first = .parseExpr()
+                if this.textIs("..")
+                    # slice: expr[start..stop]
+                    this.advance()
+                    const stop_expr = .parseExpr()
+                    .expectText("]")
+                    var obj = List(PNode)()
+                    obj.add(expr)
+                    var start_list = List(PNode)()
+                    start_list.add(first)
+                    var stop_list = List(PNode)()
+                    stop_list.add(stop_expr)
+                    expr = PNode.expr_slice(PSlice(obj, start_list, stop_list))
+                else
+                    .expectText("]")
+                    var obj = List(PNode)()
+                    obj.add(expr)
+                    var idx_list = List(PNode)()
+                    idx_list.add(first)
+                    expr = PNode.expr_index(PIndex(obj, idx_list))
+            else if this.textIs("(")
+                # chained call: expr(args) — handles List(T)(), HashMap(K,V)(), etc.
+                this.advance()  # consume the "("
+                const args = .parseCallArgs()
+                var callee = List(PNode)()
+                callee.add(expr)
+                expr = PNode.expr_call(PCall(callee, args))
             else
                 going = false
         return expr
@@ -852,10 +1292,16 @@ class Parser
             const text = this.peek().text
             this.advance()
             return PNode.expr_float(text)
+        else if .isStringStart()
+            return .parseStringInterp()
         else if .isStringSingle() or .isStringDouble()
             const text = this.peek().text
             this.advance()
             return PNode.expr_str(text)
+        else if .isCharLit()
+            const text = this.peek().text
+            this.advance()
+            return PNode.expr_char(text)
         else if this.textIs("(")
             this.advance()
             const inner = .parseExpr()
@@ -866,7 +1312,7 @@ class Parser
             const name = this.peek().text
             this.advance()
             const args = .parseCallArgs()
-            var callee as List(PNode)
+            var callee = List(PNode)()
             callee.add(PNode.expr_id(name))
             return PNode.expr_call(PCall(callee, args))
         else if this.textIs(".")
@@ -876,25 +1322,53 @@ class Parser
                 const mname = this.peek().text
                 this.advance()
                 const args = .parseCallArgs()
-                var base as List(PNode)
-                var callee as List(PNode)
+                var base = List(PNode)()
+                var callee = List(PNode)()
                 callee.add(PNode.expr_member(PMember(base, mname)))
                 return PNode.expr_call(PCall(callee, args))
             else
                 const field = .eatId()
-                var base as List(PNode)
+                var base = List(PNode)()
                 return PNode.expr_member(PMember(base, field))
         else if .isId()
             const name = this.peek().text
             this.advance()
             return PNode.expr_id(name)
+        else if .isTypeKeyword()
+            # type keyword used as expression (e.g. in List(int), HashMap(str, bool))
+            const name = this.peek().text
+            this.advance()
+            return PNode.expr_id(name)
         raise "unexpected expression token: '" + this.peek().text + "' at line " + this.peek().line.toString()
 
+    def parseStringInterp() as PNode throws
+        # string_start_X  {expr rcurly_special [string_part_X expr rcurly_special]*}  string_stop_X
+        var parts = List(PNode)()
+        # Leading literal from string_start token (includes text before first ${)
+        parts.add(PNode.expr_str(this.peek().text))
+        this.advance()
+        # Parse interleaved expressions and literal parts
+        while not .isStringStop() and not .isEof()
+            # Parse the interpolated expression
+            parts.add(.parseExpr())
+            # Consume rcurly_special (the closing } of ${...})
+            if .isRcurlySpecial()
+                this.advance()
+            # If followed by a string_part, consume it as literal
+            if .isStringPart()
+                parts.add(PNode.expr_str(this.peek().text))
+                this.advance()
+        # Trailing literal from string_stop token
+        if .isStringStop()
+            parts.add(PNode.expr_str(this.peek().text))
+            this.advance()
+        return PNode.expr_string_interp(PStringInterp(parts))
+
     def parseCallArgs() as List(PNode) throws
-        var args as List(PNode)
+        var args = List(PNode)()
         while not this.textIs(")")
             # skip named arg label: name = expr
-            if .isId() and false  # placeholder — named args not needed for demo
+            if .isId() and false  # placeholder - named args not needed for demo
                 pass
             args.add(.parseExpr())
             if this.textIs(",")
@@ -902,7 +1376,7 @@ class Parser
         .expectText(")")
         return args
 
-    # ── Public API ────────────────────────────────────────────────────────────
+    # -- Public API ------------------------------------------------------------
 
     shared def parse(src as str) as PNode throws
         var toks = Lexer.tokenize(src)?

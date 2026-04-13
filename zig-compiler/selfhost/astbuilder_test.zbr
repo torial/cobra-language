@@ -1,0 +1,433 @@
+# Phase 9 test: ASTBuilder (PNode → ast.zbr Module)
+# Self-hosting validation - verifies that astbuilder.zbr produces correct
+# ast.zbr Module/Decl/Stmt/Expr trees from parsed PNode input.
+#
+# Design notes:
+#   - ^Expr pointer fields (si.cond, sa.target, sa.value, eb.left, eb.right,
+#     eu.operand, em.object) cannot be branched directly — use Stmt.expr path
+#     (expression-statement Expr is a value type) or skip deep inspection.
+#   - DeclVar.type_ is ?TypeRef — must unwrap with to! before branching.
+#   - DeclMethod.stmts is ?List(Stmt) — must unwrap with to!.
+#   - DeclMethod.return_type is ?TypeRef — must unwrap with to!.
+#   - StmtForIn.vars (not var_names), ExprMember.object (not base).
+#   - TypeRef.nilable payload is ^TypeRef — just confirm the variant.
+
+use Token exposing TokenKind
+use Lexer
+use Parser exposing PNode
+use ast exposing Module, Decl, DeclUse, DeclClass, DeclEnum, DeclMethod, DeclInit, DeclVar, EnumMember, TypeRef, NamedTypeRef, GenericTypeRef, Modifiers, Param, Stmt, StmtIf, StmtWhile, StmtForIn, StmtReturn, StmtAssign, StmtAssert, Expr, ExprIdent, ExprMember, ExprCall, ExprBinary, ExprUnary, ExprBoolLit, ExprIntLit, ExprFloatLit, ExprStringLit, BinaryOp, UnaryOp, AssignOp, Arg
+use astbuilder exposing ASTBuilder
+
+class ASTBuilderTest
+    def run() throws
+        .testEmptyClass()
+        .testClassWithField()
+        .testEnumDecl()
+        .testSimpleMethod()
+        .testMethodWithParams()
+        .testIfStmt()
+        .testWhileStmt()
+        .testForInStmt()
+        .testAssignStmt()
+        .testExprBinary()
+        .testExprUnary()
+        .testExprCall()
+        .testExprMember()
+        .testParseTypeRefSimple()
+        .testParseTypeRefNilable()
+        .testParseTypeRefGeneric()
+        .testReturnValue()
+        .testVarInit()
+        .testAssertMessage()
+        .testRaiseMessage()
+        print "astbuilder_test: all assertions passed"
+
+    # -- Helpers -------------------------------------------------------------------
+
+    # Build a Module from Zebra source. Explicit ? on cross-module throws calls.
+    def buildModule(src as str) as Module throws
+        const pm = Parser.Parser.parse(src)?
+        branch pm
+            on PNode.module_ as m
+                return ASTBuilder.build(m, "<test>")?
+            else
+                raise "expected module_ from parser"
+
+    def firstDecl(src as str) as Decl throws
+        const mod = .buildModule(src)?
+        assert mod.decls.len > 0, "expected at least one decl"
+        return mod.decls.at(0)
+
+    # Get the first Stmt of the first method member of the first class decl.
+    def firstMethodStmt(src as str) as Stmt throws
+        const d = .firstDecl(src)?
+        branch d
+            on Decl.class_ as c
+                assert c.members.len > 0, "expected class members"
+                const meth_decl = c.members.at(0)
+                branch meth_decl
+                    on Decl.method as meth
+                        var stmts as List(Stmt) = meth.stmts to!
+                        assert stmts.len > 0, "expected method stmts"
+                        return stmts.at(0)
+                    else
+                        raise "expected method decl"
+            else
+                raise "expected class_ decl"
+
+    # Get the Expr from a Stmt.expr (expression statement — value type Expr).
+    def stmtExprValue(s as Stmt) as Expr throws
+        branch s
+            on Stmt.expr as e
+                return e
+            else
+                raise "expected Stmt.expr"
+
+    # -- Tests ---------------------------------------------------------------------
+
+    def testEmptyClass() throws
+        # Use a class with no body (no members) — same as parser_test.testEmptyClass
+        const d = .firstDecl("class Foo\n")?
+        branch d
+            on Decl.class_ as c
+                assert c.name == "Foo", "expected class name 'Foo'"
+                assert c.members.len == 0, "expected 0 members"
+            else
+                assert false, "expected class_ decl"
+        print "testEmptyClass: OK"
+
+    def testClassWithField() throws
+        const d = .firstDecl("class Foo\n    var x as int\n")?
+        branch d
+            on Decl.class_ as c
+                assert c.name == "Foo", "expected class name 'Foo'"
+                assert c.members.len == 1, "expected 1 member"
+                const m = c.members.at(0)
+                branch m
+                    on Decl.var_ as v
+                        assert v.name == "x", "field name should be 'x'"
+                        var tr = v.type_ to!
+                        branch tr
+                            on TypeRef.named as nr
+                                assert nr.name == "int", "field type should be 'int'"
+                            else
+                                assert false, "expected named TypeRef"
+                    else
+                        assert false, "expected var_ decl for field"
+            else
+                assert false, "expected class_ decl"
+        print "testClassWithField: OK"
+
+    def testEnumDecl() throws
+        const d = .firstDecl("enum Color\n    red\n    green\n    blue\n")?
+        branch d
+            on Decl.enum_ as e
+                assert e.name == "Color", "expected enum name 'Color'"
+                assert e.members.len == 3, "expected 3 enum members"
+                assert e.members.at(0).name == "red", "expected member 'red'"
+                assert e.members.at(1).name == "green", "expected member 'green'"
+                assert e.members.at(2).name == "blue", "expected member 'blue'"
+            else
+                assert false, "expected enum_ decl"
+        print "testEnumDecl: OK"
+
+    def testSimpleMethod() throws
+        const src = "class Foo\n    def bar()\n        pass\n"
+        const d = .firstDecl(src)?
+        branch d
+            on Decl.class_ as c
+                assert c.members.len == 1, "expected 1 member"
+                const m = c.members.at(0)
+                branch m
+                    on Decl.method as meth
+                        assert meth.name == "bar", "method name should be 'bar'"
+                        assert meth.mods.is_shared == false, "bar should not be shared"
+                        assert meth.params.len == 0, "expected 0 params"
+                    else
+                        assert false, "expected method decl"
+            else
+                assert false, "expected class_ decl"
+        print "testSimpleMethod: OK"
+
+    def testMethodWithParams() throws
+        const src = "class Foo\n    def add(x as int, y as int) as int\n        pass\n"
+        const d = .firstDecl(src)?
+        branch d
+            on Decl.class_ as c
+                assert c.members.len == 1, "expected 1 member"
+                const m = c.members.at(0)
+                branch m
+                    on Decl.method as meth
+                        assert meth.name == "add", "method name should be 'add'"
+                        assert meth.params.len == 2, "expected 2 params"
+                        assert meth.params.at(0).name == "x", "first param should be 'x'"
+                        assert meth.params.at(1).name == "y", "second param should be 'y'"
+                        var ret = meth.return_type to!
+                        branch ret
+                            on TypeRef.named as nr
+                                assert nr.name == "int", "return type should be 'int'"
+                            else
+                                assert false, "expected named return type"
+                    else
+                        assert false, "expected method decl"
+            else
+                assert false, "expected class_ decl"
+        print "testMethodWithParams: OK"
+
+    def testIfStmt() throws
+        const src = "class Foo\n    def run()\n        if true\n            pass\n"
+        const s = .firstMethodStmt(src)?
+        branch s
+            on Stmt.if_ as si
+                assert si.then_stmts.len == 1, "expected 1 then_stmt"
+                assert si.else_ifs.len == 0, "expected 0 else_ifs"
+            else
+                assert false, "expected if_ stmt"
+        print "testIfStmt: OK"
+
+    def testWhileStmt() throws
+        const src = "class Foo\n    def run()\n        while true\n            pass\n"
+        const s = .firstMethodStmt(src)?
+        branch s
+            on Stmt.while_ as sw
+                assert sw.stmts.len == 1, "expected 1 body stmt"
+            else
+                assert false, "expected while_ stmt"
+        print "testWhileStmt: OK"
+
+    def testForInStmt() throws
+        const src = "class Foo\n    def run()\n        for x in items\n            pass\n"
+        const s = .firstMethodStmt(src)?
+        branch s
+            on Stmt.for_in as sf
+                # StmtForIn.vars (not var_names)
+                assert sf.vars.len == 1, "expected 1 loop var"
+                assert sf.vars.at(0) == "x", "loop var should be 'x'"
+                assert sf.stmts.len == 1, "expected 1 body stmt"
+            else
+                assert false, "expected for_in stmt"
+        print "testForInStmt: OK"
+
+    def testAssignStmt() throws
+        const src = "class Foo\n    def run()\n        x = 42\n"
+        const s = .firstMethodStmt(src)?
+        branch s
+            on Stmt.assign as sa
+                # sa.target and sa.value are *Expr (pointer) — check op only
+                branch sa.op
+                    on AssignOp.assign
+                        pass
+                    else
+                        assert false, "expected assign op"
+            else
+                assert false, "expected assign stmt"
+        print "testAssignStmt: OK"
+
+    def testExprBinary() throws
+        # Use Stmt.expr (expression statement) — Expr is a value type, not pointer.
+        # foo(1 + 2) → Stmt.expr → Expr.call → args[0].value → Expr.binary
+        const src = "class Foo\n    def run()\n        foo(1 + 2)\n"
+        const s = .firstMethodStmt(src)?
+        const se = .stmtExprValue(s)?
+        branch se
+            on Expr.call as ec
+                assert ec.args.len == 1, "expected 1 arg"
+                const arg_val = ec.args.at(0).value
+                branch arg_val
+                    on Expr.binary as eb
+                        branch eb.op
+                            on BinaryOp.add
+                                pass
+                            else
+                                assert false, "expected add op"
+                        # eb.left and eb.right are *Expr (pointers) — skip deep check
+                    else
+                        assert false, "expected binary expr in arg"
+            else
+                assert false, "expected call expr"
+        print "testExprBinary: OK"
+
+    def testExprUnary() throws
+        # foo(not true) → Stmt.expr → Expr.call → args[0].value → Expr.unary
+        const src = "class Foo\n    def run()\n        foo(not true)\n"
+        const s = .firstMethodStmt(src)?
+        const se = .stmtExprValue(s)?
+        branch se
+            on Expr.call as ec
+                assert ec.args.len == 1, "expected 1 arg"
+                const arg_val = ec.args.at(0).value
+                branch arg_val
+                    on Expr.unary as eu
+                        branch eu.op
+                            on UnaryOp.not_
+                                pass
+                            else
+                                assert false, "expected not_ op"
+                        # eu.operand is *Expr (pointer) — skip deep check
+                    else
+                        assert false, "expected unary expr in arg"
+            else
+                assert false, "expected call expr"
+        print "testExprUnary: OK"
+
+    def testExprCall() throws
+        # foo(1, 2) → Stmt.expr → Expr.call; ExprCall.callee is Expr (value type)
+        const src = "class Foo\n    def run()\n        foo(1, 2)\n"
+        const s = .firstMethodStmt(src)?
+        const se = .stmtExprValue(s)?
+        branch se
+            on Expr.call as ec
+                assert ec.args.len == 2, "expected 2 args"
+                # ExprCall.callee: Expr (value type, changed in Phase 7b)
+                branch ec.callee
+                    on Expr.ident as id
+                        assert id.name == "foo", "callee should be 'foo'"
+                    else
+                        assert false, "expected ident callee"
+            else
+                assert false, "expected call expr"
+        print "testExprCall: OK"
+
+    def testExprMember() throws
+        # foo(obj.field) → args[0].value → Expr.member; check member name
+        const src = "class Foo\n    def run()\n        foo(obj.field)\n"
+        const s = .firstMethodStmt(src)?
+        const se = .stmtExprValue(s)?
+        branch se
+            on Expr.call as ec
+                assert ec.args.len == 1, "expected 1 arg"
+                const arg_val = ec.args.at(0).value
+                branch arg_val
+                    on Expr.member as em
+                        assert em.member == "field", "member should be 'field'"
+                        # em.object is *Expr (pointer) — skip object inspection
+                    else
+                        assert false, "expected member expr in arg"
+            else
+                assert false, "expected call expr"
+        print "testExprMember: OK"
+
+    def testParseTypeRefSimple() throws
+        const src = "class Foo\n    var n as int\n"
+        const d = .firstDecl(src)?
+        branch d
+            on Decl.class_ as c
+                const m = c.members.at(0)
+                branch m
+                    on Decl.var_ as v
+                        # DeclVar.type_ is ?TypeRef — must unwrap
+                        var tr = v.type_ to!
+                        branch tr
+                            on TypeRef.named as nr
+                                assert nr.name == "int", "expected 'int'"
+                            else
+                                assert false, "expected named TypeRef"
+                    else
+                        assert false, "expected var_ decl"
+            else
+                assert false, "expected class_ decl"
+        print "testParseTypeRefSimple: OK"
+
+    def testParseTypeRefNilable() throws
+        const src = "class Foo\n    var n as str?\n"
+        const d = .firstDecl(src)?
+        branch d
+            on Decl.class_ as c
+                const m = c.members.at(0)
+                branch m
+                    on Decl.var_ as v
+                        var tr = v.type_ to!
+                        branch tr
+                            on TypeRef.nilable
+                                # TypeRef.nilable payload is ^TypeRef (pointer) —
+                                # just confirm the variant exists (ast_test.zbr pattern)
+                                pass
+                            else
+                                assert false, "expected nilable TypeRef"
+                    else
+                        assert false, "expected var_ decl"
+            else
+                assert false, "expected class_ decl"
+        print "testParseTypeRefNilable: OK"
+
+    def testParseTypeRefGeneric() throws
+        const src = "class Foo\n    var items as List(str)\n"
+        const d = .firstDecl(src)?
+        branch d
+            on Decl.class_ as c
+                const m = c.members.at(0)
+                branch m
+                    on Decl.var_ as v
+                        var tr = v.type_ to!
+                        branch tr
+                            on TypeRef.generic as g
+                                assert g.name == "List", "expected 'List'"
+                                assert g.args.len == 1, "expected 1 type arg"
+                                branch g.args.at(0)
+                                    on TypeRef.named as nr
+                                        assert nr.name == "str", "expected 'str' arg"
+                                    else
+                                        assert false, "expected named type arg"
+                            else
+                                assert false, "expected generic TypeRef"
+                    else
+                        assert false, "expected var_ decl"
+            else
+                assert false, "expected class_ decl"
+        print "testParseTypeRefGeneric: OK"
+
+    # -- Phase 10 tests: ^Expr? fields now populated (TypeChecker fix) -----------
+
+    # StmtReturn.value: ^Expr? should carry the return expression.
+    def testReturnValue() throws
+        const src = "class Foo\n    def bar() as int\n        return 42\n"
+        const s = .firstMethodStmt(src)?
+        branch s
+            on Stmt.return_ as sr
+                # value is ?^Expr — check it is not nil by inspecting via a helper
+                assert sr.value != nil, "return value should not be nil"
+            else
+                assert false, "expected return_ stmt"
+        print "testReturnValue: OK"
+
+    # DeclVar.init_expr: ^Expr? should carry the initializer expression.
+    def testVarInit() throws
+        const src = "class Foo\n    def bar()\n        var x = 10\n"
+        const s = .firstMethodStmt(src)?
+        branch s
+            on Stmt.var_ as v
+                assert v.init_expr != nil, "var init_expr should not be nil"
+            else
+                assert false, "expected var_ stmt"
+        print "testVarInit: OK"
+
+    # StmtAssert.message: ^Expr? should carry the message expression.
+    def testAssertMessage() throws
+        const src = "class Foo\n    def bar()\n        assert true, 'bad'\n"
+        const s = .firstMethodStmt(src)?
+        branch s
+            on Stmt.assert_ as sa
+                assert sa.message != nil, "assert message should not be nil"
+            else
+                assert false, "expected assert_ stmt"
+        print "testAssertMessage: OK"
+
+    # StmtRaise.message: ^Expr? should carry the message expression.
+    def testRaiseMessage() throws
+        const src = "class Foo\n    def bar() throws\n        raise 'oops'\n"
+        const s = .firstMethodStmt(src)?
+        branch s
+            on Stmt.raise_ as sr
+                assert sr.message != nil, "raise message should not be nil"
+            else
+                assert false, "expected raise_ stmt"
+        print "testRaiseMessage: OK"
+
+class Main
+    shared
+        def main
+            try
+                var t = ASTBuilderTest()
+                t.run()?
+            catch |e|
+                print "FAILED: " + e.message

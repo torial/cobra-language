@@ -1,5 +1,5 @@
 # Phase 3 test: Grammar / Parser
-# Self-hosting validation — verifies that parser.zbr produces correct PNode trees.
+# Self-hosting validation - verifies that parser.zbr produces correct PNode trees.
 #
 # Strategy: parse small, focused Zebra snippets and branch-dispatch on the
 # resulting PNode to verify structure. All assertions use `branch ... on variant`
@@ -23,7 +23,7 @@ class ParserTest
         .testVarStmt()
         print "parser_test: all assertions passed"
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    # -- Helpers ---------------------------------------------------------------
 
     def parseModule(src as str) as PNode throws
         return Parser.Parser.parse(src)
@@ -36,14 +36,15 @@ class ParserTest
             else
                 raise "expected module_, got something else"
 
-    # ── Tests ─────────────────────────────────────────────────────────────────
+    # -- Tests -----------------------------------------------------------------
 
     def testUseDecl() throws
         const decls = .moduleDecls("use Foo\n")
         assert decls.len == 1, "use: expected 1 decl, got " + decls.len.toString()
         branch decls.at(0)
-            on PNode.use_ as path
-                assert path == "Foo", "use: expected path 'Foo', got '" + path + "'"
+            on PNode.use_ as u
+                assert u.path == "Foo", "use: expected path 'Foo', got '" + u.path + "'"
+                assert u.exposed.len == 0, "use: expected 0 exposed"
             else
                 assert false, "use: expected use_ variant"
         print "testUseDecl: OK"
@@ -202,8 +203,8 @@ class ParserTest
         print "testExprComparison: OK"
 
     def testMethodCall() throws
-        # Parse `print x.toString()` — verifies it parses as stmt_expr.
-        # Note: cannot branch on the stmt_expr *payload* because that variant holds
+        # Parse `print x.toString()` - verifies it parses as stmt_print.
+        # Note: cannot branch on the stmt_print *payload* because that variant holds
         # ^PNode (heap pointer), and branching on a *PNode is not yet supported.
         # Verifying the stmt variant is sufficient for Phase 3 smoke-testing.
         const src = "class C\n    def show(x as int)\n        print x.toString()\n"
@@ -214,10 +215,10 @@ class ParserTest
                     on PNode.method_ as m
                         assert m.stmts.len == 1, "call: expected 1 stmt"
                         branch m.stmts.at(0)
-                            on PNode.stmt_expr
-                                pass  # confirmed: expression statement parsed correctly
+                            on PNode.stmt_print
+                                pass  # confirmed: print statement parsed correctly
                             else
-                                assert false, "call: expected stmt_expr"
+                                assert false, "call: expected stmt_print"
                     else
                         assert false, "call: expected method_"
             else

@@ -1508,7 +1508,8 @@ pub const ParserTest = struct {
         const root = try self.parseModule(src);
 // zbr:selfhost/parser_test.zbr:33
         switch (root) {
-            .module_ => |m| {
+            .module_ => |m_ptr| {
+                const m = m_ptr.*;
 // zbr:selfhost/parser_test.zbr:35
                 return m.decls;
             },
@@ -1530,103 +1531,112 @@ pub const ParserTest = struct {
         }
 // zbr:selfhost/parser_test.zbr:44
         switch (decls.items[@as(usize, @intCast(0))]) {
-            .use_ => |path| {
+            .use_ => |u_ptr| {
+                const u = u_ptr.*;
 // zbr:selfhost/parser_test.zbr:46
-                if (!(std.mem.eql(u8, path, "Foo"))) {
+                if (!(std.mem.eql(u8, u.path, "Foo"))) {
+                    std.debug.print("assertion failed\n", .{});
+                    unreachable;
+                }
+// zbr:selfhost/parser_test.zbr:47
+                if (!((@as(i64, @intCast(u.exposed.items.len)) == 0))) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
             },
             else => {
-// zbr:selfhost/parser_test.zbr:48
+// zbr:selfhost/parser_test.zbr:49
                 if (!(false)) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
             },
         }
-// zbr:selfhost/parser_test.zbr:49
+// zbr:selfhost/parser_test.zbr:50
         std.debug.print("{s}\n", .{"testUseDecl: OK"});
     }
 
     pub fn testEmptyClass(self: *ParserTest) anyerror!void {
-// zbr:selfhost/parser_test.zbr:52
-        const decls = try self.moduleDecls("class Empty\n");
 // zbr:selfhost/parser_test.zbr:53
+        const decls = try self.moduleDecls("class Empty\n");
+// zbr:selfhost/parser_test.zbr:54
         if (!((@as(i64, @intCast(decls.items.len)) == 1))) {
             std.debug.print("assertion failed\n", .{});
             unreachable;
         }
-// zbr:selfhost/parser_test.zbr:54
+// zbr:selfhost/parser_test.zbr:55
         switch (decls.items[@as(usize, @intCast(0))]) {
-            .class_ => |c| {
-// zbr:selfhost/parser_test.zbr:56
+            .class_ => |c_ptr| {
+                const c = c_ptr.*;
+// zbr:selfhost/parser_test.zbr:57
                 if (!(std.mem.eql(u8, c.name, "Empty"))) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
-// zbr:selfhost/parser_test.zbr:57
+// zbr:selfhost/parser_test.zbr:58
                 if (!((@as(i64, @intCast(c.members.items.len)) == 0))) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
             },
             else => {
-// zbr:selfhost/parser_test.zbr:59
+// zbr:selfhost/parser_test.zbr:60
                 if (!(false)) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
             },
         }
-// zbr:selfhost/parser_test.zbr:60
+// zbr:selfhost/parser_test.zbr:61
         std.debug.print("{s}\n", .{"testEmptyClass: OK"});
     }
 
     pub fn testClassWithField(self: *ParserTest) anyerror!void {
-// zbr:selfhost/parser_test.zbr:63
-        const src = "class Point\n    var x as int\n    var y as int\n";
 // zbr:selfhost/parser_test.zbr:64
-        const decls = try self.moduleDecls(src);
+        const src = "class Point\n    var x as int\n    var y as int\n";
 // zbr:selfhost/parser_test.zbr:65
+        const decls = try self.moduleDecls(src);
+// zbr:selfhost/parser_test.zbr:66
         if (!((@as(i64, @intCast(decls.items.len)) == 1))) {
             std.debug.print("assertion failed\n", .{});
             unreachable;
         }
-// zbr:selfhost/parser_test.zbr:66
+// zbr:selfhost/parser_test.zbr:67
         switch (decls.items[@as(usize, @intCast(0))]) {
-            .class_ => |c| {
-// zbr:selfhost/parser_test.zbr:68
+            .class_ => |c_ptr| {
+                const c = c_ptr.*;
+// zbr:selfhost/parser_test.zbr:69
                 if (!(std.mem.eql(u8, c.name, "Point"))) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
-// zbr:selfhost/parser_test.zbr:69
+// zbr:selfhost/parser_test.zbr:70
                 if (!((@as(i64, @intCast(c.members.items.len)) == 2))) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
-// zbr:selfhost/parser_test.zbr:70
+// zbr:selfhost/parser_test.zbr:71
                 switch (c.members.items[@as(usize, @intCast(0))]) {
-                    .field_ => |f| {
-// zbr:selfhost/parser_test.zbr:72
+                    .field_ => |f_ptr| {
+                        const f = f_ptr.*;
+// zbr:selfhost/parser_test.zbr:73
                         if (!(std.mem.eql(u8, f.name, "x"))) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
                         }
-// zbr:selfhost/parser_test.zbr:73
+// zbr:selfhost/parser_test.zbr:74
                         if (!(std.mem.eql(u8, f.type_name, "int"))) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
                         }
-// zbr:selfhost/parser_test.zbr:74
+// zbr:selfhost/parser_test.zbr:75
                         if (!((!f.is_const))) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
                         }
                     },
                     else => {
-// zbr:selfhost/parser_test.zbr:76
+// zbr:selfhost/parser_test.zbr:77
                         if (!(false)) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
@@ -1635,66 +1645,68 @@ pub const ParserTest = struct {
                 }
             },
             else => {
-// zbr:selfhost/parser_test.zbr:78
+// zbr:selfhost/parser_test.zbr:79
                 if (!(false)) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
             },
         }
-// zbr:selfhost/parser_test.zbr:79
+// zbr:selfhost/parser_test.zbr:80
         std.debug.print("{s}\n", .{"testClassWithField: OK"});
     }
 
     pub fn testClassWithMethod(self: *ParserTest) anyerror!void {
-// zbr:selfhost/parser_test.zbr:82
-        const src = "class Calc\n    def double(n as int) as int\n        return n\n";
 // zbr:selfhost/parser_test.zbr:83
-        const decls = try self.moduleDecls(src);
+        const src = "class Calc\n    def double(n as int) as int\n        return n\n";
 // zbr:selfhost/parser_test.zbr:84
+        const decls = try self.moduleDecls(src);
+// zbr:selfhost/parser_test.zbr:85
         if (!((@as(i64, @intCast(decls.items.len)) == 1))) {
             std.debug.print("assertion failed\n", .{});
             unreachable;
         }
-// zbr:selfhost/parser_test.zbr:85
+// zbr:selfhost/parser_test.zbr:86
         switch (decls.items[@as(usize, @intCast(0))]) {
-            .class_ => |c| {
-// zbr:selfhost/parser_test.zbr:87
+            .class_ => |c_ptr| {
+                const c = c_ptr.*;
+// zbr:selfhost/parser_test.zbr:88
                 if (!(std.mem.eql(u8, c.name, "Calc"))) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
-// zbr:selfhost/parser_test.zbr:88
+// zbr:selfhost/parser_test.zbr:89
                 if (!((@as(i64, @intCast(c.members.items.len)) == 1))) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
-// zbr:selfhost/parser_test.zbr:89
+// zbr:selfhost/parser_test.zbr:90
                 switch (c.members.items[@as(usize, @intCast(0))]) {
-                    .method_ => |m| {
-// zbr:selfhost/parser_test.zbr:91
+                    .method_ => |m_ptr| {
+                        const m = m_ptr.*;
+// zbr:selfhost/parser_test.zbr:92
                         if (!(std.mem.eql(u8, m.name, "double"))) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
                         }
-// zbr:selfhost/parser_test.zbr:92
+// zbr:selfhost/parser_test.zbr:93
                         if (!((!m.is_shared))) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
                         }
-// zbr:selfhost/parser_test.zbr:93
+// zbr:selfhost/parser_test.zbr:94
                         if (!((!m.throws_))) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
                         }
-// zbr:selfhost/parser_test.zbr:94
+// zbr:selfhost/parser_test.zbr:95
                         if (!((@as(i64, @intCast(m.stmts.items.len)) == 1))) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
                         }
                     },
                     else => {
-// zbr:selfhost/parser_test.zbr:96
+// zbr:selfhost/parser_test.zbr:97
                         if (!(false)) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
@@ -1703,52 +1715,55 @@ pub const ParserTest = struct {
                 }
             },
             else => {
-// zbr:selfhost/parser_test.zbr:98
+// zbr:selfhost/parser_test.zbr:99
                 if (!(false)) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
             },
         }
-// zbr:selfhost/parser_test.zbr:99
+// zbr:selfhost/parser_test.zbr:100
         std.debug.print("{s}\n", .{"testClassWithMethod: OK"});
     }
 
     pub fn testReturnStmt(self: *ParserTest) anyerror!void {
-// zbr:selfhost/parser_test.zbr:102
-        const src = "class R\n    def fetch() as int\n        return 42\n";
 // zbr:selfhost/parser_test.zbr:103
-        const decls = try self.moduleDecls(src);
+        const src = "class R\n    def fetch() as int\n        return 42\n";
 // zbr:selfhost/parser_test.zbr:104
+        const decls = try self.moduleDecls(src);
+// zbr:selfhost/parser_test.zbr:105
         switch (decls.items[@as(usize, @intCast(0))]) {
-            .class_ => |c| {
-// zbr:selfhost/parser_test.zbr:106
+            .class_ => |c_ptr| {
+                const c = c_ptr.*;
+// zbr:selfhost/parser_test.zbr:107
                 switch (c.members.items[@as(usize, @intCast(0))]) {
-                    .method_ => |m| {
-// zbr:selfhost/parser_test.zbr:108
+                    .method_ => |m_ptr| {
+                        const m = m_ptr.*;
+// zbr:selfhost/parser_test.zbr:109
                         if (!((@as(i64, @intCast(m.stmts.items.len)) == 1))) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
                         }
-// zbr:selfhost/parser_test.zbr:109
+// zbr:selfhost/parser_test.zbr:110
                         switch (m.stmts.items[@as(usize, @intCast(0))]) {
-                            .stmt_return => |ret| {
-// zbr:selfhost/parser_test.zbr:111
+                            .stmt_return => |ret_ptr| {
+                                const ret = ret_ptr.*;
+// zbr:selfhost/parser_test.zbr:112
                                 if (!((@as(i64, @intCast(ret.value.items.len)) == 1))) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
                                 }
-// zbr:selfhost/parser_test.zbr:112
+// zbr:selfhost/parser_test.zbr:113
                                 switch (ret.value.items[@as(usize, @intCast(0))]) {
                                     .expr_int => |text| {
-// zbr:selfhost/parser_test.zbr:114
+// zbr:selfhost/parser_test.zbr:115
                                         if (!(std.mem.eql(u8, text, "42"))) {
                                             std.debug.print("assertion failed\n", .{});
                                             unreachable;
                                         }
                                     },
                                     else => {
-// zbr:selfhost/parser_test.zbr:116
+// zbr:selfhost/parser_test.zbr:117
                                         if (!(false)) {
                                             std.debug.print("assertion failed\n", .{});
                                             unreachable;
@@ -1757,7 +1772,7 @@ pub const ParserTest = struct {
                                 }
                             },
                             else => {
-// zbr:selfhost/parser_test.zbr:118
+// zbr:selfhost/parser_test.zbr:119
                                 if (!(false)) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
@@ -1766,7 +1781,7 @@ pub const ParserTest = struct {
                         }
                     },
                     else => {
-// zbr:selfhost/parser_test.zbr:120
+// zbr:selfhost/parser_test.zbr:121
                         if (!(false)) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
@@ -1775,54 +1790,57 @@ pub const ParserTest = struct {
                 }
             },
             else => {
-// zbr:selfhost/parser_test.zbr:122
+// zbr:selfhost/parser_test.zbr:123
                 if (!(false)) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
             },
         }
-// zbr:selfhost/parser_test.zbr:123
+// zbr:selfhost/parser_test.zbr:124
         std.debug.print("{s}\n", .{"testReturnStmt: OK"});
     }
 
     pub fn testIfStmt(self: *ParserTest) anyerror!void {
-// zbr:selfhost/parser_test.zbr:126
-        const src = "class C\n    def check(x as int)\n        if x\n            pass\n";
 // zbr:selfhost/parser_test.zbr:127
-        const decls = try self.moduleDecls(src);
+        const src = "class C\n    def check(x as int)\n        if x\n            pass\n";
 // zbr:selfhost/parser_test.zbr:128
+        const decls = try self.moduleDecls(src);
+// zbr:selfhost/parser_test.zbr:129
         switch (decls.items[@as(usize, @intCast(0))]) {
-            .class_ => |c| {
-// zbr:selfhost/parser_test.zbr:130
+            .class_ => |c_ptr| {
+                const c = c_ptr.*;
+// zbr:selfhost/parser_test.zbr:131
                 switch (c.members.items[@as(usize, @intCast(0))]) {
-                    .method_ => |m| {
-// zbr:selfhost/parser_test.zbr:132
+                    .method_ => |m_ptr| {
+                        const m = m_ptr.*;
+// zbr:selfhost/parser_test.zbr:133
                         if (!((@as(i64, @intCast(m.stmts.items.len)) == 1))) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
                         }
-// zbr:selfhost/parser_test.zbr:133
+// zbr:selfhost/parser_test.zbr:134
                         switch (m.stmts.items[@as(usize, @intCast(0))]) {
-                            .stmt_if => |if_node| {
-// zbr:selfhost/parser_test.zbr:135
+                            .stmt_if => |if_node_ptr| {
+                                const if_node = if_node_ptr.*;
+// zbr:selfhost/parser_test.zbr:136
                                 if (!((@as(i64, @intCast(if_node.cond.items.len)) == 1))) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
                                 }
-// zbr:selfhost/parser_test.zbr:136
+// zbr:selfhost/parser_test.zbr:137
                                 if (!((@as(i64, @intCast(if_node.then_stmts.items.len)) == 1))) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
                                 }
-// zbr:selfhost/parser_test.zbr:137
+// zbr:selfhost/parser_test.zbr:138
                                 if (!((@as(i64, @intCast(if_node.else_stmts.items.len)) == 0))) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
                                 }
                             },
                             else => {
-// zbr:selfhost/parser_test.zbr:139
+// zbr:selfhost/parser_test.zbr:140
                                 if (!(false)) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
@@ -1831,7 +1849,7 @@ pub const ParserTest = struct {
                         }
                     },
                     else => {
-// zbr:selfhost/parser_test.zbr:141
+// zbr:selfhost/parser_test.zbr:142
                         if (!(false)) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
@@ -1840,77 +1858,81 @@ pub const ParserTest = struct {
                 }
             },
             else => {
-// zbr:selfhost/parser_test.zbr:143
+// zbr:selfhost/parser_test.zbr:144
                 if (!(false)) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
             },
         }
-// zbr:selfhost/parser_test.zbr:144
+// zbr:selfhost/parser_test.zbr:145
         std.debug.print("{s}\n", .{"testIfStmt: OK"});
     }
 
     pub fn testExprArith(self: *ParserTest) anyerror!void {
-// zbr:selfhost/parser_test.zbr:148
-        const src = "class E\n    def calc() as int\n        return 1 + 2\n";
 // zbr:selfhost/parser_test.zbr:149
-        const decls = try self.moduleDecls(src);
+        const src = "class E\n    def calc() as int\n        return 1 + 2\n";
 // zbr:selfhost/parser_test.zbr:150
+        const decls = try self.moduleDecls(src);
+// zbr:selfhost/parser_test.zbr:151
         switch (decls.items[@as(usize, @intCast(0))]) {
-            .class_ => |c| {
-// zbr:selfhost/parser_test.zbr:152
+            .class_ => |c_ptr| {
+                const c = c_ptr.*;
+// zbr:selfhost/parser_test.zbr:153
                 switch (c.members.items[@as(usize, @intCast(0))]) {
-                    .method_ => |m| {
-// zbr:selfhost/parser_test.zbr:154
+                    .method_ => |m_ptr| {
+                        const m = m_ptr.*;
+// zbr:selfhost/parser_test.zbr:155
                         switch (m.stmts.items[@as(usize, @intCast(0))]) {
-                            .stmt_return => |ret| {
-// zbr:selfhost/parser_test.zbr:156
+                            .stmt_return => |ret_ptr| {
+                                const ret = ret_ptr.*;
+// zbr:selfhost/parser_test.zbr:157
                                 switch (ret.value.items[@as(usize, @intCast(0))]) {
-                                    .expr_binary => |b| {
-// zbr:selfhost/parser_test.zbr:158
+                                    .expr_binary => |b_ptr| {
+                                        const b = b_ptr.*;
+// zbr:selfhost/parser_test.zbr:159
                                         if (!(std.mem.eql(u8, b.op, "+"))) {
                                             std.debug.print("assertion failed\n", .{});
                                             unreachable;
                                         }
-// zbr:selfhost/parser_test.zbr:159
+// zbr:selfhost/parser_test.zbr:160
                                         if (!((@as(i64, @intCast(b.left.items.len)) == 1))) {
                                             std.debug.print("assertion failed\n", .{});
                                             unreachable;
                                         }
-// zbr:selfhost/parser_test.zbr:160
+// zbr:selfhost/parser_test.zbr:161
                                         if (!((@as(i64, @intCast(b.right.items.len)) == 1))) {
                                             std.debug.print("assertion failed\n", .{});
                                             unreachable;
                                         }
-// zbr:selfhost/parser_test.zbr:161
+// zbr:selfhost/parser_test.zbr:162
                                         switch (b.left.items[@as(usize, @intCast(0))]) {
                                             .expr_int => |t| {
-// zbr:selfhost/parser_test.zbr:163
+// zbr:selfhost/parser_test.zbr:164
                                                 if (!(std.mem.eql(u8, t, "1"))) {
                                                     std.debug.print("assertion failed\n", .{});
                                                     unreachable;
                                                 }
                                             },
                                             else => {
-// zbr:selfhost/parser_test.zbr:165
+// zbr:selfhost/parser_test.zbr:166
                                                 if (!(false)) {
                                                     std.debug.print("assertion failed\n", .{});
                                                     unreachable;
                                                 }
                                             },
                                         }
-// zbr:selfhost/parser_test.zbr:166
+// zbr:selfhost/parser_test.zbr:167
                                         switch (b.right.items[@as(usize, @intCast(0))]) {
                                             .expr_int => |t| {
-// zbr:selfhost/parser_test.zbr:168
+// zbr:selfhost/parser_test.zbr:169
                                                 if (!(std.mem.eql(u8, t, "2"))) {
                                                     std.debug.print("assertion failed\n", .{});
                                                     unreachable;
                                                 }
                                             },
                                             else => {
-// zbr:selfhost/parser_test.zbr:170
+// zbr:selfhost/parser_test.zbr:171
                                                 if (!(false)) {
                                                     std.debug.print("assertion failed\n", .{});
                                                     unreachable;
@@ -1919,7 +1941,7 @@ pub const ParserTest = struct {
                                         }
                                     },
                                     else => {
-// zbr:selfhost/parser_test.zbr:172
+// zbr:selfhost/parser_test.zbr:173
                                         if (!(false)) {
                                             std.debug.print("assertion failed\n", .{});
                                             unreachable;
@@ -1928,7 +1950,7 @@ pub const ParserTest = struct {
                                 }
                             },
                             else => {
-// zbr:selfhost/parser_test.zbr:174
+// zbr:selfhost/parser_test.zbr:175
                                 if (!(false)) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
@@ -1937,7 +1959,7 @@ pub const ParserTest = struct {
                         }
                     },
                     else => {
-// zbr:selfhost/parser_test.zbr:176
+// zbr:selfhost/parser_test.zbr:177
                         if (!(false)) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
@@ -1946,42 +1968,46 @@ pub const ParserTest = struct {
                 }
             },
             else => {
-// zbr:selfhost/parser_test.zbr:178
+// zbr:selfhost/parser_test.zbr:179
                 if (!(false)) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
             },
         }
-// zbr:selfhost/parser_test.zbr:179
+// zbr:selfhost/parser_test.zbr:180
         std.debug.print("{s}\n", .{"testExprArith: OK"});
     }
 
     pub fn testExprComparison(self: *ParserTest) anyerror!void {
-// zbr:selfhost/parser_test.zbr:183
-        const src = "class C\n    def check(x as int) as bool\n        return x == 0\n";
 // zbr:selfhost/parser_test.zbr:184
-        const decls = try self.moduleDecls(src);
+        const src = "class C\n    def check(x as int) as bool\n        return x == 0\n";
 // zbr:selfhost/parser_test.zbr:185
+        const decls = try self.moduleDecls(src);
+// zbr:selfhost/parser_test.zbr:186
         switch (decls.items[@as(usize, @intCast(0))]) {
-            .class_ => |c| {
-// zbr:selfhost/parser_test.zbr:187
+            .class_ => |c_ptr| {
+                const c = c_ptr.*;
+// zbr:selfhost/parser_test.zbr:188
                 switch (c.members.items[@as(usize, @intCast(0))]) {
-                    .method_ => |m| {
-// zbr:selfhost/parser_test.zbr:189
+                    .method_ => |m_ptr| {
+                        const m = m_ptr.*;
+// zbr:selfhost/parser_test.zbr:190
                         switch (m.stmts.items[@as(usize, @intCast(0))]) {
-                            .stmt_return => |ret| {
-// zbr:selfhost/parser_test.zbr:191
+                            .stmt_return => |ret_ptr| {
+                                const ret = ret_ptr.*;
+// zbr:selfhost/parser_test.zbr:192
                                 switch (ret.value.items[@as(usize, @intCast(0))]) {
-                                    .expr_binary => |b| {
-// zbr:selfhost/parser_test.zbr:193
+                                    .expr_binary => |b_ptr| {
+                                        const b = b_ptr.*;
+// zbr:selfhost/parser_test.zbr:194
                                         if (!(std.mem.eql(u8, b.op, "=="))) {
                                             std.debug.print("assertion failed\n", .{});
                                             unreachable;
                                         }
                                     },
                                     else => {
-// zbr:selfhost/parser_test.zbr:195
+// zbr:selfhost/parser_test.zbr:196
                                         if (!(false)) {
                                             std.debug.print("assertion failed\n", .{});
                                             unreachable;
@@ -1990,7 +2016,7 @@ pub const ParserTest = struct {
                                 }
                             },
                             else => {
-// zbr:selfhost/parser_test.zbr:197
+// zbr:selfhost/parser_test.zbr:198
                                 if (!(false)) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
@@ -1999,7 +2025,7 @@ pub const ParserTest = struct {
                         }
                     },
                     else => {
-// zbr:selfhost/parser_test.zbr:199
+// zbr:selfhost/parser_test.zbr:200
                         if (!(false)) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
@@ -2008,40 +2034,42 @@ pub const ParserTest = struct {
                 }
             },
             else => {
-// zbr:selfhost/parser_test.zbr:201
+// zbr:selfhost/parser_test.zbr:202
                 if (!(false)) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
             },
         }
-// zbr:selfhost/parser_test.zbr:202
+// zbr:selfhost/parser_test.zbr:203
         std.debug.print("{s}\n", .{"testExprComparison: OK"});
     }
 
     pub fn testMethodCall(self: *ParserTest) anyerror!void {
-// zbr:selfhost/parser_test.zbr:209
-        const src = "class C\n    def show(x as int)\n        print x.toString()\n";
 // zbr:selfhost/parser_test.zbr:210
-        const decls = try self.moduleDecls(src);
+        const src = "class C\n    def show(x as int)\n        print x.toString()\n";
 // zbr:selfhost/parser_test.zbr:211
+        const decls = try self.moduleDecls(src);
+// zbr:selfhost/parser_test.zbr:212
         switch (decls.items[@as(usize, @intCast(0))]) {
-            .class_ => |c| {
-// zbr:selfhost/parser_test.zbr:213
+            .class_ => |c_ptr| {
+                const c = c_ptr.*;
+// zbr:selfhost/parser_test.zbr:214
                 switch (c.members.items[@as(usize, @intCast(0))]) {
-                    .method_ => |m| {
-// zbr:selfhost/parser_test.zbr:215
+                    .method_ => |m_ptr| {
+                        const m = m_ptr.*;
+// zbr:selfhost/parser_test.zbr:216
                         if (!((@as(i64, @intCast(m.stmts.items.len)) == 1))) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
                         }
-// zbr:selfhost/parser_test.zbr:216
+// zbr:selfhost/parser_test.zbr:217
                         switch (m.stmts.items[@as(usize, @intCast(0))]) {
-                            .stmt_expr => {
+                            .stmt_print => {
                                 // pass
                             },
                             else => {
-// zbr:selfhost/parser_test.zbr:220
+// zbr:selfhost/parser_test.zbr:221
                                 if (!(false)) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
@@ -2050,7 +2078,7 @@ pub const ParserTest = struct {
                         }
                     },
                     else => {
-// zbr:selfhost/parser_test.zbr:222
+// zbr:selfhost/parser_test.zbr:223
                         if (!(false)) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
@@ -2059,67 +2087,70 @@ pub const ParserTest = struct {
                 }
             },
             else => {
-// zbr:selfhost/parser_test.zbr:224
+// zbr:selfhost/parser_test.zbr:225
                 if (!(false)) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
             },
         }
-// zbr:selfhost/parser_test.zbr:225
+// zbr:selfhost/parser_test.zbr:226
         std.debug.print("{s}\n", .{"testMethodCall: OK"});
     }
 
     pub fn testVarStmt(self: *ParserTest) anyerror!void {
-// zbr:selfhost/parser_test.zbr:229
-        const src = "class C\n    def init_count()\n        var count as int = 0\n";
 // zbr:selfhost/parser_test.zbr:230
-        const decls = try self.moduleDecls(src);
+        const src = "class C\n    def init_count()\n        var count as int = 0\n";
 // zbr:selfhost/parser_test.zbr:231
+        const decls = try self.moduleDecls(src);
+// zbr:selfhost/parser_test.zbr:232
         switch (decls.items[@as(usize, @intCast(0))]) {
-            .class_ => |c| {
-// zbr:selfhost/parser_test.zbr:233
+            .class_ => |c_ptr| {
+                const c = c_ptr.*;
+// zbr:selfhost/parser_test.zbr:234
                 switch (c.members.items[@as(usize, @intCast(0))]) {
-                    .method_ => |m| {
-// zbr:selfhost/parser_test.zbr:235
+                    .method_ => |m_ptr| {
+                        const m = m_ptr.*;
+// zbr:selfhost/parser_test.zbr:236
                         if (!((@as(i64, @intCast(m.stmts.items.len)) == 1))) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
                         }
-// zbr:selfhost/parser_test.zbr:236
+// zbr:selfhost/parser_test.zbr:237
                         switch (m.stmts.items[@as(usize, @intCast(0))]) {
-                            .stmt_var => |v| {
-// zbr:selfhost/parser_test.zbr:238
+                            .stmt_var => |v_ptr| {
+                                const v = v_ptr.*;
+// zbr:selfhost/parser_test.zbr:239
                                 if (!(std.mem.eql(u8, v.name, "count"))) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
                                 }
-// zbr:selfhost/parser_test.zbr:239
+// zbr:selfhost/parser_test.zbr:240
                                 if (!(std.mem.eql(u8, v.type_name, "int"))) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
                                 }
-// zbr:selfhost/parser_test.zbr:240
+// zbr:selfhost/parser_test.zbr:241
                                 if (!((!v.is_const))) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
                                 }
-// zbr:selfhost/parser_test.zbr:241
+// zbr:selfhost/parser_test.zbr:242
                                 if (!((@as(i64, @intCast(v.init_expr.items.len)) == 1))) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
                                 }
-// zbr:selfhost/parser_test.zbr:242
+// zbr:selfhost/parser_test.zbr:243
                                 switch (v.init_expr.items[@as(usize, @intCast(0))]) {
                                     .expr_int => |t| {
-// zbr:selfhost/parser_test.zbr:244
+// zbr:selfhost/parser_test.zbr:245
                                         if (!(std.mem.eql(u8, t, "0"))) {
                                             std.debug.print("assertion failed\n", .{});
                                             unreachable;
                                         }
                                     },
                                     else => {
-// zbr:selfhost/parser_test.zbr:246
+// zbr:selfhost/parser_test.zbr:247
                                         if (!(false)) {
                                             std.debug.print("assertion failed\n", .{});
                                             unreachable;
@@ -2128,7 +2159,7 @@ pub const ParserTest = struct {
                                 }
                             },
                             else => {
-// zbr:selfhost/parser_test.zbr:248
+// zbr:selfhost/parser_test.zbr:249
                                 if (!(false)) {
                                     std.debug.print("assertion failed\n", .{});
                                     unreachable;
@@ -2137,7 +2168,7 @@ pub const ParserTest = struct {
                         }
                     },
                     else => {
-// zbr:selfhost/parser_test.zbr:250
+// zbr:selfhost/parser_test.zbr:251
                         if (!(false)) {
                             std.debug.print("assertion failed\n", .{});
                             unreachable;
@@ -2146,19 +2177,19 @@ pub const ParserTest = struct {
                 }
             },
             else => {
-// zbr:selfhost/parser_test.zbr:252
+// zbr:selfhost/parser_test.zbr:253
                 if (!(false)) {
                     std.debug.print("assertion failed\n", .{});
                     unreachable;
                 }
             },
         }
-// zbr:selfhost/parser_test.zbr:253
+// zbr:selfhost/parser_test.zbr:254
         std.debug.print("{s}\n", .{"testVarStmt: OK"});
     }
 
-    pub fn init() ParserTest {
-        var self: ParserTest = undefined;
+    pub fn init() *ParserTest {
+        const self = _allocator.create(ParserTest) catch @panic("OOM");
         self._type_tag = _ttag_ParserTest;
         return self;
     }
@@ -2173,23 +2204,23 @@ const _reflect_ParserTest_field_types: []const []const u8 = &.{};
 pub const Main = struct {
     _type_tag: u64 = _ttag_Main,
     pub fn main() void {
-// zbr:selfhost/parser_test.zbr:258
-        var _try_err_61f0: ?anyerror = null;
-        _try_blk_61f0: {
 // zbr:selfhost/parser_test.zbr:259
-            var t = ParserTest.init();
+        var _try_err_5dd8: ?anyerror = null;
+        _try_blk_5dd8: {
 // zbr:selfhost/parser_test.zbr:260
-            t.run() catch |_tc_277bdb461b0| { _try_err_61f0 = _tc_277bdb461b0; break :_try_blk_61f0; };
-            break :_try_blk_61f0;
+            const t = ParserTest.init();
+// zbr:selfhost/parser_test.zbr:261
+            t.run() catch |_tc_20b80a75d98| { _try_err_5dd8 = _tc_20b80a75d98; break :_try_blk_5dd8; };
+            break :_try_blk_5dd8;
         }
-        if (_try_err_61f0 != null) {
-// zbr:selfhost/parser_test.zbr:262
+        if (_try_err_5dd8 != null) {
+// zbr:selfhost/parser_test.zbr:263
             std.debug.print("{s}\n", .{_str_concat("FAILED: ", _error_ctx.message, _allocator)});
         }
     }
 
-    pub fn init() Main {
-        var self: Main = undefined;
+    pub fn init() *Main {
+        const self = _allocator.create(Main) catch @panic("OOM");
         self._type_tag = _ttag_Main;
         return self;
     }

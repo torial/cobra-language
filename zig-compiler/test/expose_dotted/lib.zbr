@@ -1,0 +1,27 @@
+# expose_dotted.lib.zbr -- library module under a dotted (namespace) path.
+# Used by expose_dotted_test.zbr to verify that:
+#   use expose_dotted.lib exposing DottedLib
+#   DottedLib.greet()           # static method call via exposed class name
+#   DottedLib.makePoint()       # static method returning a user-defined type
+# all resolve correctly even though the module path has a dot.
+
+class DottedLib
+    shared
+        def greet() as str
+            return "hello from dotted lib"
+
+        def add(a as int, b as int) as int
+            return a + b
+
+        def makePoint() as Point
+            return Point(3, 4)
+
+struct Point
+    var x as int
+    var y as int
+    cue init(px as int, py as int)
+        x = px
+        y = py
+
+    def sum() as int
+        return x + y

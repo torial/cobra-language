@@ -1,0 +1,174 @@
+# pipeline_test.zbr — Phase 10/11: full selfhost pipeline integration test
+#
+# Exercises the complete Lex → Parse → ASTBuilder → CodeGen chain.
+# Phase 10: declarations only (generateModule)
+# Phase 11: complete Zig file (generateFull), entry point generation (generateEntryPoint),
+#           Resolver wiring, and round-trip compilation via zig run.
+
+use Parser exposing PNode
+use Resolver
+use astbuilder exposing ASTBuilder
+use codegen exposing generateModule, generateFull, generateEntryPoint
+
+def runPipeline(src as str) as str throws
+    const pm_node = Parser.Parser.parse(src)?
+    branch pm_node
+        on PNode.module_ as pm
+            const module = ASTBuilder.build(pm, "<test>")?
+            return generateModule(module, "<test>")
+        else
+            raise "expected module_ from parser"
+
+def runPipelineFull(src as str, preamble_path as str) as str throws
+    const pm_node = Parser.Parser.parse(src)?
+    branch pm_node
+        on PNode.module_ as pm
+            const module = ASTBuilder.build(pm, "<test>")?
+            return generateFull(module, "<test>", preamble_path)?
+        else
+            raise "expected module_ from parser"
+
+class PipelineTest
+    def run() throws
+        .testEmptyClass()
+        .testClassWithField()
+        .testMethodWithReturn()
+        .testVarWithInit()
+        .testEnumDecl()
+        .testEntryPointNonThrowing()
+        .testEntryPointThrowing()
+        .testEntryPointNoMain()
+        .testResolverClean()
+        .testResolverError()
+        .testFullRoundTrip()
+        print "pipeline_test: all OK"
+
+    # -- Phase 10: declarations-only tests -------------------------------------
+
+    def testEmptyClass() throws
+        const src = "class Foo\n"
+        const zig = runPipeline(src)?
+        assert zig.contains("pub const Foo"), "expected 'pub const Foo' in output"
+        assert zig.contains("_type_tag"), "expected _type_tag in class output"
+        print "testEmptyClass: OK"
+
+    def testClassWithField() throws
+        const src = "class Point\n    var x as int\n    var y as int\n"
+        const zig = runPipeline(src)?
+        assert zig.contains("pub const Point"), "expected Point struct"
+        assert zig.contains("x: i64"), "expected x: i64 field"
+        assert zig.contains("y: i64"), "expected y: i64 field"
+        print "testClassWithField: OK"
+
+    def testMethodWithReturn() throws
+        const src = "class Calc\n    def double(n as int) as int\n        return n\n"
+        const zig = runPipeline(src)?
+        assert zig.contains("pub fn double"), "expected pub fn double"
+        assert zig.contains("return"), "expected return in output"
+        print "testMethodWithReturn: OK"
+
+    def testVarWithInit() throws
+        const src = "class Counter\n    def reset()\n        var count = 0\n"
+        const zig = runPipeline(src)?
+        assert zig.contains("pub fn reset"), "expected pub fn reset"
+        assert zig.contains("count"), "expected count in output"
+        print "testVarWithInit: OK"
+
+    def testEnumDecl() throws
+        const src = "enum Color\n    red\n    green\n    blue\n"
+        const zig = runPipeline(src)?
+        assert zig.contains("pub const Color"), "expected pub const Color"
+        assert zig.contains("red"), "expected red variant"
+        assert zig.contains("blue"), "expected blue variant"
+        print "testEnumDecl: OK"
+
+    # -- Phase 11: entry point generation tests --------------------------------
+
+    def testEntryPointNonThrowing() throws
+        const src = "class Main\n    shared def main()\n        pass\n"
+        const pm_node = Parser.Parser.parse(src)?
+        branch pm_node
+            on PNode.module_ as pm
+                const module = ASTBuilder.build(pm, "<test>")?
+                var entry as str = generateEntryPoint(module)
+                assert "pub fn main()" in entry, "expected pub fn main()"
+                assert "_arena.allocator()" in entry, "expected allocator setup"
+                assert "Main.main()" in entry, "expected Main.main() call"
+                assert not ("catch" in entry), "non-throws main should not have catch"
+            else
+                raise "expected module"
+        print "testEntryPointNonThrowing: OK"
+
+    def testEntryPointThrowing() throws
+        const src = "class App\n    shared def main() throws\n        pass\n"
+        const pm_node = Parser.Parser.parse(src)?
+        branch pm_node
+            on PNode.module_ as pm
+                const module = ASTBuilder.build(pm, "<test>")?
+                var entry as str = generateEntryPoint(module)
+                assert "App.main() catch" in entry, "expected catch for throws main"
+                assert "ZebraError" in entry, "expected ZebraError handler"
+            else
+                raise "expected module"
+        print "testEntryPointThrowing: OK"
+
+    def testEntryPointNoMain() throws
+        const src = "class Util\n    def helper()\n        pass\n"
+        const pm_node = Parser.Parser.parse(src)?
+        branch pm_node
+            on PNode.module_ as pm
+                const module = ASTBuilder.build(pm, "<test>")?
+                var entry as str = generateEntryPoint(module)
+                assert entry == "", "no entry point for class without shared main"
+            else
+                raise "expected module"
+        print "testEntryPointNoMain: OK"
+
+    # -- Phase 11: Resolver wiring tests ---------------------------------------
+
+    def testResolverClean() throws
+        const src = "class Adder\n    def add(a as int, b as int) as int\n        return a\n"
+        const pm_node = Parser.Parser.parse(src)?
+        var resolver = Resolver.Resolver()
+        resolver.resolve(pm_node)?
+        assert resolver.errorCount() == 0, "clean program should have 0 resolver errors"
+        print "testResolverClean: OK"
+
+    def testResolverError() throws
+        # 'undeclaredVar' is not declared — resolver should catch it
+        const src = "class Broken\n    def bad()\n        print undeclaredVar\n"
+        const pm_node = Parser.Parser.parse(src)?
+        var resolver = Resolver.Resolver()
+        resolver.resolve(pm_node)?
+        assert resolver.errorCount() > 0, "expected resolver error for undeclared name"
+        print "testResolverError: OK"
+
+    # -- Phase 11: full round-trip test ----------------------------------------
+    # Generates a complete Zig file and verifies it has all three parts:
+    # preamble, declarations, entry thunk.
+
+    def testFullRoundTrip() throws
+        const preamble_path = "selfhost/stdlib_preamble.zig"
+        if not File.exists(preamble_path)
+            print "testFullRoundTrip: SKIP (preamble file not found at " + preamble_path + ")"
+            return
+        const src = "class Main\n    shared def main()\n        pass\n"
+        const zig = runPipelineFull(src, preamble_path)?
+        # Verify preamble section
+        assert zig.contains("const std"), "expected preamble std import"
+        assert zig.contains("_arena"), "expected arena allocator in preamble"
+        # Verify declarations section
+        assert zig.contains("pub const Main"), "expected Main class declaration"
+        # Verify entry point section
+        assert zig.contains("pub fn main()"), "expected entry thunk"
+        assert zig.contains("Main.main()"), "expected Main.main() call in entry"
+        print "testFullRoundTrip: OK"
+
+class Main
+    shared
+        def main
+            try
+                var t = PipelineTest()
+                t.run()?
+            catch |e|
+                print "FAILED: " + e.message

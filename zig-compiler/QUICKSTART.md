@@ -601,19 +601,26 @@ def rawMemset(ptr as uint, size as uint)
    use ast exposing Decl, DeclEnum, DeclUnion, DeclStruct, TypeRef
    ```
 
-4. **`List(T)()` not `List(T)` — always call the constructor:**
+4. **Method-body locals: `List(T)()` required — call the constructor:**
    ```zebra
-   var items = List(int)()    # correct
-   var items as List(int)     # declaration only (no init — error for collections)
+   def foo()
+       var items = List(int)()    # correct — init required for locals
+       var items as List(int)     # ERROR — collection locals must be initialized
    ```
 
-5. **Class fields initialized in `cue init`, not at declaration:**
+5. **Struct/class FIELD declarations use `as List(T)` (no init) — init goes in `cue init`:**
    ```zebra
    class Foo
-       var items as List(int)    # no = here
+       var items as List(int)    # correct — field declaration, no init here
        cue init()
-           items = List(int)()   # init here
+           items = List(int)()   # init here (or receive via param and assign)
+
+   struct Bar
+       var parts as List(str)    # correct — struct field
+       cue init(parts as List(str))
+           this.parts = parts
    ```
+   The rule: `var X = List(T)()` is for **method bodies**. `var X as List(T)` is for **field declarations**.
 
 6. **`StringBuilder` field → use `= StringBuilder()` in cue init:**
    The compiler special-cases `StringBuilder()` to emit `std.ArrayList(u8){}`.
