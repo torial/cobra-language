@@ -4,3 +4,7 @@ zig-out/
 *.pdb
 *.lib
 *.dll
+
+# Selfhost debug/temp artifacts
+selfhost/*_err.txt
+selfhost/codegen_roundtrip.zig
