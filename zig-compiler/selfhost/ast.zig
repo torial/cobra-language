@@ -2633,12 +2633,14 @@ pub const ExprLambda = struct {
     params: std.ArrayList(Param),
     return_type: ?TypeRef,
     body_: LambdaBody,
-    pub fn init(span: Span, params: std.ArrayList(Param), return_type: ?TypeRef, body_: LambdaBody) ExprLambda {
+    captures: std.ArrayList(DeclVar),
+    pub fn init(span: Span, params: std.ArrayList(Param), return_type: ?TypeRef, body_: LambdaBody, captures: std.ArrayList(DeclVar)) ExprLambda {
         var _self: ExprLambda = undefined;
             _self.span = span;
             _self.params = params;
             _self.return_type = return_type;
             _self.body_ = body_;
+            _self.captures = captures;
         return _self;
     }
 

@@ -2057,7 +2057,7 @@ pub const Resolver = struct {
             return true;
         }
 // zbr:selfhost\Resolver.zbr:336
-        if (((std.mem.eql(u8, name, "Regex") or std.mem.eql(u8, name, "Gui")) or std.mem.eql(u8, name, "DateTime"))) {
+        if ((((std.mem.eql(u8, name, "Regex") or std.mem.eql(u8, name, "Gui")) or std.mem.eql(u8, name, "DateTime")) or std.mem.eql(u8, name, "Reflect"))) {
 // zbr:selfhost\Resolver.zbr:337
             return true;
         }

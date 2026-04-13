@@ -1868,7 +1868,7 @@ pub const Main = struct {
 // zbr:selfhost/pipeline_test.zbr:171
             const t = PipelineTest.init();
 // zbr:selfhost/pipeline_test.zbr:172
-            t.run() catch |_tc_1fa66ef1378| { _try_err_13b8 = _tc_1fa66ef1378; break :_try_blk_13b8; };
+            t.run() catch |_tc_2096ec51378| { _try_err_13b8 = _tc_2096ec51378; break :_try_blk_13b8; };
             break :_try_blk_13b8;
         }
         if (_try_err_13b8 != null) {

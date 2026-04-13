@@ -1151,3 +1151,72 @@ Zig backend tests:     ALL  PASS (zig build test clean)
 Round-trip errors:     5 →  0  ✅  ZERO ERRORS
 Total bugs fixed:      ~103+ (cumulative across all phases)
 ```
+
+---
+
+## Phase 15: Reflect + Lambda Capture (2026-04-13)
+
+**Goal:** Implement the two remaining blocked features from the gap audit — `Reflect` runtime metadata and lambda `capture` blocks.
+
+### Part A: Reflect — Runtime dispatch via `_type_tag`
+
+The Zig compiler resolves `Reflect.className(obj)` at compile time using the TypeChecker. The selfhost has no TC. Solution: **runtime dispatch** via the existing `_type_tag` field every class already has.
+
+**Pattern:**
+```zig
+// Per-class metadata (emitted in genClass):
+const _reflect_Product_name: []const u8 = "Product";
+const _reflect_Product_fields: []const []const u8 = &.{"name", "price", "qty"};
+const _reflect_Product_field_types: []const []const u8 = &.{"str", "float", "int"};
+
+// Module-level lookup (dispatches on _type_tag):
+fn _reflect_lookup_name(tag: u64) []const u8 { ... }
+fn _reflect_lookup_fields(tag: u64) _ReflectStrSlice { ... }
+fn _reflect_lookup_field_types(tag: u64) _ReflectStrSlice { ... }
+```
+
+**Key design decision:** Used `_ReflectStrSlice` wrapper struct with `.items` field so that existing `.count()` → `.items.len` and `.at(i)` → `.items[@intCast(i)]` codegen patterns work without modification. The Zig compiler uses raw slices and knows the types via the TC — we bridge the gap with a thin struct wrapper.
+
+**Files changed:** `codegen.zbr` (typeRefStr helper, genClass metadata, module-level lookup functions, genReflectCall), `resolver.zbr` (add `Reflect` to builtins), `parser.zbr` (add `fractional_lit` + `float_lit_exp` to isFloatLit).
+
+### Part B: Lambda Capture
+
+**AST:** Added `captures as List(DeclVar)` to `ExprLambda` (used `List(DeclVar)` instead of `List(^DeclVar)` to avoid Zebra auto-boxing limitations).
+
+**Parser:** Added `PLambda`, `PCaptureVar` structs, `parseLambdaExpr()` for expression-body, and capture block parsing in `parseVarStmt()`. The `def(` prefix is unambiguous — method definitions only appear in class/struct members.
+
+**ASTBuilder:** Added `buildLambdaExpr` that converts `PLambda` → `ExprLambda`, building params, captures, and body.
+
+**Codegen:**
+- `capture_fields` StrSet: inside lambda body, captured var names emit `self.name`
+- `closure_vars` StrSet: at call sites, closure vars emit `name.call(args)`
+- `genLambda`: full rewrite — captureless emits `.call` suffix (fn pointer), capture emits struct with fields + `self: @This()` parameter + initializer
+
+### Bugs found and fixed
+
+1. **`Param.init` signature mismatch** — astbuilder passed `Modifiers` as `ParamMode`; fixed to `ParamMode.normal`
+2. **`Modifiers()` needs 6 args** — used bare constructor instead of `zmods()` helper
+3. **`List(^DeclVar)` auto-boxing** — Zebra doesn't auto-box values when adding to `List(^T)`; changed AST to `List(DeclVar)`
+4. **Chained method on temporary** — `asMethod().withCaptureFields(cf)` fails in Zig (const pointer); split into two vars
+5. **`fractional_lit` token unhandled** — lexer emits `fractional_lit` for `9.99` but parser only checked `float_lit`; added `fractional_lit` + `float_lit_exp`
+6. **`Reflect` not in resolver builtins** — added to `isBuiltin()` check
+7. **String-init vars not tracked** — `var joined = ""` not recognized as string for `_str_concat`; added `isStringExpr` check on init exprs
+8. **`^Expr?` deref in capture init** — avoided helper function entirely, inlined `cv.name` at call sites
+
+### Zebra vs Zig observations
+
+**Auto-boxing gap:** Zebra's auto-boxing (value → heap pointer) works for function parameters but NOT for `List.add()`. When `List(^T).add(val)` where `val` is `T`, the generated Zig tries to append a value where a pointer is expected. The Zig compiler's codegen handles this explicitly. Workaround: use `List(T)` instead of `List(^T)` when building values locally.
+
+**Method chaining on temporaries:** `a().b()` where `b` takes `*Self` fails in Zig because `a()` returns a value (const). The Zig compiler's codegen doesn't chain methods this way. Workaround: `var tmp = a(); tmp.b()`.
+
+**Token kind taxonomy:** The lexer distinguishes `float_lit` (suffixed: `1.0f32`), `fractional_lit` (unsuffixed: `9.99`), and `float_lit_exp` (exponential). The parser needs to check all three for float literal detection.
+
+### Results
+
+```
+Selfhost test suites:  10/10 codegen + 11/11 pipeline = ALL PASS
+Reflect test:          PASS (both Zig compiler and selfhost)
+Capture test:          PASS (both Zig compiler and selfhost)
+Round-trip:            PASS (selfhost compiles own codegen.zbr)
+Bugs fixed this phase: ~8 (~111+ total)
+```

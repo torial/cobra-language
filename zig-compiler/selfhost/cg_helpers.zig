@@ -1529,6 +1529,9 @@ pub const StrSet = struct {
 
 };
 const _ttag_StrSet: u64 = _zbr_hash("StrSet");
+const _reflect_StrSet_name: []const u8 = "StrSet";
+const _reflect_StrSet_fields: []const []const u8 = &.{"_items"};
+const _reflect_StrSet_field_types: []const []const u8 = &.{"List(str)"};
 
 pub fn assignOpStr(op: AssignOp) []const u8 {
     switch (op) {
@@ -1743,7 +1746,7 @@ pub fn exprHasTry(expr: Expr) bool {
         },
         .to_nilable => |_ptr_t| {
             const t = _ptr_t.*;
-            return exprHasTry(t.expr);
+            return exprHasTry(t.expr.*);
         },
         .to_non_nil => |_ptr_t| {
             const t = _ptr_t.*;
@@ -1762,13 +1765,13 @@ pub fn exprHasTry(expr: Expr) bool {
         },
         .if_expr => |_ptr_i| {
             const i = _ptr_i.*;
-            if (exprHasTry(i.cond)) {
+            if (exprHasTry(i.cond.*)) {
                 return true;
             }
-            if (exprHasTry(i.then_expr)) {
+            if (exprHasTry(i.then_expr.*)) {
                 return true;
             }
-            return exprHasTry(i.else_expr);
+            return exprHasTry(i.else_expr.*);
         },
         .string_interp => |_ptr_si| {
             const si = _ptr_si.*;
@@ -1797,10 +1800,10 @@ pub fn exprHasTry(expr: Expr) bool {
         .dict_lit => |_ptr_d| {
             const d = _ptr_d.*;
             for (d.entries.items) |entry| {
-                if (exprHasTry(entry.key)) {
+                if (exprHasTry(entry.key.*)) {
                     return true;
                 }
-                if (exprHasTry(entry.value)) {
+                if (exprHasTry(entry.value.*)) {
                     return true;
                 }
             }
@@ -1821,7 +1824,7 @@ pub fn bodyHasRaise(stmts: std.ArrayList(Stmt)) bool {
             .var_ => |_ptr_n| {
                 const n = _ptr_n.*;
                 if ((n.init_expr != null)) {
-                    if (exprHasTry(n.init_expr.?)) {
+                    if (exprHasTry(n.init_expr.?.*)) {
                         return true;
                     }
                 }
@@ -2078,13 +2081,13 @@ pub fn nameUsedInExpr(name: []const u8, expr: Expr) bool {
         },
         .if_expr => |_ptr_i| {
             const i = _ptr_i.*;
-            if (nameUsedInExpr(name, i.cond)) {
+            if (nameUsedInExpr(name, i.cond.*)) {
                 return true;
             }
-            if (nameUsedInExpr(name, i.then_expr)) {
+            if (nameUsedInExpr(name, i.then_expr.*)) {
                 return true;
             }
-            return nameUsedInExpr(name, i.else_expr);
+            return nameUsedInExpr(name, i.else_expr.*);
         },
         .to_nilable => |_ptr_t| {
             const t = _ptr_t.*;
@@ -2108,10 +2111,10 @@ pub fn nameUsedInExpr(name: []const u8, expr: Expr) bool {
         .dict_lit => |_ptr_d| {
             const d = _ptr_d.*;
             for (d.entries.items) |entry| {
-                if (nameUsedInExpr(name, entry.key)) {
+                if (nameUsedInExpr(name, entry.key.*)) {
                     return true;
                 }
-                if (nameUsedInExpr(name, entry.value)) {
+                if (nameUsedInExpr(name, entry.value.*)) {
                     return true;
                 }
             }
@@ -2173,7 +2176,7 @@ pub fn nameUsedInStmt(name: []const u8, stmt: Stmt) bool {
         .var_ => |_ptr_n| {
             const n = _ptr_n.*;
             if ((n.init_expr != null)) {
-                return nameUsedInExpr(name, n.init_expr.?);
+                return nameUsedInExpr(name, n.init_expr.?.*);
             }
             return false;
         },
@@ -2374,9 +2377,9 @@ pub fn collectAllIdents(expr: Expr, out: *StrSet) void {
         },
         .if_expr => |_ptr_i| {
             const i = _ptr_i.*;
-            collectAllIdents(i.cond, out);
-            collectAllIdents(i.then_expr, out);
-            collectAllIdents(i.else_expr, out);
+            collectAllIdents(i.cond.*, out);
+            collectAllIdents(i.then_expr.*, out);
+            collectAllIdents(i.else_expr.*, out);
         },
         .cast => |_ptr_c| {
             const c = _ptr_c.*;
@@ -2392,8 +2395,8 @@ pub fn collectAllIdents(expr: Expr, out: *StrSet) void {
         .dict_lit => |_ptr_d| {
             const d = _ptr_d.*;
             for (d.entries.items) |entry| {
-                collectAllIdents(entry.key, out);
-                collectAllIdents(entry.value, out);
+                collectAllIdents(entry.key.*, out);
+                collectAllIdents(entry.value.*, out);
             }
         },
         .string_interp => |_ptr_si| {
@@ -2495,9 +2498,9 @@ pub fn propagateEscapesOnce(stmts: std.ArrayList(Stmt), out: *StrSet) bool {
                 const n = _ptr_n.*;
                 if (out.contains_(n.name)) {
                     if ((n.init_expr != null)) {
-                        const before = @as(i64, @intCast(out.items.len));
-                        collectAllIdents(n.init_expr.?, out);
-                        if ((@as(i64, @intCast(out.items.len)) > before)) {
+                        const before = @as(i64, @intCast(out.count()));
+                        collectAllIdents(n.init_expr.?.*, out);
+                        if ((@as(i64, @intCast(out.count())) > before)) {
                             grew = true;
                         }
                     }
@@ -2511,9 +2514,9 @@ pub fn propagateEscapesOnce(stmts: std.ArrayList(Stmt), out: *StrSet) bool {
                         switch (m.object.*) {
                             .ident => |id| {
                                 if (out.contains_(id.name)) {
-                                    const before2 = @as(i64, @intCast(out.items.len));
+                                    const before2 = @as(i64, @intCast(out.count()));
                                     collectAllIdents(a.value.*, out);
-                                    if ((@as(i64, @intCast(out.items.len)) > before2)) {
+                                    if ((@as(i64, @intCast(out.count())) > before2)) {
                                         grew = true;
                                     }
                                 }
@@ -2695,9 +2698,9 @@ pub fn scanMutationsInExpr(expr: Expr, out: *StrSet) void {
         },
         .if_expr => |_ptr_i| {
             const i = _ptr_i.*;
-            scanMutationsInExpr(i.cond, out);
-            scanMutationsInExpr(i.then_expr, out);
-            scanMutationsInExpr(i.else_expr, out);
+            scanMutationsInExpr(i.cond.*, out);
+            scanMutationsInExpr(i.then_expr.*, out);
+            scanMutationsInExpr(i.else_expr.*, out);
         },
         .orelse_ => |_ptr_o| {
             const o = _ptr_o.*;
@@ -2712,8 +2715,8 @@ pub fn scanMutationsInExpr(expr: Expr, out: *StrSet) void {
         .dict_lit => |_ptr_d| {
             const d = _ptr_d.*;
             for (d.entries.items) |entry| {
-                scanMutationsInExpr(entry.key, out);
-                scanMutationsInExpr(entry.value, out);
+                scanMutationsInExpr(entry.key.*, out);
+                scanMutationsInExpr(entry.value.*, out);
             }
         },
         .string_interp => |_ptr_si| {
@@ -2795,7 +2798,7 @@ pub fn scanMutationsInto(stmts: std.ArrayList(Stmt), out: *StrSet) void {
             .var_ => |_ptr_n| {
                 const n = _ptr_n.*;
                 if ((n.init_expr != null)) {
-                    scanMutationsInExpr(n.init_expr.?, out);
+                    scanMutationsInExpr(n.init_expr.?.*, out);
                 }
             },
             .return_ => |_ptr_r| {
@@ -2860,3 +2863,16 @@ pub fn scanMutations(stmts: std.ArrayList(Stmt)) *StrSet {
     return out;
 }
 
+const _ReflectStrSlice = struct { items: []const []const u8, fn count(self: @This()) i64 { return @intCast(self.items.len); } fn at(self: @This(), i: i64) []const u8 { return self.items[@intCast(i)]; } };
+fn _reflect_lookup_name(tag: u64) []const u8 {
+    if (tag == _ttag_StrSet) return _reflect_StrSet_name;
+    return "unknown";
+}
+fn _reflect_lookup_fields(tag: u64) _ReflectStrSlice {
+    if (tag == _ttag_StrSet) return .{ .items = _reflect_StrSet_fields };
+    return .{ .items = &.{} };
+}
+fn _reflect_lookup_field_types(tag: u64) _ReflectStrSlice {
+    if (tag == _ttag_StrSet) return .{ .items = _reflect_StrSet_field_types };
+    return .{ .items = &.{} };
+}

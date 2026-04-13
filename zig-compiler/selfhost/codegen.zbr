@@ -628,6 +628,35 @@ def bodyMentionsThis(stmts as List(Stmt)) as bool
 #   var zig_src = generateFull(module, path, "selfhost/stdlib_preamble.zig")?
 #   File.write(zig_path, zig_src)
 
+def typeRefStr(tr as TypeRef) as str
+    branch tr
+        on TypeRef.named as n
+            return n.name
+        on TypeRef.nilable as inner
+            return "?" + typeRefStr(inner)
+        on TypeRef.error_union as inner
+            return "!" + typeRefStr(inner)
+        on TypeRef.ref_to as inner
+            return "^" + typeRefStr(inner)
+        on TypeRef.stream as inner
+            return typeRefStr(inner) + "*"
+        on TypeRef.generic as g
+            var s = g.name + "("
+            var i = 0
+            while i < g.args.len
+                if i > 0
+                    s = s + ", "
+                s = s + typeRefStr(g.args.at(i))
+                i = i + 1
+            return s + ")"
+        on TypeRef.void_
+            return "void"
+        on TypeRef.same_
+            return "same"
+        on TypeRef.tuple
+            return "tuple"
+    return "unknown"
+
 def generateModule(m as Module, file as str) as str
     return generateModuleWith(m, file, List(str)())
 
@@ -705,6 +734,47 @@ def generateModuleWith(m as Module, file as str, extra_class_names as List(str))
                 g.genExtend(ext)
             else
                 pass
+    # Emit Reflect runtime lookup functions
+    var reflect_classes = List(str)()
+    for decl in m.decls
+        branch decl
+            on Decl.class_ as rc
+                reflect_classes.add(rc.name)
+            else
+                pass
+    if reflect_classes.len > 0
+        # Emit a wrapper struct so that reflect slices work with .items.len and .items[i]
+        w.emit("const _ReflectStrSlice = struct { items: []const []const u8, fn count(self: @This()) i64 { return @intCast(self.items.len); } fn at(self: @This(), i: i64) []const u8 { return self.items[@intCast(i)]; } };\n")
+        w.emit("fn _reflect_lookup_name(tag: u64) []const u8 {\n")
+        var ri2 = 0
+        while ri2 < reflect_classes.len
+            w.emit("    if (tag == _ttag_")
+            w.emit(reflect_classes.at(ri2))
+            w.emit(") return _reflect_")
+            w.emit(reflect_classes.at(ri2))
+            w.emit("_name;\n")
+            ri2 = ri2 + 1
+        w.emit("    return \"unknown\";\n}\n")
+        w.emit("fn _reflect_lookup_fields(tag: u64) _ReflectStrSlice {\n")
+        ri2 = 0
+        while ri2 < reflect_classes.len
+            w.emit("    if (tag == _ttag_")
+            w.emit(reflect_classes.at(ri2))
+            w.emit(") return .{ .items = _reflect_")
+            w.emit(reflect_classes.at(ri2))
+            w.emit("_fields };\n")
+            ri2 = ri2 + 1
+        w.emit("    return .{ .items = &.{} };\n}\n")
+        w.emit("fn _reflect_lookup_field_types(tag: u64) _ReflectStrSlice {\n")
+        ri2 = 0
+        while ri2 < reflect_classes.len
+            w.emit("    if (tag == _ttag_")
+            w.emit(reflect_classes.at(ri2))
+            w.emit(") return .{ .items = _reflect_")
+            w.emit(reflect_classes.at(ri2))
+            w.emit("_field_types };\n")
+            ri2 = ri2 + 1
+        w.emit("    return .{ .items = &.{} };\n}\n")
     return w.result()
 
 # ── Entry point thunk ─────────────────────────────────────────────────────────
@@ -884,6 +954,8 @@ struct Generator
     var for_loop_vars         as StrSet   # active for-loop variable names (suppress stale branch deref)
     var in_try_expr           as bool     # suppress auto-try when already inside Expr.try_
     var self_name             as str      # "self" for methods, "_self" for init
+    var capture_fields        as StrSet   # captured var names → emit self.name in genIdent
+    var closure_vars          as StrSet   # local vars holding capture-lambdas → .call() dispatch
 
     cue init(w as Writer, indent as int, owner as str, in_method as bool,
              is_struct_owner as bool, is_generic as bool,
@@ -923,6 +995,8 @@ struct Generator
         this.for_loop_vars         = StrSet()
         this.in_try_expr           = false
         this.self_name             = "self"
+        this.capture_fields        = StrSet()
+        this.closure_vars          = StrSet()
 
     # ── Context-adjustment helpers ────────────────────────────────────────────
 
@@ -960,6 +1034,11 @@ struct Generator
     def withCatchVar(name as str) as Generator
         var g = this except
             catch_var = name
+        return g
+
+    def withCaptureFields(cf as StrSet) as Generator
+        var g = this except
+            capture_fields = cf
         return g
 
     # Phase 7b context helpers
@@ -1392,7 +1471,50 @@ struct Generator
         w.emit(n.name)
         w.emit(": u64 = _zbr_hash(\"")
         w.emit(n.name)
-        w.emit("\");\n\n")
+        w.emit("\");\n")
+        # Tier-1 reflection metadata
+        var rf_names = List(str)()
+        var rf_types = List(str)()
+        for decl in n.members
+            branch decl
+                on Decl.var_ as fld
+                    if not fld.mods.is_shared
+                        rf_names.add(fld.name)
+                        if fld.type_ != nil
+                            rf_types.add(typeRefStr(fld.type_ to!))
+                        else
+                            rf_types.add("unknown")
+                else
+                    pass
+        w.emit("const _reflect_")
+        w.emit(n.name)
+        w.emit("_name: []const u8 = \"")
+        w.emit(n.name)
+        w.emit("\";\n")
+        w.emit("const _reflect_")
+        w.emit(n.name)
+        w.emit("_fields: []const []const u8 = &.{")
+        var ri = 0
+        while ri < rf_names.len
+            if ri > 0
+                w.emit(", ")
+            w.emit("\"")
+            w.emit(rf_names.at(ri))
+            w.emit("\"")
+            ri = ri + 1
+        w.emit("};\n")
+        w.emit("const _reflect_")
+        w.emit(n.name)
+        w.emit("_field_types: []const []const u8 = &.{")
+        ri = 0
+        while ri < rf_types.len
+            if ri > 0
+                w.emit(", ")
+            w.emit("\"")
+            w.emit(rf_types.at(ri))
+            w.emit("\"")
+            ri = ri + 1
+        w.emit("};\n\n")
 
     # ── genMethod ─────────────────────────────────────────────────────────────
 
@@ -1785,6 +1907,18 @@ struct Generator
         if n.init_expr != nil
             if isStrSetCtor(n.init_expr to!)
                 strset_locals.add(n.name)
+        # Detect string vars from init expression (var x = "" or var x = "literal")
+        if n.init_expr != nil
+            if isStringExpr(n.init_expr to!)
+                str_params.add(n.name)
+        # Track capture-lambda vars for .call() dispatch at call sites
+        if n.init_expr != nil
+            branch n.init_expr to!
+                on Expr.lambda as lam
+                    if lam.captures.count() > 0
+                        closure_vars.add(n.name)
+                else
+                    pass
         # Special-case: StringBuilder() constructor
         if n.init_expr != nil
             var ie = n.init_expr to!
@@ -3059,6 +3193,10 @@ struct Generator
     # ── genIdent ──────────────────────────────────────────────────────────────
 
     def genIdent(id as ExprIdent)
+        if capture_fields.contains_(id.name)
+            w.emit("self.")
+            w.emit(id.name)
+            return
         if in_method and isFieldName(id.name)
             w.emit(self_name)
             w.emit(".")
@@ -3265,6 +3403,17 @@ struct Generator
     # ── genCall ───────────────────────────────────────────────────────────────
 
     def genCall(c as ExprCall)
+        # Closure vars: capture-lambda struct instances use .call()
+        branch c.callee
+            on Expr.ident as cid
+                if closure_vars.contains_(cid.name)
+                    w.emit(cid.name)
+                    w.emit(".call(")
+                    genArgList(c.args)
+                    w.emit(")")
+                    return
+            else
+                pass
         # Cross-module constructor: Module.ClassName(args) → ClassName.init(args)
         # When genUse unwraps same-named class, Module IS the class, so emit .init() directly
         if isCrossModuleCtorCall(c.callee)
@@ -4071,8 +4220,34 @@ struct Generator
     # Emit anonymous struct with a call method.
     # Without capture:   struct { fn call(params) RetT { body } }.call
     def genLambda(lam as ^ExprLambda)
-        w.emit("struct { fn call(")
+        var has_capture = lam.captures.count() > 0
+        if has_capture
+            w.emit("(")
+        w.emit("struct {")
+        # Emit capture fields
+        if has_capture
+            w.emit("\n")
+            var fg = indented()
+            for cv in lam.captures
+                fg.writeIndent()
+                fg.w.emit(cv.name)
+                fg.w.emit(": ")
+                if cv.type_ != nil
+                    fg.genType(cv.type_ to!)
+                else if cv.init_expr != nil
+                    fg.w.emit("@TypeOf(")
+                    fg.w.emit(cv.name)
+                    fg.w.emit(")")
+                else
+                    fg.w.emit("anytype")
+                fg.w.emit(",\n")
+            writeIndent()
+        # call method
+        w.emit(" fn call(")
         var first = true
+        if has_capture
+            w.emit("self: @This()")
+            first = false
         for p in lam.params
             if not first
                 w.emit(", ")
@@ -4096,17 +4271,38 @@ struct Generator
                 on LambdaBody.stmts
                     w.emit("void")
         w.emit(" {")
+        # Build capture context for body
+        var cf = StrSet()
+        for cv in lam.captures
+            cf.add(cv.name)
+        var mg = asMethod()
+        var lg = mg.withCaptureFields(cf)
         branch lam.body_
             on LambdaBody.expr_ as ex
                 w.emit(" return ")
-                genExpr(ex)
+                lg.genExpr(ex)
                 w.emit(";")
             on LambdaBody.stmts as ss
                 w.emit("\n")
-                var ig = indented()
+                var ig = lg.indented()
                 ig.genStmts(ss)
-                writeIndent()
-        w.emit(" } }.call")
+                lg.writeIndent()
+        w.emit(" } }")
+        # Capture initializer or .call suffix
+        if has_capture
+            w.emit("{ ")
+            for cv in lam.captures
+                w.emit(".")
+                w.emit(cv.name)
+                w.emit(" = ")
+                if cv.init_expr != nil
+                    w.emit(cv.name)
+                else
+                    w.emit("undefined")
+                w.emit(", ")
+            w.emit("})")
+        else
+            w.emit(".call")
 
     # ── genFileCall ───────────────────────────────────────────────────────────
     # Emit File.* static calls as inline Zig expressions (no allocation needed).
@@ -4987,10 +5183,27 @@ struct Generator
 
     # ── genReflectCall ───────────────────────────────────────────────────────
     def genReflectCall(mname as str, args as List(Arg))
-        # Reflect requires TC-inferred class name; simplified version emits compileError
-        w.emit("@compileError(\"selfhost: Reflect.")
+        if args.count() < 1
+            w.emit("@compileError(\"Reflect requires 1 argument\")")
+            return
+        if mname == "className"
+            w.emit("_reflect_lookup_name(")
+            genExpr(args.at(0).value)
+            w.emit("._type_tag)")
+            return
+        if mname == "fieldNames"
+            w.emit("_reflect_lookup_fields(")
+            genExpr(args.at(0).value)
+            w.emit("._type_tag)")
+            return
+        if mname == "fieldTypes"
+            w.emit("_reflect_lookup_field_types(")
+            genExpr(args.at(0).value)
+            w.emit("._type_tag)")
+            return
+        w.emit("@compileError(\"selfhost: unknown Reflect.")
         w.emit(mname)
-        w.emit(" requires TypeChecker integration\")")
+        w.emit("\")")
 
     def genGenericCtorCall(name as str, type_args as List(Arg), val_args as List(Arg))
         if name == "List"

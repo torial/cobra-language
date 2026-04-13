@@ -990,12 +990,14 @@ struct ExprLambda
     var params as List(Param)
     var return_type as TypeRef?
     var body_ as LambdaBody
+    var captures as List(DeclVar)
 
-    cue init(span as Span, params as List(Param), return_type as TypeRef?, body_ as LambdaBody)
+    cue init(span as Span, params as List(Param), return_type as TypeRef?, body_ as LambdaBody, captures as List(DeclVar))
         this.span = span
         this.params = params
         this.return_type = return_type
         this.body_ = body_
+        this.captures = captures
 
 # collection literals
 

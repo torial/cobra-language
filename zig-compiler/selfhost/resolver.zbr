@@ -333,7 +333,7 @@ class Resolver
             return true
         if name == "Log" or name == "Uri" or name == "Compress" or name == "Mime" or name == "Timer"
             return true
-        if name == "Regex" or name == "Gui" or name == "DateTime"
+        if name == "Regex" or name == "Gui" or name == "DateTime" or name == "Reflect"
             return true
         return false
 

@@ -2062,7 +2062,7 @@ pub fn isCrossModuleCtorCall(callee: Expr) bool {
             const m = _ptr_m.*;
             const obj_name = getIdentName(m.object.*);
             if ((obj_name != null)) {
-                return (obj_name.? == m.member);
+                return std.mem.eql(u8, obj_name.?, m.member);
             }
         },
         else => |_| {
@@ -2161,7 +2161,7 @@ pub fn exprMentionsThis(e: Expr) bool {
         },
         .if_expr => |_ptr_ie| {
             const ie = _ptr_ie.*;
-            return ((exprMentionsThis(ie.cond) or exprMentionsThis(ie.then_expr)) or exprMentionsThis(ie.else_expr));
+            return ((exprMentionsThis(ie.cond.*) or exprMentionsThis(ie.then_expr.*)) or exprMentionsThis(ie.else_expr.*));
         },
         .string_interp => |_ptr_si| {
             const si = _ptr_si.*;
@@ -2207,7 +2207,7 @@ pub fn stmtMentionsThis(s: Stmt) bool {
         .var_ => |_ptr_v| {
             const v = _ptr_v.*;
             if ((v.init_expr != null)) {
-                return exprMentionsThis(v.init_expr.?);
+                return exprMentionsThis(v.init_expr.?.*);
             }
             return false;
         },
@@ -2334,6 +2334,52 @@ pub fn bodyMentionsThis(stmts: std.ArrayList(Stmt)) bool {
     return false;
 }
 
+pub fn typeRefStr(tr: TypeRef) []const u8 {
+    switch (tr) {
+        .named => |n| {
+            return n.name;
+        },
+        .nilable => |_ptr_inner| {
+            const inner = _ptr_inner.*;
+            return _str_concat("?", typeRefStr(inner), _allocator);
+        },
+        .error_union => |_ptr_inner| {
+            const inner = _ptr_inner.*;
+            return _str_concat("!", typeRefStr(inner), _allocator);
+        },
+        .ref_to => |_ptr_inner| {
+            const inner = _ptr_inner.*;
+            return _str_concat("^", typeRefStr(inner), _allocator);
+        },
+        .stream => |_ptr_inner| {
+            const inner = _ptr_inner.*;
+            return _str_concat(typeRefStr(inner), "*", _allocator);
+        },
+        .generic => |g| {
+            var s = _str_concat(g.name, "(", _allocator);
+            var i: i64 = 0;
+            while ((i < @as(i64, @intCast(g.args.items.len)))) {
+                if ((i > 0)) {
+                    s = _str_concat(s, ", ", _allocator);
+                }
+                s = (s + typeRefStr(g.args.items[@intCast(i)]));
+                i = (i + 1);
+            }
+            return _str_concat(s, ")", _allocator);
+        },
+        .void_ => |_| {
+            return "void";
+        },
+        .same_ => |_| {
+            return "same";
+        },
+        .tuple => |_| {
+            return "tuple";
+        },
+    }
+    return "unknown";
+}
+
 pub fn generateModule(m: Module, file: []const u8) []const u8 {
     return generateModuleWith(m, file, std.ArrayList([]const u8){});
 }
@@ -2457,6 +2503,54 @@ pub fn generateModuleWith(m: Module, file: []const u8, extra_class_names: std.Ar
                 // pass
             },
         }
+    }
+    var reflect_classes = std.ArrayList([]const u8){};
+    for (m.decls.items) |decl| {
+        switch (decl) {
+            .class_ => |_ptr_rc| {
+                const rc = _ptr_rc.*;
+                reflect_classes.append(_allocator, rc.name) catch @panic("OOM");
+            },
+            else => |_| {
+                // pass
+            },
+        }
+    }
+    if ((reflect_classes.len > 0)) {
+        w.emit("const _ReflectStrSlice = struct { items: []const []const u8, fn count(self: @This()) i64 { return @intCast(self.items.len); } fn at(self: @This(), i: i64) []const u8 { return self.items[@intCast(i)]; } };\n");
+        w.emit("fn _reflect_lookup_name(tag: u64) []const u8 {\n");
+        var ri2: i64 = 0;
+        while ((ri2 < reflect_classes.len)) {
+            w.emit("    if (tag == _ttag_");
+            w.emit(reflect_classes.items[@intCast(ri2)]);
+            w.emit(") return _reflect_");
+            w.emit(reflect_classes.items[@intCast(ri2)]);
+            w.emit("_name;\n");
+            ri2 = (ri2 + 1);
+        }
+        w.emit("    return \"unknown\";\n}\n");
+        w.emit("fn _reflect_lookup_fields(tag: u64) _ReflectStrSlice {\n");
+        ri2 = 0;
+        while ((ri2 < reflect_classes.len)) {
+            w.emit("    if (tag == _ttag_");
+            w.emit(reflect_classes.items[@intCast(ri2)]);
+            w.emit(") return .{ .items = _reflect_");
+            w.emit(reflect_classes.items[@intCast(ri2)]);
+            w.emit("_fields };\n");
+            ri2 = (ri2 + 1);
+        }
+        w.emit("    return .{ .items = &.{} };\n}\n");
+        w.emit("fn _reflect_lookup_field_types(tag: u64) _ReflectStrSlice {\n");
+        ri2 = 0;
+        while ((ri2 < reflect_classes.len)) {
+            w.emit("    if (tag == _ttag_");
+            w.emit(reflect_classes.items[@intCast(ri2)]);
+            w.emit(") return .{ .items = _reflect_");
+            w.emit(reflect_classes.items[@intCast(ri2)]);
+            w.emit("_field_types };\n");
+            ri2 = (ri2 + 1);
+        }
+        w.emit("    return .{ .items = &.{} };\n}\n");
     }
     return w.result();
 }
@@ -2612,6 +2706,9 @@ pub const Writer = struct {
 
 };
 const _ttag_Writer: u64 = _zbr_hash("Writer");
+const _reflect_Writer_name: []const u8 = "Writer";
+const _reflect_Writer_fields: []const []const u8 = &.{"_buf"};
+const _reflect_Writer_field_types: []const []const u8 = &.{"StringBuilder"};
 
 pub const Generator = struct {
     w: *Writer,
@@ -2647,6 +2744,8 @@ pub const Generator = struct {
     for_loop_vars: *StrSet,
     in_try_expr: bool,
     self_name: []const u8,
+    capture_fields: *StrSet,
+    closure_vars: *StrSet,
     pub fn init(w: *Writer, indent: i64, owner: []const u8, in_method: bool, is_struct_owner: bool, is_generic: bool, current_method_throws: bool, try_block_label: ?[]const u8, catch_var: []const u8, source_file: []const u8, class_names: *StrSet) Generator {
         var _self: Generator = undefined;
             _self.w = w;
@@ -2682,56 +2781,63 @@ pub const Generator = struct {
             _self.for_loop_vars = StrSet.init();
             _self.in_try_expr = false;
             _self.self_name = "self";
+            _self.capture_fields = StrSet.init();
+            _self.closure_vars = StrSet.init();
         return _self;
     }
 
     pub fn withOwner(self: *Generator, new_owner: []const u8) Generator {
-        const g = blk: { var _except_tmp = self; _except_tmp.owner = new_owner; break :blk _except_tmp; };
+        const g = blk: { var _except_tmp = self.*; _except_tmp.owner = new_owner; break :blk _except_tmp; };
         return g;
     }
 
     pub fn asMethod(self: *Generator) Generator {
-        const g = blk: { var _except_tmp = self; _except_tmp.in_method = true; break :blk _except_tmp; };
+        const g = blk: { var _except_tmp = self.*; _except_tmp.in_method = true; break :blk _except_tmp; };
         return g;
     }
 
     pub fn asStructOwner(self: *Generator) Generator {
-        const g = blk: { var _except_tmp = self; _except_tmp.is_struct_owner = true; break :blk _except_tmp; };
+        const g = blk: { var _except_tmp = self.*; _except_tmp.is_struct_owner = true; break :blk _except_tmp; };
         return g;
     }
 
     pub fn indented(self: *Generator) Generator {
-        const g = blk: { var _except_tmp = self; _except_tmp.indent = (self.indent + 1); break :blk _except_tmp; };
+        const g = blk: { var _except_tmp = self.*; _except_tmp.indent = (self.indent + 1); break :blk _except_tmp; };
         return g;
     }
 
     pub fn withThrows(self: *Generator) Generator {
-        const g = blk: { var _except_tmp = self; _except_tmp.current_method_throws = true; break :blk _except_tmp; };
+        const g = blk: { var _except_tmp = self.*; _except_tmp.current_method_throws = true; break :blk _except_tmp; };
         return g;
     }
 
     pub fn withTryLabel(self: *Generator, label: []const u8, err_var: []const u8) Generator {
-        const g = blk: { var _except_tmp = self; _except_tmp.try_block_label = label; _except_tmp.try_err_var = err_var; break :blk _except_tmp; };
+        const g = blk: { var _except_tmp = self.*; _except_tmp.try_block_label = label; _except_tmp.try_err_var = err_var; break :blk _except_tmp; };
         return g;
     }
 
     pub fn withCatchVar(self: *Generator, name: []const u8) Generator {
-        const g = blk: { var _except_tmp = self; _except_tmp.catch_var = name; break :blk _except_tmp; };
+        const g = blk: { var _except_tmp = self.*; _except_tmp.catch_var = name; break :blk _except_tmp; };
+        return g;
+    }
+
+    pub fn withCaptureFields(self: *Generator, cf: *StrSet) Generator {
+        const g = blk: { var _except_tmp = self.*; _except_tmp.capture_fields = cf; break :blk _except_tmp; };
         return g;
     }
 
     pub fn withOwnerMembers(self: *Generator, members: std.ArrayList(Decl)) Generator {
-        const g = blk: { var _except_tmp = self; _except_tmp.owner_members = members; break :blk _except_tmp; };
+        const g = blk: { var _except_tmp = self.*; _except_tmp.owner_members = members; break :blk _except_tmp; };
         return g;
     }
 
     pub fn withSelfName(self: *Generator, name: []const u8) Generator {
-        const g = blk: { var _except_tmp = self; _except_tmp.self_name = name; break :blk _except_tmp; };
+        const g = blk: { var _except_tmp = self.*; _except_tmp.self_name = name; break :blk _except_tmp; };
         return g;
     }
 
     pub fn withMethodCtx(self: *Generator, ms: ?*StrSet, rs: ?*StrSet, throws_: bool, members: std.ArrayList(Decl), pnames: ?*StrSet, sparams: *StrSet, sname: []const u8) Generator {
-        const g = blk: { var _except_tmp = self; _except_tmp.in_method = true; _except_tmp.current_method_throws = throws_; _except_tmp.mut_set = ms; _except_tmp.ret_set = rs; _except_tmp.owner_members = members; _except_tmp.param_names = pnames; _except_tmp.str_params = sparams; _except_tmp.self_name = sname; _except_tmp.indent = (self.indent + 1); _except_tmp.for_loop_deref = StrSet.init(); _except_tmp.for_loop_vars = StrSet.init(); break :blk _except_tmp; };
+        const g = blk: { var _except_tmp = self.*; _except_tmp.in_method = true; _except_tmp.current_method_throws = throws_; _except_tmp.mut_set = ms; _except_tmp.ret_set = rs; _except_tmp.owner_members = members; _except_tmp.param_names = pnames; _except_tmp.str_params = sparams; _except_tmp.self_name = sname; _except_tmp.indent = (self.indent + 1); _except_tmp.for_loop_deref = StrSet.init(); _except_tmp.for_loop_vars = StrSet.init(); break :blk _except_tmp; };
         return g;
     }
 
@@ -3232,7 +3338,60 @@ pub const Generator = struct {
         self.w.emit(n.name);
         self.w.emit(": u64 = _zbr_hash(\"");
         self.w.emit(n.name);
-        self.w.emit("\");\n\n");
+        self.w.emit("\");\n");
+        var rf_names = std.ArrayList([]const u8){};
+        var rf_types = std.ArrayList([]const u8){};
+        for (n.members.items) |decl| {
+            switch (decl) {
+                .var_ => |_ptr_fld| {
+                    const fld = _ptr_fld.*;
+                    if ((!fld.mods.is_shared)) {
+                        rf_names.append(_allocator, fld.name) catch @panic("OOM");
+                        if ((fld.type_ != null)) {
+                            rf_types.append(_allocator, typeRefStr(fld.type_.?)) catch @panic("OOM");
+                        } else {
+                            rf_types.append(_allocator, "unknown") catch @panic("OOM");
+                        }
+                    }
+                },
+                else => |_| {
+                    // pass
+                },
+            }
+        }
+        self.w.emit("const _reflect_");
+        self.w.emit(n.name);
+        self.w.emit("_name: []const u8 = \"");
+        self.w.emit(n.name);
+        self.w.emit("\";\n");
+        self.w.emit("const _reflect_");
+        self.w.emit(n.name);
+        self.w.emit("_fields: []const []const u8 = &.{");
+        var ri: i64 = 0;
+        while ((ri < rf_names.len)) {
+            if ((ri > 0)) {
+                self.w.emit(", ");
+            }
+            self.w.emit("\"");
+            self.w.emit(rf_names.items[@intCast(ri)]);
+            self.w.emit("\"");
+            ri = (ri + 1);
+        }
+        self.w.emit("};\n");
+        self.w.emit("const _reflect_");
+        self.w.emit(n.name);
+        self.w.emit("_field_types: []const []const u8 = &.{");
+        ri = 0;
+        while ((ri < rf_types.len)) {
+            if ((ri > 0)) {
+                self.w.emit(", ");
+            }
+            self.w.emit("\"");
+            self.w.emit(rf_types.items[@intCast(ri)]);
+            self.w.emit("\"");
+            ri = (ri + 1);
+        }
+        self.w.emit("};\n\n");
     }
 
     pub fn genMethod(self: *Generator, m: DeclMethod) void {
@@ -3702,7 +3861,7 @@ pub const Generator = struct {
         self.writeIndent();
         var is_mut = false;
         if ((self.mut_set != null)) {
-            is_mut = self.mut_set.?.contains(n.name);
+            is_mut = self.mut_set.?.contains_(n.name);
         }
         if (n.is_const) {
             is_mut = false;
@@ -3731,12 +3890,30 @@ pub const Generator = struct {
             }
         }
         if ((n.init_expr != null)) {
-            if (self.isStrSetCtor(n.init_expr.?)) {
+            if (self.isStrSetCtor(n.init_expr.?.*)) {
                 self.strset_locals.add(n.name);
             }
         }
         if ((n.init_expr != null)) {
-            const ie = n.init_expr.?;
+            if (self.isStringExpr(n.init_expr.?.*)) {
+                self.str_params.add(n.name);
+            }
+        }
+        if ((n.init_expr != null)) {
+            switch (n.init_expr.?.*) {
+                .lambda => |_ptr_lam| {
+                    const lam = _ptr_lam.*;
+                    if ((@as(i64, @intCast(lam.captures.items.len)) > 0)) {
+                        self.closure_vars.append(_allocator, n.name) catch @panic("OOM");
+                    }
+                },
+                else => |_| {
+                    // pass
+                },
+            }
+        }
+        if ((n.init_expr != null)) {
+            const ie = n.init_expr.?.*;
             if (self.isStringBuilderCtor(ie)) {
                 self.w.emit(" = std.ArrayList(u8){};\n");
                 return;
@@ -3759,7 +3936,7 @@ pub const Generator = struct {
             self.genType(n.type_.?);
         } else {
             if ((n.init_expr != null)) {
-                switch (n.init_expr.?) {
+                switch (n.init_expr.?.*) {
                     .int_lit => {
                         self.w.emit(": i64");
                     },
@@ -3777,7 +3954,7 @@ pub const Generator = struct {
         }
         self.w.emit(" = ");
         if ((n.init_expr != null)) {
-            self.genExpr(n.init_expr.?);
+            self.genExpr(n.init_expr.?.*);
         } else {
             self.w.emit("undefined");
         }
@@ -4432,11 +4609,11 @@ pub const Generator = struct {
                     const iter_member = getMemberFieldName(fi.iter.*);
                     if ((iter_member != null)) {
                         if (std.mem.eql(u8, iter_member.?, "entries")) {
-                            self.for_loop_deref.append(_allocator, makeDottedKey(vname, "key")) catch @panic("OOM");
-                            self.for_loop_deref.append(_allocator, makeDottedKey(vname, "value")) catch @panic("OOM");
+                            self.for_loop_deref.add(makeDottedKey(vname, "key"));
+                            self.for_loop_deref.add(makeDottedKey(vname, "value"));
                         }
                     }
-                    self.for_loop_vars.append(_allocator, vname) catch @panic("OOM");
+                    self.for_loop_vars.add(vname);
                     ig.genStmts(fi.stmts);
                     self.writeIndent();
                     self.w.emit("}\n");
@@ -5095,8 +5272,8 @@ pub const Generator = struct {
                 const obj_name = getIdentName(m.object.*);
                 if ((obj_name != null)) {
                     const bfkey = makeDottedKey(obj_name.?, m.member);
-                    if (self.for_loop_vars.contains(obj_name.?)) {
-                        if (self.for_loop_deref.contains(bfkey)) {
+                    if (self.for_loop_vars.contains_(obj_name.?)) {
+                        if (self.for_loop_deref.contains_(bfkey)) {
                             self.w.emit(".*");
                         }
                     } else {
@@ -5152,7 +5329,7 @@ pub const Generator = struct {
             },
             .to_nilable => |_ptr_tn| {
                 const tn = _ptr_tn.*;
-                self.genExpr(tn.expr);
+                self.genExpr(tn.expr.*);
             },
             .to_non_nil => |_ptr_tnn| {
                 const tnn = _ptr_tnn.*;
@@ -5177,7 +5354,7 @@ pub const Generator = struct {
             .is_nil => |_ptr_isn| {
                 const isn = _ptr_isn.*;
                 self.w.emit("(");
-                self.genExpr(isn.expr);
+                self.genExpr(isn.expr.*);
                 self.w.emit(" == null)");
             },
             .orelse_ => |_ptr_or_| {
@@ -5200,11 +5377,11 @@ pub const Generator = struct {
             .if_expr => |_ptr_ie| {
                 const ie = _ptr_ie.*;
                 self.w.emit("if (");
-                self.genExpr(ie.cond);
+                self.genExpr(ie.cond.*);
                 self.w.emit(") ");
-                self.genExpr(ie.then_expr);
+                self.genExpr(ie.then_expr.*);
                 self.w.emit(" else ");
-                self.genExpr(ie.else_expr);
+                self.genExpr(ie.else_expr.*);
             },
             .lambda => |_ptr_lam| {
                 const lam = _ptr_lam.*;
@@ -5233,9 +5410,9 @@ pub const Generator = struct {
                 self.w.emit("blk: { var _dl = std.StringHashMap(anytype).init(_allocator); ");
                 for (dl.entries.items) |en| {
                     self.w.emit("_dl.put(");
-                    self.genExpr(en.key);
+                    self.genExpr(en.key.*);
                     self.w.emit(", ");
-                    self.genExpr(en.value);
+                    self.genExpr(en.value.*);
                     self.w.emit(") catch @panic(\"OOM\"); ");
                 }
                 self.w.emit("break :blk _dl; }");
@@ -5311,7 +5488,7 @@ pub const Generator = struct {
                 self.w.emit("}");
             },
             .type_check => |tc2| {
-                self.genExpr(tc2.expr);
+                self.genExpr(tc2.expr.*);
                 self.w.emit("._type_tag == _ttag_");
                 self.w.emit(tc2.type_name);
             },
@@ -5336,6 +5513,11 @@ pub const Generator = struct {
     }
 
     pub fn genIdent(self: *Generator, id: ExprIdent) void {
+        if (self.capture_fields.contains(id.name)) {
+            self.w.emit("self.");
+            self.w.emit(id.name);
+            return;
+        }
         if ((self.in_method and self.isFieldName(id.name))) {
             self.w.emit(self.self_name);
             self.w.emit(".");
@@ -5345,7 +5527,7 @@ pub const Generator = struct {
 
     pub fn isFieldName(self: *Generator, name: []const u8) bool {
         if ((self.param_names != null)) {
-            if (self.param_names.?.contains(name)) {
+            if (self.param_names.?.contains_(name)) {
                 return false;
             }
         }
@@ -5593,6 +5775,20 @@ pub const Generator = struct {
     }
 
     pub fn genCall(self: *Generator, c: ExprCall) void {
+        switch (c.callee) {
+            .ident => |cid| {
+                if (self.closure_vars.contains(cid.name)) {
+                    self.w.emit(cid.name);
+                    self.w.emit(".call(");
+                    self.genArgList(c.args);
+                    self.w.emit(")");
+                    return;
+                }
+            },
+            else => |_| {
+                // pass
+            },
+        }
         if (isCrossModuleCtorCall(c.callee)) {
             const cm_obj = getMemberObjectIdent(c.callee);
             const cm_mem = getMemberName(c.callee);
@@ -5611,7 +5807,7 @@ pub const Generator = struct {
                         self.w.emit(", ");
                     }
                     fc = false;
-                    self.genExpr(a.value.*);
+                    self.genExpr(a.value);
                 }
                 self.w.emit(")");
                 return;
@@ -5724,17 +5920,17 @@ pub const Generator = struct {
                             self.w.emit(", ");
                         }
                         first2 = false;
-                        if ((is_ast_struct and shouldBoxCtorArg(a.value.*))) {
+                        if ((is_ast_struct and shouldBoxCtorArg(a.value))) {
                             const lbl = box_labels.items[@intCast(box_idx)];
                             self.w.emit(lbl);
                             self.w.emit(": { const _bv = ");
-                            self.genExpr(a.value.*);
+                            self.genExpr(a.value);
                             self.w.emit("; const _bp = _allocator.create(@TypeOf(_bv)) catch @panic(\"OOM\"); _bp.* = _bv; break :");
                             self.w.emit(lbl);
                             self.w.emit(" _bp; }");
                             box_idx = (box_idx + 1);
                         } else {
-                            self.genExpr(a.value.*);
+                            self.genExpr(a.value);
                         }
                     }
                     self.w.emit(")");
@@ -5766,7 +5962,7 @@ pub const Generator = struct {
                             self.w.emit(", ");
                         }
                         first3 = false;
-                        self.genExpr(a.value.*);
+                        self.genExpr(a.value);
                     }
                     self.w.emit(")");
                     if ((callee_throws and (self.try_block_label != null))) {
@@ -5787,7 +5983,7 @@ pub const Generator = struct {
                 self.w.emit(", ");
             }
             first = false;
-            self.genExpr(a.value.*);
+            self.genExpr(a.value);
         }
         self.w.emit(")");
     }
@@ -5923,7 +6119,7 @@ pub const Generator = struct {
                     self.w.emit(", ");
                 }
                 fi = false;
-                self.genExpr(a.value.*);
+                self.genExpr(a.value);
             }
             self.w.emit(") catch @panic(\"OOM\")");
             return;
@@ -5965,7 +6161,7 @@ pub const Generator = struct {
                     self.w.emit(", ");
                 }
                 fi = false;
-                self.genExpr(a.value.*);
+                self.genExpr(a.value);
             }
             self.w.emit(") catch @panic(\"OOM\")");
             return;
@@ -6001,7 +6197,7 @@ pub const Generator = struct {
                     self.w.emit(", ");
                 }
                 fi_r = false;
-                self.genExpr(a.value.*);
+                self.genExpr(a.value);
             }
             self.w.emit(")");
             return;
@@ -6011,7 +6207,7 @@ pub const Generator = struct {
             self.genExpr(m.object.*);
             for (args.items) |a| {
                 self.w.emit(", ");
-                self.genExpr(a.value.*);
+                self.genExpr(a.value);
             }
             self.w.emit(" }) catch unreachable)");
             return;
@@ -6258,7 +6454,7 @@ pub const Generator = struct {
             self.genExpr(m.object.*);
             for (args.items) |a| {
                 self.w.emit(", ");
-                self.genExpr(a.value.*);
+                self.genExpr(a.value);
             }
             self.w.emit(") catch unreachable)");
             return;
@@ -6429,7 +6625,7 @@ pub const Generator = struct {
             self.genExpr(m.object.*);
             for (args.items) |a| {
                 self.w.emit(", .{ ");
-                self.genExpr(a.value.*);
+                self.genExpr(a.value);
                 self.w.emit(" }");
             }
             self.w.emit(") catch unreachable)");
@@ -6459,7 +6655,7 @@ pub const Generator = struct {
                 self.w.emit(", ");
             }
             first = false;
-            self.genExpr(a.value.*);
+            self.genExpr(a.value);
         }
         self.w.emit(")");
         if ((callee_throws2 and (self.try_block_label != null))) {
@@ -6532,13 +6728,44 @@ pub const Generator = struct {
                 self.w.emit(", ");
             }
             first = false;
-            self.genExpr(a.value.*);
+            self.genExpr(a.value);
         }
     }
 
     pub fn genLambda(self: *Generator, lam: *ExprLambda) void {
-        self.w.emit("struct { fn call(");
+        const has_capture = (@as(i64, @intCast(lam.captures.items.len)) > 0);
+        if (has_capture) {
+            self.w.emit("(");
+        }
+        self.w.emit("struct {");
+        if (has_capture) {
+            self.w.emit("\n");
+            var fg = self.indented();
+            for (lam.captures.items) |cv| {
+                fg.writeIndent();
+                fg.w.emit(cv.name);
+                fg.w.emit(": ");
+                if ((cv.type_ != null)) {
+                    fg.genType(cv.type_.?);
+                } else {
+                    if ((cv.init_expr != null)) {
+                        fg.w.emit("@TypeOf(");
+                        fg.w.emit(cv.name);
+                        fg.w.emit(")");
+                    } else {
+                        fg.w.emit("anytype");
+                    }
+                }
+                fg.w.emit(",\n");
+            }
+            self.writeIndent();
+        }
+        self.w.emit(" fn call(");
         var first = true;
+        if (has_capture) {
+            self.w.emit("self: @This()");
+            first = false;
+        }
         for (lam.params.items) |p| {
             if ((!first)) {
                 self.w.emit(", ");
@@ -6568,20 +6795,43 @@ pub const Generator = struct {
             }
         }
         self.w.emit(" {");
+        var cf = StrSet.init();
+        for (lam.captures.items) |cv| {
+            cf.add(cv.name);
+        }
+        var mg = self.asMethod();
+        var lg = mg.withCaptureFields(cf);
         switch (lam.body_) {
             .expr_ => |ex| {
                 self.w.emit(" return ");
-                self.genExpr(ex);
+                lg.genExpr(ex);
                 self.w.emit(";");
             },
             .stmts => |ss| {
                 self.w.emit("\n");
-                var ig = self.indented();
+                var ig = lg.indented();
                 ig.genStmts(ss);
-                self.writeIndent();
+                lg.writeIndent();
             },
         }
-        self.w.emit(" } }.call");
+        self.w.emit(" } }");
+        if (has_capture) {
+            self.w.emit("{ ");
+            for (lam.captures.items) |cv| {
+                self.w.emit(".");
+                self.w.emit(cv.name);
+                self.w.emit(" = ");
+                if ((cv.init_expr != null)) {
+                    self.w.emit(cv.name);
+                } else {
+                    self.w.emit("undefined");
+                }
+                self.w.emit(", ");
+            }
+            self.w.emit("})");
+        } else {
+            self.w.emit(".call");
+        }
     }
 
     pub fn genFileCall(self: *Generator, mname: []const u8, args: std.ArrayList(Arg)) void {
@@ -7621,10 +7871,31 @@ pub const Generator = struct {
     }
 
     pub fn genReflectCall(self: *Generator, mname: []const u8, args: std.ArrayList(Arg)) void {
-        _ = args;
-        self.w.emit("@compileError(\"selfhost: Reflect.");
+        if ((@as(i64, @intCast(args.items.len)) < 1)) {
+            self.w.emit("@compileError(\"Reflect requires 1 argument\")");
+            return;
+        }
+        if (std.mem.eql(u8, mname, "className")) {
+            self.w.emit("_reflect_lookup_name(");
+            self.genExpr(args.items[@intCast(0)].value);
+            self.w.emit("._type_tag)");
+            return;
+        }
+        if (std.mem.eql(u8, mname, "fieldNames")) {
+            self.w.emit("_reflect_lookup_fields(");
+            self.genExpr(args.items[@intCast(0)].value);
+            self.w.emit("._type_tag)");
+            return;
+        }
+        if (std.mem.eql(u8, mname, "fieldTypes")) {
+            self.w.emit("_reflect_lookup_field_types(");
+            self.genExpr(args.items[@intCast(0)].value);
+            self.w.emit("._type_tag)");
+            return;
+        }
+        self.w.emit("@compileError(\"selfhost: unknown Reflect.");
         self.w.emit(mname);
-        self.w.emit(" requires TypeChecker integration\")");
+        self.w.emit("\")");
     }
 
     pub fn genGenericCtorCall(self: *Generator, name: []const u8, type_args: std.ArrayList(Arg), val_args: std.ArrayList(Arg)) void {
@@ -7685,6 +7956,19 @@ pub const Generator = struct {
 
 };
 
+const _ReflectStrSlice = struct { items: []const []const u8, fn count(self: @This()) i64 { return @intCast(self.items.len); } fn at(self: @This(), i: i64) []const u8 { return self.items[@intCast(i)]; } };
+fn _reflect_lookup_name(tag: u64) []const u8 {
+    if (tag == _ttag_Writer) return _reflect_Writer_name;
+    return "unknown";
+}
+fn _reflect_lookup_fields(tag: u64) _ReflectStrSlice {
+    if (tag == _ttag_Writer) return .{ .items = _reflect_Writer_fields };
+    return .{ .items = &.{} };
+}
+fn _reflect_lookup_field_types(tag: u64) _ReflectStrSlice {
+    if (tag == _ttag_Writer) return .{ .items = _reflect_Writer_field_types };
+    return .{ .items = &.{} };
+}
 
 fn _zbr_error_msg() []const u8 {
     if (_error_ctx.message.len > 0) return _error_ctx.message;

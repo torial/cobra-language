@@ -16,8 +16,8 @@
 #   - For str.split() iteration the TC must see local List vars as List(str) —
 #     annotate explicitly where needed.
 
-use ast exposing Module, Decl, DeclUse, DeclClass, DeclStruct, DeclEnum, DeclUnion, DeclSig, DeclMethod, DeclInit, DeclVar, EnumMember, UnionVariant, TypeRef, NamedTypeRef, GenericTypeRef, Modifiers, Param, ParamMode, Span, TypeParam, Stmt, StmtIf, StmtWhile, StmtForIn, StmtReturn, StmtAssert, StmtAssign, StmtRaise, StmtTryCatch, StmtBranch, BranchOn, CatchClause, StmtPrint, AssignOp, ElseIf, Expr, ExprIdent, ExprMember, ExprCall, ExprIndex, ExprSlice, ExprBinary, ExprUnary, ExprBoolLit, ExprIntLit, ExprFloatLit, ExprCharLit, ExprStringLit, ExprStringInterp, ExprTry, ExprToNonNil, ExprExcept, ExceptField, IntBase, BinaryOp, UnaryOp, StringKind, StringPart, Arg
-use Parser exposing PNode, PModule, PClass, PEnum, PField, PMethod, PInit, PReturn, PIf, PWhile, PForIn, PVar, PAssign, PAssert, PRaise, PTryCatch, PMember, PCall, PIndex, PSlice, PBinary, PUnary, PParam, PUnionDecl, PUnionVariant, PSig, PBranch, PBranchOn, PExcept, PExceptField, PStringInterp
+use ast exposing Module, Decl, DeclUse, DeclClass, DeclStruct, DeclEnum, DeclUnion, DeclSig, DeclMethod, DeclInit, DeclVar, EnumMember, UnionVariant, TypeRef, NamedTypeRef, GenericTypeRef, Modifiers, Param, ParamMode, Span, TypeParam, Stmt, StmtIf, StmtWhile, StmtForIn, StmtReturn, StmtAssert, StmtAssign, StmtRaise, StmtTryCatch, StmtBranch, BranchOn, CatchClause, StmtPrint, AssignOp, ElseIf, Expr, ExprIdent, ExprMember, ExprCall, ExprIndex, ExprSlice, ExprBinary, ExprUnary, ExprBoolLit, ExprIntLit, ExprFloatLit, ExprCharLit, ExprStringLit, ExprStringInterp, ExprTry, ExprToNonNil, ExprExcept, ExceptField, IntBase, BinaryOp, UnaryOp, StringKind, StringPart, Arg, ExprLambda, LambdaBody
+use Parser exposing PNode, PModule, PClass, PEnum, PField, PMethod, PInit, PReturn, PIf, PWhile, PForIn, PVar, PAssign, PAssert, PRaise, PTryCatch, PMember, PCall, PIndex, PSlice, PBinary, PUnary, PParam, PUnionDecl, PUnionVariant, PSig, PBranch, PBranchOn, PExcept, PExceptField, PStringInterp, PLambda, PCaptureVar
 
 def zspan() as Span
     return Span(0, 0, 0, 0)
@@ -448,8 +448,41 @@ class ASTBuilder
                             parts.add(StringPart.expr_(part_expr))
                 return Expr.string_interp(ExprStringInterp(zspan(), parts))
 
+            on PNode.expr_lambda as pl
+                return .buildLambdaExpr(pl)?
+
             else
                 raise "buildExpr: unexpected PNode variant"
+
+    def buildLambdaExpr(pl as PLambda) as Expr throws
+        # Convert PLambda → ExprLambda
+        var params = List(Param)()
+        for pp in pl.params
+            var tr as TypeRef? = nil
+            if pp.type_name != ""
+                tr = .parseTypeRef(pp.type_name)
+            params.add(Param(zspan(), ParamMode.normal, pp.name, tr, nil))
+        var ret_type as TypeRef? = nil
+        if pl.return_type != ""
+            ret_type = .parseTypeRef(pl.return_type)
+        var lbody as LambdaBody
+        if pl.body_expr.len > 0
+            const bexpr = .buildExpr(pl.body_expr.at(0))?
+            lbody = LambdaBody.expr_(bexpr)
+        else
+            var stmts = List(Stmt)()
+            for ps in pl.body_stmts
+                stmts.add(.buildStmt(ps)?)
+            lbody = LambdaBody.stmts(stmts)
+        var captures = List(DeclVar)()
+        for cv in pl.captures
+            var cv_tr as TypeRef? = nil
+            if cv.type_name != ""
+                cv_tr = .parseTypeRef(cv.type_name)
+            var cv_init = Expr.ident(ExprIdent(zspan(), cv.init_name))
+            var dv = DeclVar(zspan(), zmods(), cv.name, cv_tr, cv_init, not cv.is_const)
+            captures.add(dv)
+        return Expr.lambda(ExprLambda(zspan(), params, ret_type, lbody, captures))
 
     # ── Operator conversion ───────────────────────────────────────────────────
 

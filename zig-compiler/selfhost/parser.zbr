@@ -71,6 +71,7 @@ union PNode
     expr_to_bang as ^PNode
     expr_except as ^PExcept
     expr_string_interp as ^PStringInterp
+    expr_lambda as ^PLambda
 
     # Branch statement
     stmt_branch as ^PBranch
@@ -134,6 +135,30 @@ struct PStringInterp
     var parts as List(PNode)
     cue init(parts as List(PNode))
         this.parts = parts
+
+struct PLambda
+    var params as List(PParam)
+    var return_type as str
+    var captures as List(PCaptureVar)
+    var body_expr as List(PNode)
+    var body_stmts as List(PNode)
+    cue init(params as List(PParam), return_type as str, captures as List(PCaptureVar), body_expr as List(PNode), body_stmts as List(PNode))
+        this.params = params
+        this.return_type = return_type
+        this.captures = captures
+        this.body_expr = body_expr
+        this.body_stmts = body_stmts
+
+struct PCaptureVar
+    var name as str
+    var type_name as str
+    var init_name as str
+    var is_const as bool
+    cue init(name as str, type_name as str, init_name as str, is_const as bool)
+        this.name = name
+        this.type_name = type_name
+        this.init_name = init_name
+        this.is_const = is_const
 
 struct PUse
     var path as str
@@ -335,6 +360,12 @@ class Parser
             return this.tokens.at(this.pos)
         return this.tokens.at(this.tokens.len - 1)
 
+    def peekAt(offset as int) as Token.Token
+        var idx = this.pos + offset
+        if idx < this.tokens.len
+            return this.tokens.at(idx)
+        return this.tokens.at(this.tokens.len - 1)
+
     def advance()
         if this.pos < this.tokens.len
             this.pos = this.pos + 1
@@ -415,6 +446,10 @@ class Parser
     def isFloatLit() as bool
         branch this.peek().kind
             on TokenKind.float_lit
+                return true
+            on TokenKind.fractional_lit
+                return true
+            on TokenKind.float_lit_exp
                 return true
             else
                 return false
@@ -958,6 +993,39 @@ class Parser
         var init_expr = List(PNode)()
         if this.textIs("=")
             this.advance()
+            # Check for statement-body lambda: var x = def(params) eol indent [capture] stmts dedent
+            if this.textIs("def") and .peekAt(1).text == "("
+                # Could be expression-body (def(x) = expr) or statement-body (def(x) eol ...)
+                # Parse the def(params) [as T] prefix, then decide
+                var lam = .parseLambdaPrefix()
+                if this.textIs("=")
+                    # Expression-body: def(params) = expr
+                    this.advance()
+                    var body_expr = List(PNode)()
+                    body_expr.add(.parseExpr())
+                    .skipEol()
+                    var lambda_node = PLambda(lam.params, lam.return_type, List(PCaptureVar)(), body_expr, List(PNode)())
+                    init_expr.add(PNode.expr_lambda(lambda_node))
+                    return PNode.stmt_var(PVar(name, is_const, type_name, init_expr))
+                # Statement-body: def(params) eol indent [capture] stmts dedent
+                .skipEol()
+                if not .isIndent()
+                    raise "expected indent after lambda header at line " + this.peek().line.toString()
+                this.advance()
+                var captures = List(PCaptureVar)()
+                if this.textIs("capture")
+                    captures = .parseCaptureBlock()
+                var body_stmts = List(PNode)()
+                while not .isDedent() and not .isEof()
+                    .skipEol()
+                    if .isDedent()
+                        break
+                    body_stmts.add(.parseStmt())
+                if .isDedent()
+                    this.advance()
+                var lambda_node = PLambda(lam.params, lam.return_type, captures, List(PNode)(), body_stmts)
+                init_expr.add(PNode.expr_lambda(lambda_node))
+                return PNode.stmt_var(PVar(name, is_const, type_name, init_expr))
             init_expr.add(.parseExpr())
         .skipEol()
         return PNode.stmt_var(PVar(name, is_const, type_name, init_expr))
@@ -1340,7 +1408,87 @@ class Parser
             const name = this.peek().text
             this.advance()
             return PNode.expr_id(name)
+        else if this.textIs("def") and .peekAt(1).text == "("
+            return .parseLambdaExpr()
         raise "unexpected expression token: '" + this.peek().text + "' at line " + this.peek().line.toString()
+
+    def parseLambdaExpr() as PNode throws
+        # Expression-body lambda: def(params) [as T] = expr
+        .expectText("def")
+        .expectText("(")
+        var params = List(PParam)()
+        if not this.textIs(")")
+            params.add(.parseLambdaParam())
+            while this.textIs(",")
+                this.advance()
+                params.add(.parseLambdaParam())
+        .expectText(")")
+        var ret_type = ""
+        if this.textIs("as")
+            this.advance()
+            ret_type = .eatTypeName()
+        .expectText("=")
+        var body_expr = List(PNode)()
+        body_expr.add(.parseExpr())
+        return PNode.expr_lambda(PLambda(params, ret_type, List(PCaptureVar)(), body_expr, List(PNode)()))
+
+    def parseLambdaParam() as PParam throws
+        const name = .eatId()
+        var type_name = ""
+        if this.textIs("as")
+            this.advance()
+            type_name = .eatTypeName()
+        return PParam(name, type_name)
+
+    def parseLambdaPrefix() as PLambda throws
+        # Parse def(params) [as T] without consuming the body
+        .expectText("def")
+        .expectText("(")
+        var params = List(PParam)()
+        if not this.textIs(")")
+            params.add(.parseLambdaParam())
+            while this.textIs(",")
+                this.advance()
+                params.add(.parseLambdaParam())
+        .expectText(")")
+        var ret_type = ""
+        if this.textIs("as")
+            this.advance()
+            ret_type = .eatTypeName()
+        return PLambda(params, ret_type, List(PCaptureVar)(), List(PNode)(), List(PNode)())
+
+    def parseCaptureBlock() as List(PCaptureVar) throws
+        # capture eol indent var_decls dedent
+        .expectText("capture")
+        .skipEol()
+        if not .isIndent()
+            raise "expected indent after 'capture' at line " + this.peek().line.toString()
+        this.advance()
+        var caps = List(PCaptureVar)()
+        while not .isDedent() and not .isEof()
+            .skipEol()
+            if .isDedent()
+                break
+            var is_const = false
+            if this.textIs("const")
+                is_const = true
+                this.advance()
+            else
+                .expectText("var")
+            const cap_name = .eatId()
+            var cap_type = ""
+            if this.textIs("as")
+                this.advance()
+                cap_type = .eatTypeName()
+            var init_name = cap_name
+            if this.textIs("=")
+                this.advance()
+                init_name = .eatId()
+            .skipEol()
+            caps.add(PCaptureVar(cap_name, cap_type, init_name, is_const))
+        if .isDedent()
+            this.advance()
+        return caps
 
     def parseStringInterp() as PNode throws
         # string_start_X  {expr rcurly_special [string_part_X expr rcurly_special]*}  string_stop_X
