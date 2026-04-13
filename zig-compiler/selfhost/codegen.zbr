@@ -22,7 +22,7 @@
 #   genCall, genMemberCall, genMathCall, genArgList, genGenericCtorCall
 #   genTypeFromExpr — type-as-expr → Zig type name
 
-use ast exposing Decl, DeclUse, DeclEnum, DeclUnion, DeclStruct, DeclClass, DeclVar, DeclMethod, DeclInit, DeclProperty, DeclSig, EnumMember, UnionVariant, TypeRef, NamedTypeRef, GenericTypeRef, TupleTypeRef, Module, Param, Modifiers, Span, Stmt, StmtAssign, StmtReturn, StmtIf, ElseIf, StmtWhile, StmtForIn, StmtForNum, StmtBranch, BranchOn, StmtPrint, StmtRaise, StmtTryCatch, CatchClause, StmtAssert, StmtDefer, StmtWith, StmtArenaScope, StmtGuard, StmtDestruct, AssignOp, Expr, ExprIdent, ExprMember, ExprCall, ExprBinary, ExprUnary, ExprStringLit, ExprStringInterp, Arg, StringPart, StringKind, BinaryOp, UnaryOp, AllAnyKind, LambdaBody
+use ast exposing Decl, DeclUse, DeclEnum, DeclUnion, DeclStruct, DeclClass, DeclVar, DeclMethod, DeclInit, DeclProperty, DeclSig, EnumMember, UnionVariant, TypeRef, NamedTypeRef, GenericTypeRef, TupleTypeRef, Module, Param, Modifiers, Span, Stmt, StmtAssign, StmtReturn, StmtIf, ElseIf, StmtWhile, StmtForIn, StmtForNum, StmtBranch, BranchOn, StmtPrint, StmtRaise, StmtTryCatch, CatchClause, StmtAssert, StmtDefer, StmtWith, StmtArenaScope, StmtGuard, StmtDestruct, AssignOp, Expr, ExprIdent, ExprMember, ExprCall, ExprBinary, ExprUnary, ExprStringLit, ExprStringInterp, Arg, StringPart, StringKind, BinaryOp, UnaryOp, AllAnyKind, LambdaBody, ExprLambda, DeclNamespace, DeclInterface, DeclExtend
 use cg_helpers exposing StrSet, scanMutations, analyzeEscapes, assignOpStr, binaryOpStr, nameUsedInStmts
 
 
@@ -37,6 +37,438 @@ def getMemberFieldName(e as Expr) as str?
         on Expr.ident as id
             # In init context, bare field names like `out = List()` become Expr.ident
             return id.name
+        on Expr.to_non_nil as tnn
+            # x to! — unwrap and check inner
+            return getMemberFieldName(tnn.expr)
+        else
+            pass
+    return nil
+
+def makeDottedKey(a as str, b as str) as str
+    return a + "." + b
+
+def extractAfterDot(s as str) as str
+    # Return the part after the last '.' in a dotted name
+    # e.g. "Token.Token" → "Token", "a.b.c" → "c"
+    var result as str = s
+    for part in s.split(".")
+        result = part
+    return result
+
+def isUpperCase(s as str) as bool
+    if s.len == 0
+        return false
+    var c = s[0]
+    return c >= c'A' and c <= c'Z'
+
+def getVariantKey(e as Expr) as str?
+    branch e
+        on Expr.member as m
+            var obj_name = getIdentName(m.object)
+            if obj_name != nil
+                return makeDottedKey(obj_name to!, m.member)
+        else
+            pass
+    return nil
+
+def addCrossModuleBoxedVariants(bv as StrSet, module_name as str)
+    # PNode from Parser module has many boxed variants
+    if module_name == "Parser"
+        bv.add("PNode.module_")
+        bv.add("PNode.use_")
+        bv.add("PNode.class_")
+        bv.add("PNode.struct_")
+        bv.add("PNode.enum_")
+        bv.add("PNode.union_decl")
+        bv.add("PNode.sig_")
+        bv.add("PNode.field_")
+        bv.add("PNode.method_")
+        bv.add("PNode.init_")
+        bv.add("PNode.stmt_return")
+        bv.add("PNode.stmt_if")
+        bv.add("PNode.stmt_while")
+        bv.add("PNode.stmt_for_in")
+        bv.add("PNode.stmt_var")
+        bv.add("PNode.stmt_assign")
+        bv.add("PNode.stmt_assert")
+        bv.add("PNode.stmt_raise")
+        bv.add("PNode.stmt_try_catch")
+        bv.add("PNode.stmt_expr")
+        bv.add("PNode.stmt_print")
+        bv.add("PNode.expr_member")
+        bv.add("PNode.expr_call")
+        bv.add("PNode.expr_index")
+        bv.add("PNode.expr_slice")
+        bv.add("PNode.expr_binary")
+        bv.add("PNode.expr_unary")
+        bv.add("PNode.expr_try")
+        bv.add("PNode.expr_to_bang")
+        bv.add("PNode.stmt_branch")
+        bv.add("PNode.expr_except")
+        bv.add("PNode.expr_string_interp")
+    # Decl, Stmt, Expr, TypeRef from ast module
+    if module_name == "ast" or module_name == "codegen" or module_name == "astbuilder" or module_name == "cg_helpers"
+        # Decl variants — all are ^T boxed
+        bv.add("Decl.use_")
+        bv.add("Decl.namespace_")
+        bv.add("Decl.class_")
+        bv.add("Decl.interface_")
+        bv.add("Decl.struct_")
+        bv.add("Decl.mixin_")
+        bv.add("Decl.enum_")
+        bv.add("Decl.method")
+        bv.add("Decl.property")
+        bv.add("Decl.var_")
+        bv.add("Decl.init")
+        bv.add("Decl.extend_")
+        bv.add("Decl.union_")
+        bv.add("Decl.sig_")
+        # TypeRef boxed variants (nilable, stream, error_union, ref_to are ^TypeRef)
+        bv.add("TypeRef.nilable")
+        bv.add("TypeRef.stream")
+        bv.add("TypeRef.error_union")
+        bv.add("TypeRef.ref_to")
+        # Stmt boxed variants
+        bv.add("Stmt.if_")
+        bv.add("Stmt.while_")
+        bv.add("Stmt.for_in")
+        bv.add("Stmt.for_num")
+        bv.add("Stmt.branch_")
+        bv.add("Stmt.return_")
+        bv.add("Stmt.assert_")
+        bv.add("Stmt.assign")
+        bv.add("Stmt.var_")
+        bv.add("Stmt.expr")
+        bv.add("Stmt.defer_")
+        bv.add("Stmt.with_")
+        bv.add("Stmt.raise_")
+        bv.add("Stmt.try_catch")
+        bv.add("Stmt.guard_")
+        bv.add("Stmt.destruct")
+        bv.add("Stmt.print_")
+        bv.add("Stmt.arena_scope")
+        # Expr boxed variants
+        bv.add("Expr.string_interp")
+        bv.add("Expr.member")
+        bv.add("Expr.call")
+        bv.add("Expr.index")
+        bv.add("Expr.slice")
+        bv.add("Expr.binary")
+        bv.add("Expr.unary")
+        bv.add("Expr.cast")
+        bv.add("Expr.to_nilable")
+        bv.add("Expr.to_non_nil")
+        bv.add("Expr.is_nil")
+        bv.add("Expr.orelse_")
+        bv.add("Expr.catch_")
+        bv.add("Expr.if_expr")
+        bv.add("Expr.lambda")
+        bv.add("Expr.list_lit")
+        bv.add("Expr.dict_lit")
+        bv.add("Expr.array_lit")
+        bv.add("Expr.all_any")
+        bv.add("Expr.try_")
+        bv.add("Expr.except_")
+        # StringPart boxed variant
+        bv.add("StringPart.expr_")
+
+def addCrossModuleRefFields(rf as StrSet, orf as StrSet, module_name as str)
+    # ^T struct fields from ast.zbr: StructName.fieldName
+    # rf = non-optional ^T, orf = optional ^T?
+    if module_name == "ast" or module_name == "codegen" or module_name == "astbuilder" or module_name == "cg_helpers"
+        # Optional ^T? fields
+        orf.add("DeclVar.init_expr")
+        orf.add("EnumMember.value")
+        orf.add("Param.default_")
+        orf.add("StmtForNum.step")
+        orf.add("StmtReturn.value")
+        orf.add("StmtAssert.message")
+        orf.add("StmtRaise.message")
+        orf.add("StmtRaise.details")
+        orf.add("ExprSlice.start")
+        orf.add("ExprSlice.stop_")
+        # Non-optional ^T fields
+        rf.add("StmtIf.cond")
+        rf.add("StmtWhile.cond")
+        rf.add("StmtForIn.iter")
+        rf.add("StmtForNum.start")
+        rf.add("StmtForNum.stop_")
+        rf.add("StmtBranch.expr")
+        rf.add("StmtAssert.cond")
+        rf.add("StmtAssign.target")
+        rf.add("StmtAssign.value")
+        rf.add("StmtDefer.stmt")
+        rf.add("StmtWith.target")
+        rf.add("StmtGuard.cond")
+        rf.add("StmtDestruct.init_expr")
+        rf.add("ExprMember.object")
+        rf.add("ExprIndex.object")
+        rf.add("ExprIndex.index")
+        rf.add("ExprSlice.object")
+        rf.add("ExprBinary.left")
+        rf.add("ExprBinary.right")
+        rf.add("ExprUnary.operand")
+        rf.add("ExprCast.expr")
+        rf.add("ExprTry.expr")
+        rf.add("ExprToNonNil.expr")
+        rf.add("ExprIsNil.expr")
+        rf.add("ExprToNilable.expr")
+        rf.add("ExprOrelse.expr")
+        rf.add("ExprOrelse.fallback")
+        rf.add("ExprCatch.expr")
+        rf.add("ExprCatch.fallback")
+        rf.add("ExprIf.cond")
+        rf.add("ExprIf.then_expr")
+        rf.add("ExprIf.else_expr")
+        rf.add("ExprAllAny.iter")
+        rf.add("ExprAllAny.cond")
+        rf.add("ExprTypeCheck.expr")
+        rf.add("DictEntry.key")
+        rf.add("DictEntry.value")
+
+def isKnownListField(name as str) as bool
+    # Known List-typed fields on Parser structs and AST types
+    if name == "value" or name == "else_stmts" or name == "init_expr"
+        return true
+    if name == "message" or name == "base" or name == "args"
+        return true
+    if name == "params" or name == "decls" or name == "stmts"
+        return true
+    if name == "variants" or name == "exposed" or name == "fields"
+        return true
+    if name == "members" or name == "methods" or name == "parts"
+        return true
+    if name == "imports" or name == "dep_modules" or name == "items_"
+        return true
+    return false
+
+def isKnownStrSetField(name as str) as bool
+    # Known StrSet-typed fields on Generator and other structs
+    if name == "class_names" or name == "union_names" or name == "enum_names"
+        return true
+    if name == "struct_names" or name == "boxed_variants" or name == "unwrapped_imports"
+        return true
+    if name == "str_params" or name == "list_locals" or name == "strset_locals"
+        return true
+    if name == "mut_set" or name == "ret_set" or name == "nil_narrowed"
+        return true
+    if name == "param_names" or name == "ref_fields" or name == "opt_ref_fields"
+        return true
+    if name == "ptr_field_bindings" or name == "opt_ptr_field_bindings"
+        return true
+    if name == "for_loop_deref" or name == "for_loop_vars"
+        return true
+    return false
+
+def isAstStructWithPtrParams(name as str) as bool
+    # AST structs from ast.zbr that have ^Expr, ^Stmt, or ^TypeRef init params
+    if name == "StmtReturn" or name == "StmtIf" or name == "StmtWhile"
+        return true
+    if name == "StmtForIn" or name == "StmtForNum" or name == "StmtBranch"
+        return true
+    if name == "StmtAssert" or name == "StmtAssign" or name == "StmtDefer"
+        return true
+    if name == "StmtWith" or name == "StmtRaise" or name == "StmtGuard"
+        return true
+    if name == "StmtDestruct"
+        return true
+    if name == "ExprMember" or name == "ExprIndex"
+        return true
+    if name == "ExprSlice" or name == "ExprBinary" or name == "ExprUnary"
+        return true
+    if name == "ExprCast" or name == "ExprTry" or name == "ExprOrelse"
+        return true
+    if name == "ExprCatch" or name == "ExprIf" or name == "ExprAllAny"
+        return true
+    if name == "ExprToNonNil" or name == "ExprExcept" or name == "ExprStringInterp"
+        return true
+    if name == "DeclVar" or name == "EnumMember" or name == "Param"
+        return true
+    if name == "DictEntry"
+        return true
+    return false
+
+def shouldBoxCtorArg(e as Expr) as bool
+    # Returns true if the expression likely produces a union value (Expr/Stmt/TypeRef)
+    # that needs to be heap-allocated when passed to a ^T struct parameter
+    branch e
+        on Expr.ident as id
+            # Variables ending in _expr, _stmt, _type_ are union values
+            var nm = id.name
+            if nm.endsWith("_expr") or nm.endsWith("_stmt")
+                return true
+            # Known variable names that are Expr values
+            if nm == "rval" or nm == "msg" or nm == "cond" or nm == "inner_expr"
+                return true
+            if nm == "this_expr" or nm == "callee_expr" or nm == "base_expr"
+                return true
+            if nm == "left_expr" or nm == "right_expr" or nm == "operand_expr"
+                return true
+            if nm == "target_expr" or nm == "value_expr" or nm == "obj_expr"
+                return true
+            if nm == "idx_expr" or nm == "subject_expr" or nm == "iter_expr"
+                return true
+            if nm == "initval" or nm == "type_ref"
+                return true
+        on Expr.call as c
+            # buildExpr(), buildStmt() return union values
+            branch c.callee
+                on Expr.member as cm
+                    if cm.member == "buildExpr" or cm.member == "buildStmt"
+                        return true
+                    if cm.member == "buildTypeRef"
+                        return true
+                else
+                    pass
+        else
+            pass
+    return false
+
+def variantStructName(union_name as str, variant_name as str) as str?
+    # Map union variant to struct type name: Stmt.assign → StmtAssign
+    # Use variant_name directly (including trailing underscores)
+    if union_name == "Stmt"
+        if variant_name == "assign"
+            return "StmtAssign"
+        if variant_name == "return_"
+            return "StmtReturn"
+        if variant_name == "if_"
+            return "StmtIf"
+        if variant_name == "while_"
+            return "StmtWhile"
+        if variant_name == "for_in"
+            return "StmtForIn"
+        if variant_name == "for_num"
+            return "StmtForNum"
+        if variant_name == "branch_"
+            return "StmtBranch"
+        if variant_name == "assert_"
+            return "StmtAssert"
+        if variant_name == "defer_"
+            return "StmtDefer"
+        if variant_name == "with_"
+            return "StmtWith"
+        if variant_name == "raise_"
+            return "StmtRaise"
+        if variant_name == "guard_"
+            return "StmtGuard"
+        if variant_name == "destruct"
+            return "StmtDestruct"
+        if variant_name == "print_"
+            return "StmtPrint"
+        if variant_name == "var_"
+            return "DeclVar"
+        if variant_name == "expr"
+            return nil
+        if variant_name == "arena_scope"
+            return "StmtArenaScope"
+        if variant_name == "try_catch"
+            return "StmtTryCatch"
+    if union_name == "Expr"
+        if variant_name == "member"
+            return "ExprMember"
+        if variant_name == "call"
+            return "ExprCall"
+        if variant_name == "index"
+            return "ExprIndex"
+        if variant_name == "slice"
+            return "ExprSlice"
+        if variant_name == "binary"
+            return "ExprBinary"
+        if variant_name == "unary"
+            return "ExprUnary"
+        if variant_name == "cast"
+            return "ExprCast"
+        if variant_name == "try_"
+            return "ExprTry"
+        if variant_name == "orelse_"
+            return "ExprOrelse"
+        if variant_name == "catch_"
+            return "ExprCatch"
+        if variant_name == "if_" or variant_name == "if_expr"
+            return "ExprIf"
+        if variant_name == "all_any"
+            return "ExprAllAny"
+        if variant_name == "to_non_nil"
+            return "ExprToNonNil"
+        if variant_name == "to_nilable"
+            return "ExprToNilable"
+        if variant_name == "type_check"
+            return "ExprTypeCheck"
+        if variant_name == "is_nil"
+            return "ExprIsNil"
+        if variant_name == "except_"
+            return "ExprExcept"
+        if variant_name == "string_interp"
+            return "ExprStringInterp"
+    if union_name == "Decl"
+        if variant_name == "var_"
+            return "DeclVar"
+        if variant_name == "method"
+            return "DeclMethod"
+        if variant_name == "init"
+            return "DeclInit"
+        if variant_name == "property"
+            return "DeclProperty"
+        if variant_name == "sig_"
+            return "DeclSig"
+    return nil
+
+def isUnionLikeName(name as str) as bool
+    # Known union type names from cross-module imports
+    if name == "PNode" or name == "PParam"
+        return true
+    if name == "Decl" or name == "TypeRef" or name == "Stmt" or name == "Expr"
+        return true
+    if name == "StringPart" or name == "LambdaBody"
+        return true
+    return false
+
+def isEnumLikeName(name as str) as bool
+    # Check if name ends with common enum suffixes: Kind, Mode, Op
+    if name == "TokenKind" or name == "LineKind" or name == "StringKind"
+        return true
+    if name == "ParamMode"
+        return true
+    if name == "BinaryOp" or name == "UnaryOp" or name == "AssignOp"
+        return true
+    return false
+
+def getIdentName(e as Expr) as str?
+    branch e
+        on Expr.ident as id
+            return id.name
+        on Expr.to_non_nil as tnn
+            return getIdentName(tnn.expr)
+        else
+            pass
+    return nil
+
+def isCrossModuleCtorCall(callee as Expr) as bool
+    # Check if call is Module.ClassName() where module == class name
+    branch callee
+        on Expr.member as m
+            var obj_name = getIdentName(m.object)
+            if obj_name != nil
+                return obj_name to! == m.member
+        else
+            pass
+    return false
+
+def getMemberObjectIdent(callee as Expr) as str?
+    # Extract the object ident name from a member expression, e.g. Foo.bar → "Foo"
+    branch callee
+        on Expr.member as m
+            return getIdentName(m.object)
+        else
+            pass
+    return nil
+
+def getMemberName(callee as Expr) as str?
+    # Extract the member name from a member expression, e.g. Foo.bar → "bar"
+    branch callee
+        on Expr.member as m
+            return m.member
         else
             pass
     return nil
@@ -163,6 +595,16 @@ def bodyUsesAnyField(stmts as List(Stmt), members as List(Decl)) as bool
                 pass
     return false
 
+def bodyUsesAnyMethod(stmts as List(Stmt), members as List(Decl)) as bool
+    for d in members
+        branch d
+            on Decl.method as dm
+                if nameUsedInStmts(dm.name, stmts)
+                    return true
+            else
+                pass
+    return false
+
 def bodyMentionsThis(stmts as List(Stmt)) as bool
     for s in stmts
         if stmtMentionsThis(s)
@@ -192,7 +634,7 @@ def generateModule(m as Module, file as str) as str
 def generateModuleWith(m as Module, file as str, extra_class_names as List(str)) as str
     var w = Writer()
     var cn = StrSet()
-    # Pre-populate class_names so forward-referenced class fields emit *ClassName.
+    # Pre-populate class_names, union_names, enum_names for forward references.
     for decl in m.decls
         branch decl
             on Decl.class_ as c
@@ -205,6 +647,38 @@ def generateModuleWith(m as Module, file as str, extra_class_names as List(str))
         cn.add(extra_class_names.at(i))
         i = i + 1
     var g = Generator(w, 0, "", false, false, false, false, nil, "", file, cn)
+    # Pre-populate union/enum names from module declarations
+    for decl in m.decls
+        branch decl
+            on Decl.union_ as u
+                g.union_names.add(u.name)
+                for v in u.variants
+                    if v.payload != nil
+                        branch v.payload to!
+                            on TypeRef.ref_to
+                                g.boxed_variants.add(makeDottedKey(u.name, v.name))
+                            else
+                                pass
+            on Decl.enum_ as e
+                g.enum_names.add(e.name)
+            on Decl.use_ as imp
+                addCrossModuleBoxedVariants(g.boxed_variants, imp.path)
+                addCrossModuleRefFields(g.ref_fields, g.opt_ref_fields, imp.path)
+                for exposed_name in imp.exposed
+                    # Exposed names ending in Kind/Mode/Op are typically enums
+                    if isEnumLikeName(exposed_name)
+                        g.enum_names.add(exposed_name)
+                    else if isUnionLikeName(exposed_name)
+                        g.union_names.add(exposed_name)
+                    else
+                        # Default: treat exposed uppercase names as struct/class types
+                        # Only uppercase names — lowercase are functions, not types
+                        if isUpperCase(exposed_name)
+                            g.struct_names.add(exposed_name)
+            on Decl.struct_ as s
+                g.struct_names.add(s.name)
+            else
+                pass
     for decl in m.decls
         branch decl
             on Decl.use_ as u
@@ -223,6 +697,12 @@ def generateModuleWith(m as Module, file as str, extra_class_names as List(str))
                 g.genFieldDecl(v)
             on Decl.sig_ as s2
                 g.genSig(s2)
+            on Decl.namespace_ as ns
+                g.genNamespace(ns)
+            on Decl.interface_ as ifc
+                g.genInterface(ifc)
+            on Decl.extend_ as ext
+                g.genExtend(ext)
             else
                 pass
     return w.result()
@@ -293,11 +773,14 @@ def generateErrorMsgHelper(m as Module) as str
     sb.append("    if (_error_ctx.message.len > 0) return _error_ctx.message;\n")
     var di as int = 0
     while di < dep_modules.len
-        sb.append("    if (")
-        sb.append(dep_modules.at(di))
-        sb.append("._error_ctx.message.len > 0) return ")
-        sb.append(dep_modules.at(di))
-        sb.append("._error_ctx.message;\n")
+        var dep_name = dep_modules.at(di)
+        # For cross-module _error_ctx, always use @import to access the module-level variable
+        # (even when genUse unwraps same-named classes like Resolver.Resolver)
+        sb.append("    if (@import(\"")
+        sb.append(dep_name)
+        sb.append(".zig\")._error_ctx.message.len > 0) return @import(\"")
+        sb.append(dep_name)
+        sb.append(".zig\")._error_ctx.message;\n")
         di = di + 1
     sb.append("    return \"\";\n")
     sb.append("}\n")
@@ -378,6 +861,13 @@ struct Generator
     var catch_var             as str      # catch clause binding name ("" if none)
     var source_file           as str      # source path for comment markers
     var class_names           as StrSet  # names of classes → emit *ClassName in genType
+    var union_names           as StrSet  # names of unions → emit union construction
+    var enum_names            as StrSet  # names of enums → emit enum construction
+    var struct_names          as StrSet  # names of structs → emit struct.init() construction
+    var boxed_variants        as StrSet  # "UnionName.variant" entries where payload is ^T
+    var ref_fields            as StrSet  # "StructName.fieldName" entries where field is ^T (non-optional)
+    var opt_ref_fields        as StrSet  # "StructName.fieldName" entries where field is ^T? (optional)
+    var unwrapped_imports     as StrSet  # module names where genUse did .ModuleName unwrap
     # Phase 7b additions
     var mut_set               as StrSet?  # variables that are mutated
     var ret_set               as StrSet?  # variables that escape via return
@@ -385,6 +875,14 @@ struct Generator
     var try_err_var           as str?     # current try-block error variable name
     var owner_members         as List(Decl)  # members of current enclosing type
     var param_names           as StrSet?  # current method parameter names
+    var str_params            as StrSet   # param names with type str
+    var list_locals           as StrSet   # local/param names with type List(*)
+    var strset_locals         as StrSet   # local/param names with type StrSet
+    var ptr_field_bindings    as StrSet   # "bindingName.fieldName" where field is ^T (non-optional)
+    var opt_ptr_field_bindings as StrSet  # "bindingName.fieldName" where field is ^T? (optional)
+    var for_loop_deref        as StrSet   # "loopVar.field" needing .* in for-loop body (e.g. DictEntry)
+    var for_loop_vars         as StrSet   # active for-loop variable names (suppress stale branch deref)
+    var in_try_expr           as bool     # suppress auto-try when already inside Expr.try_
     var self_name             as str      # "self" for methods, "_self" for init
 
     cue init(w as Writer, indent as int, owner as str, in_method as bool,
@@ -402,6 +900,13 @@ struct Generator
         this.catch_var             = catch_var
         this.source_file           = source_file
         this.class_names           = class_names
+        this.union_names           = StrSet()
+        this.enum_names            = StrSet()
+        this.struct_names          = StrSet()
+        this.boxed_variants        = StrSet()
+        this.ref_fields            = StrSet()
+        this.opt_ref_fields        = StrSet()
+        this.unwrapped_imports     = StrSet()
         # Phase 7b field initializations
         this.mut_set               = nil
         this.ret_set               = nil
@@ -409,6 +914,14 @@ struct Generator
         this.try_err_var           = nil
         this.owner_members         = List(Decl)()
         this.param_names           = nil
+        this.str_params            = StrSet()
+        this.list_locals           = StrSet()
+        this.strset_locals         = StrSet()
+        this.ptr_field_bindings    = StrSet()
+        this.opt_ptr_field_bindings = StrSet()
+        this.for_loop_deref        = StrSet()
+        this.for_loop_vars         = StrSet()
+        this.in_try_expr           = false
         this.self_name             = "self"
 
     # ── Context-adjustment helpers ────────────────────────────────────────────
@@ -441,7 +954,7 @@ struct Generator
     def withTryLabel(label as str, err_var as str) as Generator
         var g = this except
             try_block_label = label
-            catch_var       = err_var
+            try_err_var     = err_var
         return g
 
     def withCatchVar(name as str) as Generator
@@ -460,7 +973,7 @@ struct Generator
             self_name = name
         return g
 
-    def withMethodCtx(ms as StrSet?, rs as StrSet?, throws_ as bool, members as List(Decl), pnames as StrSet?, sname as str) as Generator
+    def withMethodCtx(ms as StrSet?, rs as StrSet?, throws_ as bool, members as List(Decl), pnames as StrSet?, sparams as StrSet, sname as str) as Generator
         var g = this except
             in_method             = true
             current_method_throws = throws_
@@ -468,11 +981,23 @@ struct Generator
             ret_set               = rs
             owner_members         = members
             param_names           = pnames
+            str_params            = sparams
             self_name             = sname
             indent                = indent + 1
+            for_loop_deref        = StrSet()
+            for_loop_vars         = StrSet()
         return g
 
     # ── Output helpers ────────────────────────────────────────────────────────
+
+    def emitTryBlockCatch()
+        # Inside a try block: emit `catch |_e| { _try_err = _e; break :_try_blk; }`
+        # instead of using `try` which propagates to the enclosing function
+        w.emit(" catch |_tc_e| { ")
+        w.emit(try_err_var to!)
+        w.emit(" = _tc_e; break :")
+        w.emit(try_block_label to!)
+        w.emit("; }")
 
     def writeIndent
         var i = 0
@@ -498,6 +1023,11 @@ struct Generator
                     w.emit("std.ArrayList(u8)")
                     return
                 if "." in n.name
+                    # Dotted cross-module type: Module.ClassName
+                    # If ClassName is a class, emit *Module.ClassName
+                    var class_part = extractAfterDot(n.name)
+                    if class_names.contains_(class_part)
+                        w.emit("*")
                     w.emit(n.name)
                     return
                 w.emit(zigPrimitive(n.name))
@@ -662,15 +1192,22 @@ struct Generator
 
     def genUse(n as DeclUse)
         # Simple module path (no dots) → @import("path.zig")
-        # Dotted paths like "Math.Utils" are not yet supported.
+        # If the module has a sole same-named class (e.g. `use Lexer` where Lexer.zbr
+        # defines class Lexer), unwrap the class: const Lexer = @import("Lexer.zig").Lexer;
         var alias as str = n.path
+        var has_same_named_class = class_names.contains_(alias)
         if n.exposed.len == 0
-            # `use Mod` — import whole module
+            # `use Mod` — import module (or unwrap same-named class)
             w.emit("const ")
             w.emit(alias)
             w.emit(" = @import(\"")
             w.emit(n.path)
-            w.emit(".zig\");\n")
+            w.emit(".zig\")")
+            if has_same_named_class
+                w.emit(".")
+                w.emit(alias)
+                unwrapped_imports.add(alias)
+            w.emit(";\n")
         else
             # `use Mod exposing Name1, Name2` — import module, then alias each exposed name
             w.emit("const ")
@@ -714,6 +1251,7 @@ struct Generator
     # ── genEnum ───────────────────────────────────────────────────────────────
 
     def genEnum(n as DeclEnum)
+        enum_names.add(n.name)
         writeIndent()
         w.emit("pub const ")
         w.emit(n.name)
@@ -734,6 +1272,15 @@ struct Generator
     # ── genUnion ──────────────────────────────────────────────────────────────
 
     def genUnion(n as DeclUnion)
+        union_names.add(n.name)
+        # Track boxed variants (^T payloads)
+        for v in n.variants
+            if v.payload != nil
+                branch v.payload to!
+                    on TypeRef.ref_to
+                        boxed_variants.add(makeDottedKey(n.name, v.name))
+                    else
+                        pass
         writeIndent()
         w.emit("pub const ")
         w.emit(n.name)
@@ -752,6 +1299,19 @@ struct Generator
     # ── genStruct ─────────────────────────────────────────────────────────────
 
     def genStruct(n as DeclStruct)
+        struct_names.add(n.name)
+        # Track ^T fields for auto-deref
+        for decl in n.members
+            branch decl
+                on Decl.var_ as fld
+                    if fld.type_ != nil
+                        branch fld.type_ to!
+                            on TypeRef.ref_to
+                                ref_fields.add(makeDottedKey(n.name, fld.name))
+                            else
+                                pass
+                else
+                    pass
         writeIndent()
         w.emit("pub const ")
         w.emit(n.name)
@@ -795,16 +1355,37 @@ struct Generator
                     ig.genFieldDecl(fld)
                 else
                     pass
+        var has_init = false
         for decl in n.members
             branch decl
                 on Decl.method as m
                     ig.genMethod(m)
                 on Decl.init as ini
                     ig.genInit(ini)
+                    has_init = true
                 on Decl.property as prop
                     ig.genProperty(prop)
                 else
                     pass
+        # Synthetic default init for classes without explicit cue init
+        if not has_init
+            ig.writeIndent()
+            ig.w.emit("pub fn init() *")
+            ig.w.emit(n.name)
+            ig.w.emit(" {\n")
+            var dig = ig.indented()
+            dig.writeIndent()
+            dig.w.emit("const self = _allocator.create(")
+            dig.w.emit(n.name)
+            dig.w.emit(") catch @panic(\"OOM\");\n")
+            dig.writeIndent()
+            dig.w.emit("self._type_tag = _ttag_")
+            dig.w.emit(n.name)
+            dig.w.emit(";\n")
+            dig.writeIndent()
+            dig.w.emit("return self;\n")
+            ig.writeIndent()
+            ig.w.emit("}\n\n")
         writeIndent()
         w.emit("};\n")
         w.emit("const _ttag_")
@@ -842,13 +1423,33 @@ struct Generator
             var ms = scanMutations(mstmts)
             var rs = analyzeEscapes(mstmts)
             var ps = StrSet()
+            var sp = StrSet()
             for p in m.params
                 ps.add(p.name)
+                if p.type_ != nil
+                    branch p.type_ to!
+                        on TypeRef.named as nt
+                            if nt.name == "str" or nt.name == "String"
+                                sp.add(p.name)
+                        else
+                            pass
             w.emit(" {\n")
-            var bg = withMethodCtx(ms, rs, m.throws_, owner_members, ps, "self")
+            var bg = withMethodCtx(ms, rs, m.throws_, owner_members, ps, sp, "self")
+            # Track List/StrSet params for type-aware codegen
+            for p2 in m.params
+                if p2.type_ != nil
+                    branch p2.type_ to!
+                        on TypeRef.generic as gt
+                            if gt.name == "List"
+                                bg.list_locals.add(p2.name)
+                        on TypeRef.named as nt2
+                            if nt2.name == "StrSet"
+                                bg.strset_locals.add(p2.name)
+                        else
+                            pass
             # Suppress unused-parameter errors for self and params
             # Check explicit Expr.this_ usage AND implicit field access (bare ident matching a field)
-            if has_self and not bodyMentionsThis(mstmts) and not bodyUsesAnyField(mstmts, owner_members)
+            if has_self and not bodyMentionsThis(mstmts) and not bodyUsesAnyField(mstmts, owner_members) and not bodyUsesAnyMethod(mstmts, owner_members)
                 bg.line("_ = self;")
             for p in m.params
                 if not nameUsedInStmts(p.name, mstmts)
@@ -901,7 +1502,7 @@ struct Generator
             var ps = StrSet()
             for p in ini.params
                 ps.add(p.name)
-            var bg = ig.withMethodCtx(ms, rs, false, owner_members, ps, "_self")
+            var bg = ig.withMethodCtx(ms, rs, false, owner_members, ps, StrSet(), "_self")
             bg.genStmts(istmts)
         ig.writeIndent()
         ig.w.emit("return _self;\n")
@@ -931,6 +1532,132 @@ struct Generator
             w.emit("void")
         w.emit(";\n")
 
+    # ── genNamespace ─────────────────────────────────────────────────────────
+    # namespace Foo → pub const Foo = struct { ... };
+    def genNamespace(ns as ^DeclNamespace)
+        writeIndent()
+        w.emit("pub const ")
+        w.emit(ns.name)
+        w.emit(" = struct {\n")
+        var ig = indented()
+        for d in ns.decls
+            branch d
+                on Decl.method as mth
+                    ig.genMethod(mth)
+                on Decl.var_ as v
+                    ig.genFieldDecl(v)
+                on Decl.class_ as c
+                    ig.genClass(c)
+                on Decl.struct_ as s
+                    ig.genStruct(s)
+                on Decl.enum_ as e
+                    ig.genEnum(e)
+                else
+                    pass
+        writeIndent()
+        w.emit("};\n\n")
+
+    # ── genInterface ─────────────────────────────────────────────────────────
+    # interface Shape → comptime validation fn: checks @hasDecl on each member
+    def genInterface(ifc as ^DeclInterface)
+        writeIndent()
+        w.emit("pub fn ")
+        w.emit(ifc.name)
+        w.emit("(comptime T: type) void {\n")
+        var ig = indented()
+        ig.writeIndent()
+        w.emit("comptime {\n")
+        var iig = ig.indented()
+        for mem in ifc.members
+            branch mem
+                on Decl.method as mth
+                    iig.writeIndent()
+                    w.emit("if (!@hasDecl(T, \"")
+                    w.emit(mth.name)
+                    w.emit("\")) @compileError(\"type \" ++ @typeName(T) ++ \" does not implement ")
+                    w.emit(ifc.name)
+                    w.emit(".")
+                    w.emit(mth.name)
+                    w.emit("\");\n")
+                on Decl.property as prop
+                    iig.writeIndent()
+                    w.emit("if (!@hasDecl(T, \"")
+                    w.emit(prop.name)
+                    w.emit("\")) @compileError(\"type \" ++ @typeName(T) ++ \" does not implement ")
+                    w.emit(ifc.name)
+                    w.emit(".")
+                    w.emit(prop.name)
+                    w.emit("\");\n")
+                else
+                    pass
+        ig.writeIndent()
+        w.emit("}\n")
+        writeIndent()
+        w.emit("}\n\n")
+
+    # ── genExtend ────────────────────────────────────────────────────────────
+    # extend Type → standalone functions prefixed with _ext_Type_
+    def genExtend(ext as ^DeclExtend)
+        var tname = ""
+        branch ext.target
+            on TypeRef.named as n
+                tname = n.name
+            else
+                tname = "Unknown"
+        writeIndent()
+        w.emit("// extend ")
+        w.emit(tname)
+        w.emit("\n")
+        for mem in ext.members
+            branch mem
+                on Decl.method as mth
+                    genExtMethod(tname, mth)
+                else
+                    pass
+        w.emit("\n")
+
+    def genExtMethod(tname as str, mth as ^DeclMethod)
+        writeIndent()
+        w.emit("fn _ext_")
+        w.emit(tname)
+        w.emit("_")
+        w.emit(mth.name)
+        w.emit("(self: ")
+        # Map builtin type names to Zig types
+        if tname == "str"
+            w.emit("[]const u8")
+        else if tname == "int"
+            w.emit("i64")
+        else if tname == "float"
+            w.emit("f64")
+        else if tname == "bool"
+            w.emit("bool")
+        else
+            w.emit(tname)
+        for p in mth.params
+            w.emit(", ")
+            w.emit(p.name)
+            w.emit(": ")
+            if p.type_ != nil
+                genType(p.type_ to!)
+            else
+                w.emit("anytype")
+        w.emit(") ")
+        if mth.throws_
+            w.emit("anyerror!")
+        if mth.return_type != nil
+            genType(mth.return_type to!)
+        else
+            w.emit("void")
+        if mth.stmts != nil
+            w.emit(" {\n")
+            var ig = indented()
+            ig.genStmts(mth.stmts to!)
+            writeIndent()
+            w.emit("}\n")
+        else
+            w.emit(" {}\n")
+
     # ── genProperty ───────────────────────────────────────────────────────────
 
     def genProperty(prop as DeclProperty)
@@ -951,7 +1678,7 @@ struct Generator
             var ms = scanMutations(gbody)
             var rs = analyzeEscapes(gbody)
             var pig = indented()
-            var bg = pig.withMethodCtx(ms, rs, false, owner_members, nil, "self")
+            var bg = pig.withMethodCtx(ms, rs, false, owner_members, nil, StrSet(), "self")
             bg.genStmts(gbody)
         else
             var ig = indented()
@@ -1042,6 +1769,22 @@ struct Generator
         else
             w.emit("const ")
         w.emit(n.name)
+        # Track local str/List variables for type-aware codegen
+        # Must happen BEFORE early-return paths (StringBuilder, generic stdlib ctor)
+        if n.type_ != nil
+            branch n.type_ to!
+                on TypeRef.named as tn
+                    if tn.name == "str" or tn.name == "String"
+                        str_params.add(n.name)
+                on TypeRef.generic as gtn
+                    if gtn.name == "List"
+                        list_locals.add(n.name)
+                else
+                    pass
+        # Detect StrSet from init expression (StrSet() has no type annotation)
+        if n.init_expr != nil
+            if isStrSetCtor(n.init_expr to!)
+                strset_locals.add(n.name)
         # Special-case: StringBuilder() constructor
         if n.init_expr != nil
             var ie = n.init_expr to!
@@ -1063,13 +1806,15 @@ struct Generator
             w.emit(": ")
             genType(n.type_ to!)
         else if n.init_expr != nil
-            # No type annotation — if init is an int/float literal, emit explicit type
-            # to avoid comptime_int/comptime_float errors in Zig.
+            # No type annotation — if init is a literal, emit explicit type
+            # to avoid comptime_int/comptime_float or *const [N:0]u8 issues in Zig.
             branch n.init_expr to!
                 on Expr.int_lit
                     w.emit(": i64")
                 on Expr.float_lit
                     w.emit(": f64")
+                on Expr.string_lit
+                    w.emit(": []const u8")
                 else
                     pass
         w.emit(" = ")
@@ -1086,6 +1831,19 @@ struct Generator
                     branch c.callee
                         on Expr.ident as id
                             return id.name == "StringBuilder"
+                        else
+                            pass
+            else
+                pass
+        return false
+
+    def isStrSetCtor(e as Expr) as bool
+        branch e
+            on Expr.call as c
+                if c.args.count() == 0
+                    branch c.callee
+                        on Expr.ident as id
+                            return id.name == "StrSet"
                         else
                             pass
             else
@@ -1150,7 +1908,7 @@ struct Generator
                                 pass
                     on Expr.ident as id
                         if id.name == "StrSet"
-                            w.emit("StrSet.init(_allocator)")
+                            w.emit("StrSet.init()")
                             return
                         # Bare List() or HashMap() — use type_hint from variable declaration
                         if id.name == "List"
@@ -1298,6 +2056,58 @@ struct Generator
             return lookupFieldType(fname to!)
         return nil
 
+    def isStringField(e as Expr) as bool
+        var fname = getMemberFieldName(e)
+        if fname != nil
+            var ftype = lookupFieldType(fname to!)
+            if ftype != nil
+                branch ftype to!
+                    on TypeRef.named as nt
+                        return nt.name == "str" or nt.name == "String"
+                    else
+                        pass
+        return false
+
+    def isListField(field_name as str) as bool
+        var ftype = lookupFieldType(field_name)
+        if ftype != nil
+            branch ftype to!
+                on TypeRef.generic as gtr
+                    return gtr.name == "List"
+                else
+                    pass
+        return false
+
+    def isOwnerMethod(name as str) as bool
+        for d in owner_members
+            branch d
+                on Decl.method as dm
+                    if dm.name == name
+                        return true
+                else
+                    pass
+        return false
+
+    def isOwnerSharedMethod(name as str) as bool
+        for d in owner_members
+            branch d
+                on Decl.method as dm
+                    if dm.name == name
+                        return dm.mods.is_shared
+                else
+                    pass
+        return false
+
+    def isOwnerMethodThrows(name as str) as bool
+        for d in owner_members
+            branch d
+                on Decl.method as dm
+                    if dm.name == name
+                        return dm.throws_
+                else
+                    pass
+        return false
+
     def lookupFieldType(field_name as str) as TypeRef?
         for d in owner_members
             branch d
@@ -1349,7 +2159,7 @@ struct Generator
                                 w.emit(").init(_allocator)")
                                 return
                             if id.name == "StrSet"
-                                w.emit("StrSet.init(_allocator)")
+                                w.emit("StrSet.init()")
                                 return
                         else
                             pass
@@ -1501,6 +2311,15 @@ struct Generator
                 w.emit(".items) |")
                 w.emit(vname)
                 w.emit("| {\n")
+                # Track for-loop variable deref fields based on element type
+                var iter_member = getMemberFieldName(fi.iter)
+                if iter_member != nil
+                    if iter_member to! == "entries"
+                        # List(DictEntry): key and value are ^Expr
+                        for_loop_deref.add(makeDottedKey(vname, "key"))
+                        for_loop_deref.add(makeDottedKey(vname, "value"))
+                # Mark this variable as a for-loop var to suppress stale branch deref
+                for_loop_vars.add(vname)
                 ig.genStmts(fi.stmts)
                 writeIndent()
                 w.emit("}\n")
@@ -1691,15 +2510,71 @@ struct Generator
                 ig.genSwitchTag(cas.values.at(vi))
                 vi += 1
             ig.w.emit(" => ")
+            # Check if this variant has a boxed (^T) payload that needs deref
+            var needs_deref = false
+            if has_binding and cas.binding != nil and cas.values.count() > 0
+                var vkey = getVariantKey(cas.values.at(0))
+                if vkey != nil
+                    needs_deref = boxed_variants.contains_(vkey to!)
             if has_binding
                 if cas.binding != nil
-                    ig.w.emit("|")
-                    ig.w.emit(cas.binding to!)
-                    ig.w.emit("| ")
+                    if needs_deref
+                        ig.w.emit("|_ptr_")
+                        ig.w.emit(cas.binding to!)
+                        ig.w.emit("| ")
+                    else
+                        ig.w.emit("|")
+                        ig.w.emit(cas.binding to!)
+                        ig.w.emit("| ")
                 else
                     ig.w.emit("|_| ")
             ig.w.emit("{\n")
             var iig = ig.indented()
+            if needs_deref
+                iig.writeIndent()
+                iig.w.emit("const ")
+                iig.w.emit(cas.binding to!)
+                iig.w.emit(" = _ptr_")
+                iig.w.emit(cas.binding to!)
+                iig.w.emit(".*;\n")
+            # Track ^T fields for this binding to enable auto-deref
+            if cas.binding != nil and cas.values.count() > 0
+                var vkey2 = getVariantKey(cas.values.at(0))
+                if vkey2 != nil
+                    # Parse "Union.variant" into union_name and variant_name
+                    var vk = vkey2 to!
+                    # Extract union and variant names from dotted key
+                    var vname = extractAfterDot(vk)
+                    var uname as str = ""
+                    if vname.len < vk.len
+                        # Extract union name: everything before the dot
+                        # Use extractAfterDot trick in reverse — split and take first
+                        for upart in vk.split(".")
+                            uname = upart
+                            break
+                    if uname.len > 0 and vname.len > 0
+                        var stype = variantStructName(uname, vname)
+                        if stype != nil
+                            var st = stype to!
+                            var st_dot = st + "."
+                            # Find all non-optional ref_fields for this struct
+                            var rf_items = ref_fields.items()
+                            var rfi as int = 0
+                            while rfi < rf_items.count()
+                                var rf_entry as str = rf_items.at(rfi)
+                                if rf_entry.startsWith(st_dot)
+                                    var fname2 = extractAfterDot(rf_entry)
+                                    iig.ptr_field_bindings.add(makeDottedKey(cas.binding to!, fname2))
+                                rfi += 1
+                            # Find all optional ref_fields for this struct
+                            var orf_items = opt_ref_fields.items()
+                            var orfi as int = 0
+                            while orfi < orf_items.count()
+                                var orf_entry as str = orf_items.at(orfi)
+                                if orf_entry.startsWith(st_dot)
+                                    var fname3 = extractAfterDot(orf_entry)
+                                    iig.opt_ptr_field_bindings.add(makeDottedKey(cas.binding to!, fname3))
+                                orfi += 1
             iig.genStmts(cas.stmts)
             ig.writeIndent()
             ig.w.emit("},\n")
@@ -1751,7 +2626,7 @@ struct Generator
             if ai > 0
                 w.emit(" ")
             var arg = p.args.at(ai)
-            if isStringLitArg(arg)
+            if isStringExpr(arg) or isStringLitArg(arg)
                 w.emit("{s}")
             else
                 w.emit("{}")
@@ -1784,46 +2659,59 @@ struct Generator
         if r.message != nil
             w.emit("{ _error_ctx = .{ .message = ")
             genExpr(r.message to!)
-            w.emit(" }; return error.ZebraError; }\n")
+            w.emit(" }; ")
+        if try_block_label != nil
+            # Inside a try block: set error variable and break out of labeled block
+            w.emit(try_err_var to!)
+            w.emit(" = error.ZebraError; break :")
+            w.emit(try_block_label to!)
+            w.emit("; ")
         else
-            w.emit("return error.ZebraError;\n")
+            w.emit("return error.ZebraError; ")
+        if r.message != nil
+            w.emit("}\n")
+        else
+            w.emit("\n")
 
     # ── genTryCatch ───────────────────────────────────────────────────────────
     # Simplified: labeled block with catch clause.
 
     def genTryCatch(tc as StmtTryCatch)
+        # Use labeled-block + error-variable pattern (matches trusted backend).
+        # This avoids `try` inside a non-error-returning function.
+        #
+        #   var _try_err: ?anyerror = null;
+        #   _try_blk: {
+        #       // body — raises/throws calls use `break :_try_blk`
+        #       break :_try_blk;   // normal exit
+        #   }
+        #   if (_try_err != null) {
+        #       // catch body
+        #   }
         writeIndent()
         w.emit("{\n")
         var ig = indented()
         ig.writeIndent()
-        ig.w.emit("const _zbr_tc = blk: {\n")
+        ig.w.emit("var _try_err: ?anyerror = null;\n")
+        ig.writeIndent()
+        ig.w.emit("_try_blk: {\n")
         var iig = ig.indented()
-        iig.genStmts(tc.stmts)
+        var try_gen = iig.withTryLabel("_try_blk", "_try_err")
+        try_gen.genStmts(tc.stmts)
         iig.writeIndent()
-        iig.w.emit("break :blk @as(anyerror!void, {});\n")
+        iig.w.emit("break :_try_blk;\n")
         ig.writeIndent()
-        ig.w.emit("} catch |_zbr_tc_err| _zbr_tc_err;\n")
+        ig.w.emit("}\n")
         ig.writeIndent()
-        ig.w.emit("if (_zbr_tc) |_| {} else |_zbr_tc_err| {\n")
+        ig.w.emit("if (_try_err != null) {\n")
         for cl in tc.clauses
             var catch_gen = iig
             if cl.binding != nil
                 var bname as str = cl.binding to!
                 if bname.startsWith("_")
-                    # Unused binding: emit const + discard
                     iig.writeIndent()
-                    iig.w.emit("const ")
-                    iig.w.emit(bname)
-                    iig.w.emit(" = _zbr_tc_err;\n")
-                    iig.writeIndent()
-                    iig.w.emit("_ = ")
-                    iig.w.emit(bname)
-                    iig.w.emit(";\n")
+                    iig.w.emit("_ = _try_err;\n")
                 else
-                    # Used binding: rewrite e.message → _zbr_error_msg() via catch_var
-                    # Also suppress unused _zbr_tc_err since the rewrite removes direct use
-                    iig.writeIndent()
-                    iig.w.emit("_ = _zbr_tc_err;\n")
                     catch_gen = iig.withCatchVar(bname)
             catch_gen.genStmts(cl.stmts)
         ig.writeIndent()
@@ -1970,24 +2858,51 @@ struct Generator
                                 return
                         else
                             pass
+                # List.len → @as(i64, @intCast(.items.len))
+                # String.len → .len (no .items)
+                if m.member == "len" or m.member == "count"
+                    var fname = getMemberFieldName(m.object)
+                    var is_list_obj = false
+                    if fname != nil
+                        is_list_obj = isListField(fname to!) or list_locals.contains_(fname to!) or isKnownListField(fname to!)
+                    if is_list_obj
+                        w.emit("@as(i64, @intCast(")
+                        genExpr(m.object)
+                        w.emit(".items.len))")
+                        return
                 genExpr(m.object)
                 w.emit(".")
                 w.emit(m.member)
+                # Auto-deref ^T fields: if binding.field is a *T, emit .*
+                var obj_name = getIdentName(m.object)
+                if obj_name != nil
+                    var bfkey = makeDottedKey(obj_name to!, m.member)
+                    # For-loop variable deref takes priority over branch-binding deref
+                    if for_loop_vars.contains_(obj_name to!)
+                        # Variable is a for-loop var: only deref if in for_loop_deref
+                        if for_loop_deref.contains_(bfkey)
+                            w.emit(".*")
+                    else if ptr_field_bindings.contains_(bfkey)
+                        w.emit(".*")
             on Expr.call as c
                 genCall(c)
             on Expr.index as ix
                 genExpr(ix.object)
-                w.emit("[")
+                w.emit("[@as(usize, @intCast(")
                 genExpr(ix.index)
-                w.emit("]")
+                w.emit("))]")
             on Expr.slice as sl2
                 genExpr(sl2.object)
                 w.emit("[")
                 if sl2.start != nil
+                    w.emit("@as(usize, @intCast(")
                     genExpr(sl2.start to!)
+                    w.emit("))")
                 w.emit("..")
                 if sl2.stop_ != nil
+                    w.emit("@as(usize, @intCast(")
                     genExpr(sl2.stop_ to!)
+                    w.emit("))")
                 w.emit("]")
             on Expr.binary as b
                 genBinary(b)
@@ -2005,6 +2920,16 @@ struct Generator
             on Expr.to_non_nil as tnn
                 genExpr(tnn.expr)
                 w.emit(".?")
+                # If inner expr is a member access to a ^T? field, deref after unwrap
+                branch tnn.expr
+                    on Expr.member as tnn_m
+                        var tnn_obj = getIdentName(tnn_m.object)
+                        if tnn_obj != nil
+                            var tnn_key = makeDottedKey(tnn_obj to!, tnn_m.member)
+                            if opt_ptr_field_bindings.contains_(tnn_key)
+                                w.emit(".*")
+                    else
+                        pass
             on Expr.is_nil as isn
                 w.emit("(")
                 genExpr(isn.expr)
@@ -2028,8 +2953,8 @@ struct Generator
                 genExpr(ie.then_expr)
                 w.emit(" else ")
                 genExpr(ie.else_expr)
-            on Expr.lambda
-                w.emit("@compileError(\"lambda not supported in Phase 7b\")")
+            on Expr.lambda as lam
+                genLambda(lam)
             on Expr.list_lit as ll
                 # List literal: build dynamically
                 w.emit("blk: { var _ll = std.ArrayList(")
@@ -2090,8 +3015,17 @@ struct Generator
             on Expr.zig_lit as zl
                 w.emit(zl.text)
             on Expr.try_ as tr
-                w.emit("try ")
-                genExpr(tr.expr)
+                if try_block_label != nil
+                    # Inside try block: use catch-break pattern instead of try keyword
+                    in_try_expr = true
+                    genExpr(tr.expr)
+                    in_try_expr = false
+                    emitTryBlockCatch()
+                else
+                    w.emit("try ")
+                    in_try_expr = true
+                    genExpr(tr.expr)
+                    in_try_expr = false
             on Expr.tuple_lit as tu
                 w.emit(".{")
                 var ti = 0
@@ -2110,6 +3044,9 @@ struct Generator
                 # struct update: blk: { var _tmp = base; _tmp.f = v; break :blk _tmp; }
                 w.emit("blk: { var _except_tmp = ")
                 genExpr(ex.base)
+                # In methods, self is *T — deref to copy value: self.* not self
+                if in_method
+                    w.emit(".*")
                 w.emit("; ")
                 for ef in ex.fields
                     w.emit("_except_tmp.")
@@ -2160,7 +3097,7 @@ struct Generator
             genExpr(b.right)
             w.emit(")")
             return
-        if b.op == BinaryOp.int_div
+        if b.op == BinaryOp.int_div or b.op == BinaryOp.div
             w.emit("@divTrunc(")
             genExpr(b.left)
             w.emit(", ")
@@ -2227,6 +3164,37 @@ struct Generator
                 return true
             on Expr.string_interp
                 return true
+            on Expr.ident as id
+                # Parameter or local typed as str
+                if str_params.contains_(id.name)
+                    return true
+                # Owner field typed as str (bare ident = implicit self.field)
+                var ftype = lookupFieldType(id.name)
+                if ftype != nil
+                    branch ftype to!
+                        on TypeRef.named as nt
+                            if nt.name == "str" or nt.name == "String"
+                                return true
+                        else
+                            pass
+            on Expr.member as m
+                # Common string field names
+                if m.member == "text" or m.member == "name" or m.member == "message" or m.member == "path" or m.member == "stdout" or m.member == "stderr" or m.member == "src" or m.member == "member"
+                    return true
+                # Check field type from owner declarations
+                if isStringField(e)
+                    return true
+            on Expr.call as c
+                # .toString() calls
+                branch c.callee
+                    on Expr.member as cm
+                        if cm.member == "toString"
+                            return true
+                    else
+                        pass
+            on Expr.to_non_nil as tnn
+                # x to! where x is a string? → still a string
+                return isStringExpr(tnn.expr)
             else
                 pass
         return false
@@ -2297,6 +3265,73 @@ struct Generator
     # ── genCall ───────────────────────────────────────────────────────────────
 
     def genCall(c as ExprCall)
+        # Cross-module constructor: Module.ClassName(args) → ClassName.init(args)
+        # When genUse unwraps same-named class, Module IS the class, so emit .init() directly
+        if isCrossModuleCtorCall(c.callee)
+            var cm_obj = getMemberObjectIdent(c.callee)
+            var cm_mem = getMemberName(c.callee)
+            # Cross-module ctor: Module.Class(args) → Module.Class.init(args) or Class.init(args)
+            if cm_obj != nil and cm_mem != nil
+                # If genUse unwrapped this module (class_names), emit ClassName.init()
+                # Otherwise emit ModuleName.ClassName.init()
+                if unwrapped_imports.contains_(cm_obj to!)
+                    w.emit(cm_mem to!)
+                else
+                    w.emit(cm_obj to!)
+                    w.emit(".")
+                    w.emit(cm_mem to!)
+                w.emit(".init(")
+                var fc = true
+                for a in c.args
+                    if not fc
+                        w.emit(", ")
+                    fc = false
+                    genExpr(a.value)
+                w.emit(")")
+                return
+        # Union construction: UnionName.variant(value?) → UnionName{ .variant = value }
+        # Enum construction: EnumName.variant() → .variant
+        var callee_obj = getMemberObjectIdent(c.callee)
+        var callee_mem = getMemberName(c.callee)
+        if callee_obj != nil and callee_mem != nil
+            var oname = callee_obj to!
+            var mname2 = callee_mem to!
+            if union_names.contains_(oname) or enum_names.contains_(oname)
+                if enum_names.contains_(oname)
+                    # Full form for enum: EnumName{ .variant = {} }
+                    # Bare .variant fails with `var` in Zig
+                    w.emit(oname)
+                    w.emit("{ .")
+                    w.emit(mname2)
+                    w.emit(" = {} }")
+                else
+                    var variant_key = makeDottedKey(oname, mname2)
+                    # Check if this variant has a ^T (pointer) payload
+                    # For same-module unions: check boxed_variants set
+                    # For cross-module unions: assume all payload variants are boxed
+                    # (most AST unions use ^T for their payloads)
+                    var is_boxed = boxed_variants.contains_(variant_key)
+                    if not is_boxed and c.args.count() > 0
+                        # Cross-module or unknown: assume boxed if it has a payload arg
+                        if not union_names.contains_(oname)
+                            is_boxed = true
+                    w.emit(oname)
+                    w.emit("{ .")
+                    w.emit(mname2)
+                    w.emit(" = ")
+                    if c.args.count() > 0
+                        if is_boxed
+                            # Heap-allocate the value for ^T payloads
+                            # Use a labeled block to avoid evaluating the arg twice
+                            w.emit("blk_box: { const _bv = ")
+                            genExpr(c.args.at(0).value)
+                            w.emit("; const _bp = _allocator.create(@TypeOf(_bv)) catch @panic(\"OOM\"); _bp.* = _bv; break :blk_box _bp; }")
+                        else
+                            genExpr(c.args.at(0).value)
+                    else
+                        w.emit("{}")
+                    w.emit(" }")
+                return
         # Member call dispatch
         branch c.callee
             on Expr.member as m
@@ -2326,26 +3361,72 @@ struct Generator
                     w.emit("std.StringHashMap(i64).init(_allocator)")
                     return
                 if id.name == "StrSet" and c.args.count() == 0
-                    w.emit("StrSet.init(_allocator)")
+                    w.emit("StrSet.init()")
                     return
                 if id.name == "StringBuilder" and c.args.count() == 0
                     w.emit("std.ArrayList(u8){}")
                     return
             else
                 pass
-        # Class constructor: ClassName(args) → ClassName.init(args)
+        # Class/struct constructor: ClassName(args) → ClassName.init(args)
         branch c.callee
             on Expr.ident as id
-                if class_names.contains_(id.name)
+                if class_names.contains_(id.name) or struct_names.contains_(id.name)
+                    var is_ast_struct = isAstStructWithPtrParams(id.name)
                     w.emit(id.name)
                     w.emit(".init(")
                     var first2 = true
+                    var box_labels as List(str) = List(str)()
+                    box_labels.add("_bx0")
+                    box_labels.add("_bx1")
+                    box_labels.add("_bx2")
+                    box_labels.add("_bx3")
+                    box_labels.add("_bx4")
+                    box_labels.add("_bx5")
+                    var box_idx as int = 0
                     for a in c.args
                         if not first2
                             w.emit(", ")
                         first2 = false
+                        if is_ast_struct and shouldBoxCtorArg(a.value)
+                            # Box: heap-allocate for ^T parameter
+                            var lbl = box_labels.at(box_idx)
+                            w.emit(lbl)
+                            w.emit(": { const _bv = ")
+                            genExpr(a.value)
+                            w.emit("; const _bp = _allocator.create(@TypeOf(_bv)) catch @panic(\"OOM\"); _bp.* = _bv; break :")
+                            w.emit(lbl)
+                            w.emit(" _bp; }")
+                            box_idx = box_idx + 1
+                        else
+                            genExpr(a.value)
+                    w.emit(")")
+                    return
+            else
+                pass
+        # Bare method call: method(args) → self.method(args) or Owner.method(args)
+        branch c.callee
+            on Expr.ident as id
+                if in_method and owner != "" and isOwnerMethod(id.name)
+                    var callee_throws = isOwnerMethodThrows(id.name)
+                    if callee_throws and current_method_throws and try_block_label == nil and not in_try_expr
+                        w.emit("try ")
+                    if isOwnerSharedMethod(id.name)
+                        w.emit(owner)
+                        w.emit(".")
+                    else
+                        w.emit("self.")
+                    w.emit(id.name)
+                    w.emit("(")
+                    var first3 = true
+                    for a in c.args
+                        if not first3
+                            w.emit(", ")
+                        first3 = false
                         genExpr(a.value)
                     w.emit(")")
+                    if callee_throws and try_block_label != nil
+                        emitTryBlockCatch()
                     return
             else
                 pass
@@ -2371,22 +3452,46 @@ struct Generator
             w.emit(") catch @panic(\"OOM\")")
             return
         if mname == "build"
-            w.emit("(try ")
-            genExpr(m.object)
-            w.emit(".toOwnedSlice())")
-            return
-        # List
+            # Only apply for StringBuilder instances (lowercase idents like sb, _buf)
+            # Skip for class/struct static calls like ASTBuilder.build()
+            var build_obj = getMemberFieldName(m.object)
+            var is_sb = build_obj != nil and not isUpperCase(build_obj to!)
+            if is_sb
+                if current_method_throws
+                    w.emit("(try ")
+                    genExpr(m.object)
+                    w.emit(".toOwnedSlice(_allocator))")
+                else
+                    w.emit("(")
+                    genExpr(m.object)
+                    w.emit(".toOwnedSlice(_allocator) catch \"\")")
+                return
+        # List (not StrSet — StrSet.add is a real method)
         if mname == "add"
-            genExpr(m.object)
-            w.emit(".append(_allocator, ")
-            if args.count() > 0
-                genExpr(args.at(0).value)
-            w.emit(") catch @panic(\"OOM\")")
-            return
+            var add_obj_name = getMemberFieldName(m.object)
+            var is_strset = false
+            if add_obj_name != nil
+                is_strset = strset_locals.contains_(add_obj_name to!) or isKnownStrSetField(add_obj_name to!)
+            if not is_strset
+                genExpr(m.object)
+                w.emit(".append(_allocator, ")
+                if args.count() > 0
+                    genExpr(args.at(0).value)
+                w.emit(") catch @panic(\"OOM\")")
+                return
         if mname == "count"
-            w.emit("@as(i64, @intCast(")
-            genExpr(m.object)
-            w.emit(".items.len))")
+            var cnt_obj_name = getMemberFieldName(m.object)
+            var is_strset_cnt = false
+            if cnt_obj_name != nil
+                is_strset_cnt = strset_locals.contains_(cnt_obj_name to!) or isKnownStrSetField(cnt_obj_name to!)
+            if is_strset_cnt
+                w.emit("@as(i64, @intCast(")
+                genExpr(m.object)
+                w.emit(".count()))")
+            else
+                w.emit("@as(i64, @intCast(")
+                genExpr(m.object)
+                w.emit(".items.len))")
             return
         if mname == "at"
             genExpr(m.object)
@@ -2403,10 +3508,40 @@ struct Generator
                 genExpr(args.at(0).value)
             w.emit("))")
             return
+        if mname == "clear"
+            genExpr(m.object)
+            w.emit(".clearRetainingCapacity()")
+            return
+        if mname == "sort"
+            w.emit("_zebra_sort_natural(@TypeOf(")
+            genExpr(m.object)
+            w.emit(".items[0]), ")
+            genExpr(m.object)
+            w.emit(".items)")
+            return
+        if mname == "sortBy"
+            if args.count() > 0
+                w.emit("_zebra_sort_by(@TypeOf(")
+                genExpr(m.object)
+                w.emit(".items[0]), ")
+                genExpr(args.at(0).value)
+                w.emit(", ")
+                genExpr(m.object)
+                w.emit(".items)")
+            return
         # StrSet
         if mname == "contains_"
             genExpr(m.object)
-            w.emit(".contains(")
+            # StrSet.contains_ stays as contains_ (user-defined method)
+            # Other types: drop the underscore → .contains()
+            var cont_obj_name = getMemberFieldName(m.object)
+            var is_strset_obj = false
+            if cont_obj_name != nil
+                is_strset_obj = strset_locals.contains_(cont_obj_name to!) or isKnownStrSetField(cont_obj_name to!)
+            if is_strset_obj
+                w.emit(".contains_(")
+            else
+                w.emit(".contains(")
             if args.count() > 0
                 genExpr(args.at(0).value)
             w.emit(")")
@@ -2430,7 +3565,7 @@ struct Generator
                 genExpr(args.at(0).value)
             w.emit(")")
             return
-        if mname == "contains"
+        if mname == "contains" and not isStringExpr(m.object)
             genExpr(m.object)
             w.emit(".contains(")
             if args.count() > 0
@@ -2457,6 +3592,39 @@ struct Generator
                 fi = false
                 genExpr(a.value)
             w.emit(") catch @panic(\"OOM\")")
+            return
+        if mname == "entries"
+            genExpr(m.object)
+            return
+        if mname == "keys"
+            # HashMap.keys() → collect keys into ArrayList
+            w.emit("(blk_hk: { var _hk = std.ArrayList(@TypeOf(")
+            genExpr(m.object)
+            w.emit(".keys()[0])){}; for (")
+            genExpr(m.object)
+            w.emit(".keys()) |_k| _hk.append(_allocator, _k) catch unreachable; break :blk_hk _hk; })")
+            return
+        if mname == "values"
+            # HashMap.values() → collect values into ArrayList
+            w.emit("(blk_hv: { var _hv = std.ArrayList(@TypeOf(")
+            genExpr(m.object)
+            w.emit(".values()[0])){}; for (")
+            genExpr(m.object)
+            w.emit(".values()) |_v| _hv.append(_allocator, _v) catch unreachable; break :blk_hv _hv; })")
+            return
+        # Result methods
+        if mname == "isOk" or mname == "isErr" or mname == "unwrap" or mname == "unwrapOr" or mname == "okValue" or mname == "errValue" or mname == "map" or mname == "flatMap"
+            genExpr(m.object)
+            w.emit(".")
+            w.emit(mname)
+            w.emit("(")
+            var fi_r = true
+            for a in args
+                if not fi_r
+                    w.emit(", ")
+                fi_r = false
+                genExpr(a.value)
+            w.emit(")")
             return
         # String methods
         if mname == "concat"
@@ -2562,9 +3730,272 @@ struct Generator
                 if id.name == "Arg"
                     genArgCall(mname, args)
                     return
+                if id.name == "Json"
+                    genJsonCall(mname, args)
+                    return
+                if id.name == "Http"
+                    genHttpCall(mname, args)
+                    return
+                if id.name == "HttpResponse"
+                    genHttpResponseFactory(mname, args)
+                    return
+                if id.name == "Regex"
+                    genRegexCall(mname, args)
+                    return
+                if id.name == "DateTime"
+                    genDateTimeCall(mname, args)
+                    return
+                if id.name == "Hash"
+                    genHashCall(mname, args)
+                    return
+                if id.name == "Random"
+                    genRandomCall(mname, args)
+                    return
+                if id.name == "Terminal"
+                    genTerminalCall(mname, args)
+                    return
+                if id.name == "Log"
+                    genLogCall(mname, args)
+                    return
+                if id.name == "Csv"
+                    genCsvCall(mname, args)
+                    return
+                if id.name == "Timer"
+                    genTimerCall(mname, args)
+                    return
+                if id.name == "Uri"
+                    genUriCall(mname, args)
+                    return
+                if id.name == "Compress"
+                    genCompressCall(mname, args)
+                    return
+                if id.name == "Mime"
+                    genMimeCall(mname, args)
+                    return
+                if id.name == "Tcp"
+                    genTcpCall(mname, args)
+                    return
+                if id.name == "Udp"
+                    genUdpCall(mname, args)
+                    return
+                if id.name == "Net"
+                    genNetCall(mname, args)
+                    return
+                if id.name == "Gui"
+                    genGuiCall(mname, args)
+                    return
+                if id.name == "Shell"
+                    genShellCall(mname, args)
+                    return
+                if id.name == "Dir"
+                    genDirCall(mname, args)
+                    return
+                if id.name == "Path"
+                    genPathCall(mname, args)
+                    return
+                if id.name == "Reflect"
+                    genReflectCall(mname, args)
+                    return
             else
                 pass
+        # String methods ([]const u8 has no methods in Zig — use std.mem functions)
+        if mname == "contains" and args.count() > 0
+            # str.contains(substr) → (std.mem.indexOf(u8, str, substr) != null)
+            w.emit("(std.mem.indexOf(u8, ")
+            genExpr(m.object)
+            w.emit(", ")
+            genExpr(args.at(0).value)
+            w.emit(") != null)")
+            return
+        if mname == "startsWith" and args.count() > 0
+            w.emit("(std.mem.startsWith(u8, ")
+            genExpr(m.object)
+            w.emit(", ")
+            genExpr(args.at(0).value)
+            w.emit("))")
+            return
+        if mname == "endsWith" and args.count() > 0
+            w.emit("(std.mem.endsWith(u8, ")
+            genExpr(m.object)
+            w.emit(", ")
+            genExpr(args.at(0).value)
+            w.emit("))")
+            return
+        if mname == "split" and args.count() > 0
+            # Return an ArrayList from split
+            w.emit("blk_split: { var _sp = std.ArrayList([]const u8){}; var _it = std.mem.splitSequence(u8, ")
+            genExpr(m.object)
+            w.emit(", ")
+            genExpr(args.at(0).value)
+            w.emit("); while (_it.next()) |_p| { _sp.append(_allocator, _p) catch @panic(\"OOM\"); } break :blk_split _sp; }")
+            return
+        # replace / replaceAll
+        if mname == "replace" or mname == "replaceAll"
+            w.emit("(std.mem.replaceOwned(u8, _allocator, ")
+            genExpr(m.object)
+            for a in args
+                w.emit(", ")
+                genExpr(a.value)
+            w.emit(") catch unreachable)")
+            return
+        if mname == "repeat" and args.count() > 0
+            w.emit("(blk_rep: { var _rep = std.ArrayList([]const u8){}; defer _rep.deinit(_allocator); var _ri: i64 = 0; while (_ri < ")
+            genExpr(args.at(0).value)
+            w.emit(") : (_ri += 1) _rep.append(_allocator, ")
+            genExpr(m.object)
+            w.emit(") catch unreachable; break :blk_rep std.mem.concat(_allocator, u8, _rep.items) catch unreachable; })")
+            return
+        if mname == "trimLeft"
+            w.emit("std.mem.trimLeft(u8, ")
+            genExpr(m.object)
+            w.emit(", &std.ascii.whitespace)")
+            return
+        if mname == "trimRight"
+            w.emit("std.mem.trimRight(u8, ")
+            genExpr(m.object)
+            w.emit(", &std.ascii.whitespace)")
+            return
+        if mname == "padLeft"
+            w.emit("_pad_left(")
+            genExpr(m.object)
+            w.emit(", @as(usize, @intCast(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("0")
+            w.emit(")), ")
+            if args.count() > 1
+                genExpr(args.at(1).value)
+            else
+                w.emit("' '")
+            w.emit(", _allocator)")
+            return
+        if mname == "padRight"
+            w.emit("_pad_right(")
+            genExpr(m.object)
+            w.emit(", @as(usize, @intCast(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("0")
+            w.emit(")), ")
+            if args.count() > 1
+                genExpr(args.at(1).value)
+            else
+                w.emit("' '")
+            w.emit(", _allocator)")
+            return
+        if mname == "center"
+            w.emit("_pad_center(")
+            genExpr(m.object)
+            w.emit(", @as(usize, @intCast(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("0")
+            w.emit(")), ")
+            if args.count() > 1
+                genExpr(args.at(1).value)
+            else
+                w.emit("' '")
+            w.emit(", _allocator)")
+            return
+        if mname == "isEmpty"
+            w.emit("(")
+            genExpr(m.object)
+            w.emit(".len == 0)")
+            return
+        if mname == "lines"
+            w.emit("std.mem.splitScalar(u8, ")
+            genExpr(m.object)
+            w.emit(", '\\n')")
+            return
+        if mname == "reverse"
+            w.emit("(blk_rev: { const _rbuf = _allocator.alloc(u8, ")
+            genExpr(m.object)
+            w.emit(".len) catch @panic(\"OOM\"); @memcpy(_rbuf, ")
+            genExpr(m.object)
+            w.emit("); std.mem.reverse(u8, _rbuf); break :blk_rev _rbuf; })")
+            return
+        if mname == "charAt" and args.count() > 0
+            genExpr(m.object)
+            w.emit("[@intCast(")
+            genExpr(args.at(0).value)
+            w.emit(")]")
+            return
+        if mname == "substring" and args.count() >= 2
+            genExpr(m.object)
+            w.emit("[@intCast(")
+            genExpr(args.at(0).value)
+            w.emit(")..@intCast(")
+            genExpr(args.at(1).value)
+            w.emit(")]")
+            return
+        if mname == "lastIndexOf" and args.count() > 0
+            w.emit("(if (std.mem.lastIndexOf(u8, ")
+            genExpr(m.object)
+            w.emit(", ")
+            genExpr(args.at(0).value)
+            w.emit(")) |_li| @as(i64, @intCast(_li)) else @as(i64, -1))")
+            return
+        if mname == "isAlpha"
+            w.emit("(blk_ia: { if (")
+            genExpr(m.object)
+            w.emit(".len == 0) break :blk_ia false; for (")
+            genExpr(m.object)
+            w.emit(") |_ac| { if (!std.ascii.isAlphabetic(_ac)) break :blk_ia false; } break :blk_ia true; })")
+            return
+        if mname == "isNumeric"
+            w.emit("(blk_in: { if (")
+            genExpr(m.object)
+            w.emit(".len == 0) break :blk_in false; for (")
+            genExpr(m.object)
+            w.emit(") |_nc| { if (!std.ascii.isDigit(_nc)) break :blk_in false; } break :blk_in true; })")
+            return
+        if mname == "isValidUtf8"
+            w.emit("std.unicode.utf8ValidateSlice(")
+            genExpr(m.object)
+            w.emit(")")
+            return
+        if mname == "toHex"
+            w.emit("(blk_hex: { const _hx_s = ")
+            genExpr(m.object)
+            w.emit("; const _hx_buf = _allocator.alloc(u8, _hx_s.len * 2) catch @panic(\"OOM\"); ")
+            w.emit("for (_hx_s, 0..) |_hx_b, _hx_i| { _ = std.fmt.bufPrint(_hx_buf[_hx_i * 2 .. _hx_i * 2 + 2], \"{x:0>2}\", .{_hx_b}) catch unreachable; } ")
+            w.emit("break :blk_hex _hx_buf; })")
+            return
+        if mname == "fromHex"
+            w.emit("(blk_fhx: { if (")
+            genExpr(m.object)
+            w.emit(".len % 2 != 0) break :blk_fhx @as(?[]const u8, null); ")
+            w.emit("const _hbuf = _allocator.alloc(u8, ")
+            genExpr(m.object)
+            w.emit(".len / 2) catch @panic(\"OOM\"); ")
+            w.emit("std.fmt.hexToBytes(_hbuf, ")
+            genExpr(m.object)
+            w.emit(") catch { _allocator.free(_hbuf); break :blk_fhx @as(?[]const u8, null); }; ")
+            w.emit("break :blk_fhx @as(?[]const u8, _hbuf); })")
+            return
+        if mname == "format"
+            w.emit("(std.fmt.allocPrint(_allocator, ")
+            genExpr(m.object)
+            for a in args
+                w.emit(", .{ ")
+                genExpr(a.value)
+                w.emit(" }")
+            w.emit(") catch unreachable)")
+            return
         # Default: object.method(args)
+        # Auto-try: if calling a throws method on self, emit try prefix
+        var callee_throws2 = false
+        branch m.object
+            on Expr.this_
+                if isOwnerMethodThrows(mname)
+                    callee_throws2 = true
+            else
+                pass
+        if callee_throws2 and current_method_throws and try_block_label == nil and not in_try_expr
+            w.emit("try ")
         genExpr(m.object)
         w.emit(".")
         w.emit(mname)
@@ -2576,6 +4007,8 @@ struct Generator
             first = false
             genExpr(a.value)
         w.emit(")")
+        if callee_throws2 and try_block_label != nil
+            emitTryBlockCatch()
 
     def genMathCall(mname as str, args as List(Arg))
         if mname == "sqrt"
@@ -2633,6 +4066,47 @@ struct Generator
                 w.emit(", ")
             first = false
             genExpr(a.value)
+
+    # ── genLambda ────────────────────────────────────────────────────────────
+    # Emit anonymous struct with a call method.
+    # Without capture:   struct { fn call(params) RetT { body } }.call
+    def genLambda(lam as ^ExprLambda)
+        w.emit("struct { fn call(")
+        var first = true
+        for p in lam.params
+            if not first
+                w.emit(", ")
+            first = false
+            w.emit(p.name)
+            w.emit(": ")
+            if p.type_ != nil
+                genType(p.type_ to!)
+            else
+                w.emit("anytype")
+        w.emit(") ")
+        # Return type
+        if lam.return_type != nil
+            genType(lam.return_type to!)
+        else
+            branch lam.body_
+                on LambdaBody.expr_ as ex
+                    w.emit("@TypeOf(")
+                    genExpr(ex)
+                    w.emit(")")
+                on LambdaBody.stmts
+                    w.emit("void")
+        w.emit(" {")
+        branch lam.body_
+            on LambdaBody.expr_ as ex
+                w.emit(" return ")
+                genExpr(ex)
+                w.emit(";")
+            on LambdaBody.stmts as ss
+                w.emit("\n")
+                var ig = indented()
+                ig.genStmts(ss)
+                writeIndent()
+        w.emit(" } }.call")
 
     # ── genFileCall ───────────────────────────────────────────────────────────
     # Emit File.* static calls as inline Zig expressions (no allocation needed).
@@ -2798,6 +4272,725 @@ struct Generator
         w.emit("@compileError(\"selfhost: unknown Arg.")
         w.emit(mname)
         w.emit("\")")
+
+    # ── genJsonCall ──────────────────────────────────────────────────────────
+    def genJsonCall(mname as str, args as List(Arg))
+        if mname == "parse"
+            w.emit("_json_parse(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"{}\"")
+            w.emit(")")
+            return
+        if mname == "stringify"
+            w.emit("_json_stringify(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("_json_object()")
+            w.emit(")")
+            return
+        if mname == "object"
+            w.emit("_json_object()")
+            return
+        if mname == "array"
+            w.emit("_json_array()")
+            return
+        w.emit("@compileError(\"selfhost: unknown Json.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genHttpCall ──────────────────────────────────────────────────────────
+    def genHttpCall(mname as str, args as List(Arg))
+        if mname == "get"
+            w.emit("_http_get(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(")")
+            return
+        if mname == "post"
+            w.emit("_http_post(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(", ")
+            if args.count() >= 2
+                genExpr(args.at(1).value)
+            else
+                w.emit("\"\"")
+            w.emit(")")
+            return
+        if mname == "serve"
+            w.emit("_http_serve(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("8080")
+            w.emit(", ")
+            if args.count() >= 2
+                genExpr(args.at(1).value)
+            else
+                w.emit("undefined")
+            w.emit(")")
+            return
+        if mname == "json"
+            w.emit("_http_json_get(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(")")
+            return
+        if mname == "postJson"
+            w.emit("_http_json_post(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(", ")
+            if args.count() >= 2
+                genExpr(args.at(1).value)
+            else
+                w.emit("\"\"")
+            w.emit(")")
+            return
+        w.emit("@compileError(\"selfhost: unknown Http.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genHttpResponseFactory ───────────────────────────────────────────────
+    def genHttpResponseFactory(mname as str, args as List(Arg))
+        if mname == "ok"
+            w.emit("HttpResponse{ .status = 200, .text = ")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(" }")
+            return
+        if mname == "notFound"
+            w.emit("HttpResponse{ .status = 404, .text = ")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"Not Found\"")
+            w.emit(" }")
+            return
+        if mname == "err"
+            w.emit("HttpResponse{ .status = 500, .text = ")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"Internal Server Error\"")
+            w.emit(" }")
+            return
+        if mname == "new"
+            w.emit("HttpResponse{ .status = @intCast(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("200")
+            w.emit("), .text = ")
+            if args.count() >= 2
+                genExpr(args.at(1).value)
+            else
+                w.emit("\"\"")
+            w.emit(" }")
+            return
+        w.emit("@compileError(\"selfhost: unknown HttpResponse.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genRegexCall ─────────────────────────────────────────────────────────
+    def genRegexCall(mname as str, args as List(Arg))
+        if mname == "compile"
+            w.emit("_regex_compile(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(", ")
+            if args.count() >= 2
+                genExpr(args.at(1).value)
+            else
+                w.emit("\"\"")
+            w.emit(")")
+            return
+        w.emit("@compileError(\"selfhost: unknown Regex.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genDateTimeCall ──────────────────────────────────────────────────────
+    def genDateTimeCall(mname as str, args as List(Arg))
+        if mname == "now"
+            w.emit("_dt_now()")
+            return
+        if mname == "fromEpoch"
+            w.emit("_DateTime{ .epoch_ms = ")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("0")
+            w.emit(" }")
+            return
+        if mname == "of"
+            w.emit("_dt_from_gregorian(")
+            genArgList(args)
+            # Fill missing hour/minute/second with 0
+            var provided = args.count()
+            if provided < 4
+                w.emit(", 0")
+            if provided < 5
+                w.emit(", 0")
+            if provided < 6
+                w.emit(", 0")
+            w.emit(")")
+            return
+        w.emit("@compileError(\"selfhost: unknown DateTime.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genHashCall ──────────────────────────────────────────────────────────
+    def genHashCall(mname as str, args as List(Arg))
+        if mname == "sha256"
+            w.emit("_hash_sha256(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(")")
+            return
+        if mname == "sha512"
+            w.emit("_hash_sha512(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(")")
+            return
+        if mname == "md5"
+            w.emit("_hash_md5(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(")")
+            return
+        if mname == "blake3"
+            w.emit("_hash_blake3(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(")")
+            return
+        if mname == "hmac256"
+            w.emit("_hash_hmac256(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(", ")
+            if args.count() >= 2
+                genExpr(args.at(1).value)
+            else
+                w.emit("\"\"")
+            w.emit(")")
+            return
+        w.emit("@compileError(\"selfhost: unknown Hash.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genRandomCall ────────────────────────────────────────────────────────
+    def genRandomCall(mname as str, args as List(Arg))
+        if mname == "randInt"
+            w.emit("_random_int(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("0")
+            w.emit(", ")
+            if args.count() >= 2
+                genExpr(args.at(1).value)
+            else
+                w.emit("100")
+            w.emit(")")
+            return
+        if mname == "randFloat"
+            w.emit("_random_float()")
+            return
+        if mname == "randBool"
+            w.emit("_random_bool()")
+            return
+        if mname == "bytes"
+            w.emit("_random_bytes(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("16")
+            w.emit(")")
+            return
+        if mname == "seed"
+            w.emit("_random_seed(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("0")
+            w.emit(")")
+            return
+        if mname == "choice"
+            if args.count() > 0
+                genExpr(args.at(0).value)
+                w.emit(".items[_rng().uintLessThan(usize, ")
+                genExpr(args.at(0).value)
+                w.emit(".items.len)]")
+            return
+        if mname == "shuffle"
+            if args.count() > 0
+                w.emit("(if (")
+                genExpr(args.at(0).value)
+                w.emit(".items.len > 0) _rng().shuffle(@TypeOf(")
+                genExpr(args.at(0).value)
+                w.emit(".items[0]), ")
+                genExpr(args.at(0).value)
+                w.emit(".items))")
+            return
+        w.emit("@compileError(\"selfhost: unknown Random.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genTerminalCall ──────────────────────────────────────────────────────
+    def genTerminalCall(mname as str, args as List(Arg))
+        if mname == "isTty"
+            w.emit("_term_is_tty()")
+            return
+        if mname == "width"
+            w.emit("_term_width()")
+            return
+        if mname == "height"
+            w.emit("_term_height()")
+            return
+        if mname == "writeln" or mname == "write"
+            var is_println = mname == "writeln"
+            w.emit("_term_print(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(", ")
+            if args.count() >= 2
+                genExpr(args.at(1).value)
+            else
+                w.emit("\"\"")
+            if is_println
+                w.emit(", true)")
+            else
+                w.emit(", false)")
+            return
+        w.emit("@compileError(\"selfhost: unknown Terminal.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genLogCall ───────────────────────────────────────────────────────────
+    def genLogCall(mname as str, args as List(Arg))
+        if mname == "debug"
+            w.emit("_log_debug(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(")")
+            return
+        if mname == "info"
+            w.emit("_log_info(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(")")
+            return
+        if mname == "warn"
+            w.emit("_log_warn(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(")")
+            return
+        if mname == "err"
+            w.emit("_log_err(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(")")
+            return
+        if mname == "setLevel"
+            w.emit("_log_set_level(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("1")
+            w.emit(")")
+            return
+        if mname == "setOutput"
+            w.emit("_log_set_output_stderr(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("true")
+            w.emit(")")
+            return
+        if mname == "timestamp"
+            w.emit("_log_timestamp(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("true")
+            w.emit(")")
+            return
+        w.emit("@compileError(\"selfhost: unknown Log.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genCsvCall ───────────────────────────────────────────────────────────
+    def genCsvCall(mname as str, args as List(Arg))
+        if mname == "parse"
+            w.emit("_csv_parse(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(")")
+            return
+        if mname == "parseFile"
+            w.emit("_csv_parse_file(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(")")
+            return
+        w.emit("@compileError(\"selfhost: unknown Csv.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genTimerCall ─────────────────────────────────────────────────────────
+    def genTimerCall(mname as str, args as List(Arg))
+        if mname == "start"
+            w.emit("_timer_start()")
+            return
+        w.emit("@compileError(\"selfhost: unknown Timer.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genUriCall ───────────────────────────────────────────────────────────
+    def genUriCall(mname as str, args as List(Arg))
+        if mname == "parse"
+            w.emit("_uri_parse(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            w.emit(")")
+            return
+        w.emit("@compileError(\"selfhost: unknown Uri.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genCompressCall ──────────────────────────────────────────────────────
+    def genCompressCall(mname as str, args as List(Arg))
+        if mname == "gzip"
+            w.emit("_compress_gzip(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            w.emit(")")
+            return
+        if mname == "gunzip"
+            w.emit("_compress_gunzip(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            w.emit(")")
+            return
+        w.emit("@compileError(\"selfhost: unknown Compress.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genMimeCall ──────────────────────────────────────────────────────────
+    def genMimeCall(mname as str, args as List(Arg))
+        if mname == "fromExt"
+            w.emit("_mime_from_ext(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            w.emit(")")
+            return
+        if mname == "toExt"
+            w.emit("_mime_to_ext(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            w.emit(")")
+            return
+        w.emit("@compileError(\"selfhost: unknown Mime.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genTcpCall ───────────────────────────────────────────────────────────
+    def genTcpCall(mname as str, args as List(Arg))
+        if mname == "connect"
+            w.emit("_tcp_connect(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(", ")
+            if args.count() >= 2
+                genExpr(args.at(1).value)
+            else
+                w.emit("0")
+            w.emit(")")
+            return
+        w.emit("@compileError(\"selfhost: unknown Tcp.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genUdpCall ───────────────────────────────────────────────────────────
+    def genUdpCall(mname as str, args as List(Arg))
+        if mname == "socket"
+            w.emit("_udp_socket()")
+            return
+        w.emit("@compileError(\"selfhost: unknown Udp.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genNetCall ───────────────────────────────────────────────────────────
+    def genNetCall(mname as str, args as List(Arg))
+        if mname == "resolve"
+            w.emit("_net_resolve(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(")")
+            return
+        w.emit("@compileError(\"selfhost: unknown Net.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genGuiCall ───────────────────────────────────────────────────────────
+    def genGuiCall(mname as str, args as List(Arg))
+        if mname == "run"
+            w.emit("_gui_run(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"App\"")
+            w.emit(", ")
+            if args.count() >= 2
+                genExpr(args.at(1).value)
+            else
+                w.emit("800")
+            w.emit(", ")
+            if args.count() >= 3
+                genExpr(args.at(2).value)
+            else
+                w.emit("600")
+            w.emit(", ")
+            if args.count() >= 4
+                genExpr(args.at(3).value)
+            else
+                w.emit("undefined")
+            w.emit(")")
+            return
+        w.emit("@compileError(\"selfhost: unknown Gui.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genShellCall ─────────────────────────────────────────────────────────
+    def genShellCall(mname as str, args as List(Arg))
+        if mname == "run"
+            w.emit("(blk_sh: {\n")
+            writeIndent()
+            w.emit("    const _sh_cmd = ")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(";\n")
+            writeIndent()
+            w.emit("    const _sh_argv = if (comptime builtin.os.tag == .windows)\n")
+            writeIndent()
+            w.emit("        @as([]const []const u8, &[_][]const u8{ \"cmd\", \"/c\", _sh_cmd })\n")
+            writeIndent()
+            w.emit("    else\n")
+            writeIndent()
+            w.emit("        @as([]const []const u8, &[_][]const u8{ \"sh\", \"-c\", _sh_cmd });\n")
+            writeIndent()
+            w.emit("    const _sh_res = std.process.Child.run(.{\n")
+            writeIndent()
+            w.emit("        .allocator = _allocator,\n")
+            writeIndent()
+            w.emit("        .argv = _sh_argv,\n")
+            writeIndent()
+            w.emit("        .max_output_bytes = 1024 * 1024,\n")
+            writeIndent()
+            w.emit("    }) catch @panic(\"Shell.run error\");\n")
+            writeIndent()
+            w.emit("    break :blk_sh std.mem.concat(_allocator, u8, &[_][]const u8{ _sh_res.stdout, _sh_res.stderr }) catch @panic(\"OOM\");\n")
+            writeIndent()
+            w.emit("})")
+            return
+        w.emit("@compileError(\"selfhost: unknown Shell.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genDirCall ───────────────────────────────────────────────────────────
+    def genDirCall(mname as str, args as List(Arg))
+        if mname == "create"
+            w.emit("(std.fs.cwd().makeDir(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(") catch |_dc_err| { if (_dc_err != error.PathAlreadyExists) @panic(\"Dir.create error\"); })")
+            return
+        if mname == "createAll"
+            w.emit("(std.fs.cwd().makePath(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(") catch @panic(\"Dir.createAll error\"))")
+            return
+        if mname == "delete"
+            w.emit("(std.fs.cwd().deleteDir(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(") catch |_dd_err| { if (_dd_err != error.FileNotFound) @panic(\"Dir.delete error\"); })")
+            return
+        if mname == "deleteAll"
+            w.emit("(std.fs.cwd().deleteTree(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(") catch @panic(\"Dir.deleteAll error\"))")
+            return
+        if mname == "exists"
+            w.emit("(blk_de: { var _de_d = std.fs.cwd().openDir(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(", .{}) catch break :blk_de false; _de_d.close(); break :blk_de true; })")
+            return
+        if mname == "list"
+            w.emit("(blk_dl: {\n")
+            writeIndent()
+            w.emit("    var _dl_dir = std.fs.cwd().openDir(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\".\"")
+            w.emit(", .{ .iterate = true }) catch @panic(\"Dir.list error\");\n")
+            writeIndent()
+            w.emit("    defer _dl_dir.close();\n")
+            writeIndent()
+            w.emit("    var _dl_list = std.ArrayList([]const u8){};\n")
+            writeIndent()
+            w.emit("    var _dl_iter = _dl_dir.iterate();\n")
+            writeIndent()
+            w.emit("    while (_dl_iter.next() catch null) |_dl_entry| {\n")
+            writeIndent()
+            w.emit("        _dl_list.append(_allocator, _allocator.dupe(u8, _dl_entry.name) catch @panic(\"OOM\")) catch @panic(\"OOM\");\n")
+            writeIndent()
+            w.emit("    }\n")
+            writeIndent()
+            w.emit("    break :blk_dl _dl_list;\n")
+            writeIndent()
+            w.emit("})")
+            return
+        w.emit("@compileError(\"selfhost: unknown Dir.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genPathCall ──────────────────────────────────────────────────────────
+    def genPathCall(mname as str, args as List(Arg))
+        if mname == "join"
+            w.emit("(std.fs.path.join(_allocator, &.{")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            if args.count() >= 2
+                w.emit(", ")
+                genExpr(args.at(1).value)
+            if args.count() >= 3
+                w.emit(", ")
+                genExpr(args.at(2).value)
+            w.emit("}) catch @panic(\"Path.join error\"))")
+            return
+        if mname == "basename"
+            w.emit("(std.fs.path.basename(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit("))")
+            return
+        if mname == "dirname"
+            w.emit("(std.fs.path.dirname(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(") orelse \"\")")
+            return
+        if mname == "ext"
+            w.emit("(std.fs.path.extension(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit("))")
+            return
+        if mname == "stem"
+            w.emit("(blk_ps: {\n")
+            writeIndent()
+            w.emit("    const _ps_base = std.fs.path.basename(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit(");\n")
+            writeIndent()
+            w.emit("    const _ps_ext = std.fs.path.extension(_ps_base);\n")
+            writeIndent()
+            w.emit("    break :blk_ps _ps_base[0 .. _ps_base.len - _ps_ext.len];\n")
+            writeIndent()
+            w.emit("})")
+            return
+        if mname == "isAbsolute"
+            w.emit("(std.fs.path.isAbsolute(")
+            if args.count() > 0
+                genExpr(args.at(0).value)
+            else
+                w.emit("\"\"")
+            w.emit("))")
+            return
+        w.emit("@compileError(\"selfhost: unknown Path.")
+        w.emit(mname)
+        w.emit("\")")
+
+    # ── genReflectCall ───────────────────────────────────────────────────────
+    def genReflectCall(mname as str, args as List(Arg))
+        # Reflect requires TC-inferred class name; simplified version emits compileError
+        w.emit("@compileError(\"selfhost: Reflect.")
+        w.emit(mname)
+        w.emit(" requires TypeChecker integration\")")
 
     def genGenericCtorCall(name as str, type_args as List(Arg), val_args as List(Arg))
         if name == "List"

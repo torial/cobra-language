@@ -1512,17 +1512,17 @@ pub fn namedTr(name: []const u8) TypeRef {
 
 pub fn nilableTr(inner: TypeRef) TypeRef {
 // zbr:selfhost/codegen_test.zbr:32
-    return TypeRef{ .nilable = _box_15eb4d107d0: { const _bp_15eb4d107d0 = _allocator.create(ast.TypeRef) catch @panic("OOM"); _bp_15eb4d107d0.* = inner; break :_box_15eb4d107d0 _bp_15eb4d107d0; } };
+    return TypeRef{ .nilable = _box_184b4e507d0: { const _bp_184b4e507d0 = _allocator.create(ast.TypeRef) catch @panic("OOM"); _bp_184b4e507d0.* = inner; break :_box_184b4e507d0 _bp_184b4e507d0; } };
 }
 
 pub fn refToTr(inner: TypeRef) TypeRef {
 // zbr:selfhost/codegen_test.zbr:35
-    return TypeRef{ .ref_to = _box_15eb4d10a38: { const _bp_15eb4d10a38 = _allocator.create(ast.TypeRef) catch @panic("OOM"); _bp_15eb4d10a38.* = inner; break :_box_15eb4d10a38 _bp_15eb4d10a38; } };
+    return TypeRef{ .ref_to = _box_184b4e50a38: { const _bp_184b4e50a38 = _allocator.create(ast.TypeRef) catch @panic("OOM"); _bp_184b4e50a38.* = inner; break :_box_184b4e50a38 _bp_184b4e50a38; } };
 }
 
 pub fn errUnionTr(inner: TypeRef) TypeRef {
 // zbr:selfhost/codegen_test.zbr:38
-    return TypeRef{ .error_union = _box_15eb4d10de0: { const _bp_15eb4d10de0 = _allocator.create(ast.TypeRef) catch @panic("OOM"); _bp_15eb4d10de0.* = inner; break :_box_15eb4d10de0 _bp_15eb4d10de0; } };
+    return TypeRef{ .error_union = _box_184b4e50de0: { const _bp_184b4e50de0 = _allocator.create(ast.TypeRef) catch @panic("OOM"); _bp_184b4e50de0.* = inner; break :_box_184b4e50de0 _bp_184b4e50de0; } };
 }
 
 pub fn listTr(elem: TypeRef) TypeRef {
@@ -1814,9 +1814,9 @@ pub fn testGenStruct() void {
 // zbr:selfhost/codegen_test.zbr:201
     const fld2 = DeclVar.init(zspan(), zmods(), "name", namedTr("str"), null, false);
 // zbr:selfhost/codegen_test.zbr:202
-    members.append(_allocator, Decl{ .var_ = _box_15eb4e46670: { const _bp_15eb4e46670 = _allocator.create(ast.DeclVar) catch @panic("OOM"); _bp_15eb4e46670.* = fld1; break :_box_15eb4e46670 _bp_15eb4e46670; } }) catch unreachable;
+    members.append(_allocator, Decl{ .var_ = _box_184b4f66670: { const _bp_184b4f66670 = _allocator.create(ast.DeclVar) catch @panic("OOM"); _bp_184b4f66670.* = fld1; break :_box_184b4f66670 _bp_184b4f66670; } }) catch unreachable;
 // zbr:selfhost/codegen_test.zbr:203
-    members.append(_allocator, Decl{ .var_ = _box_15eb4e46898: { const _bp_15eb4e46898 = _allocator.create(ast.DeclVar) catch @panic("OOM"); _bp_15eb4e46898.* = fld2; break :_box_15eb4e46898 _bp_15eb4e46898; } }) catch unreachable;
+    members.append(_allocator, Decl{ .var_ = _box_184b4f66898: { const _bp_184b4f66898 = _allocator.create(ast.DeclVar) catch @panic("OOM"); _bp_184b4f66898.* = fld2; break :_box_184b4f66898 _bp_184b4f66898; } }) catch unreachable;
 // zbr:selfhost/codegen_test.zbr:204
     const n = DeclStruct.init(zspan(), zmods(), "Point", std.ArrayList(TypeRef){}, members);
 // zbr:selfhost/codegen_test.zbr:206
@@ -1855,7 +1855,7 @@ pub fn testGenClass() void {
 // zbr:selfhost/codegen_test.zbr:219
     const fld = DeclVar.init(zspan(), zmods(), "value", namedTr("int"), null, false);
 // zbr:selfhost/codegen_test.zbr:220
-    members.append(_allocator, Decl{ .var_ = _box_15eb4e51210: { const _bp_15eb4e51210 = _allocator.create(ast.DeclVar) catch @panic("OOM"); _bp_15eb4e51210.* = fld; break :_box_15eb4e51210 _bp_15eb4e51210; } }) catch unreachable;
+    members.append(_allocator, Decl{ .var_ = _box_184b4f71210: { const _bp_184b4f71210 = _allocator.create(ast.DeclVar) catch @panic("OOM"); _bp_184b4f71210.* = fld; break :_box_184b4f71210 _bp_184b4f71210; } }) catch unreachable;
 // zbr:selfhost/codegen_test.zbr:221
     const cls = DeclClass.init(zspan(), zmods(), "Counter", std.ArrayList(TypeParam){}, std.ArrayList(TypeRef){}, std.ArrayList(TypeRef){}, members);
 // zbr:selfhost/codegen_test.zbr:223

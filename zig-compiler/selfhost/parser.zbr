@@ -589,7 +589,8 @@ class Parser
         var path as str = .eatId()
         while this.textIs(".")
             this.advance()
-            path = path + "." + .eatId()
+            path = path + "."
+            path = path + .eatId()
         var exposed = List(str)()
         if this.textIs("exposing")
             this.advance()

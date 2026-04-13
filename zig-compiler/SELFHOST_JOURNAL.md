@@ -1094,13 +1094,6 @@ This is the "round-trip" test: selfhost emits Zig that should itself be a workin
 | 14 | Wrong AST field names (assign_, local_var, iterable, body) | Fixed to match actual ast.zbr definitions |
 | 15 | Duplicate `Expr.try_` in nameUsedInExpr | Removed duplicate |
 
-### Remaining errors (Phase 14 scope)
-
-1. `Lexer.tokenize` → needs `Lexer.Lexer.tokenize` (module.class nesting)
-2. `self.visited.len` → needs `.items.len` (ArrayList API)
-3. `Resolver.Resolver()` → module/class name collision
-4. `try` in `void main()` → error propagation in non-error context
-
 ### Results
 
 ```
@@ -1108,4 +1101,53 @@ Selfhost test suites:  8/8  PASS (all existing tests)
 Zig backend tests:     ALL  PASS (zig build test clean)
 Round-trip errors:     50+  →  4 (all cross-module, Phase 14)
 Total bugs fixed:      ~95+ (cumulative across all phases)
+```
+
+---
+
+## Phase 14 — Round-trip: zero errors (2026-04-13)
+
+**Goal:** Eliminate all remaining round-trip compilation errors. The selfhost binary compiles `codegen.zbr` → Zig, and the resulting Zig code must compile without errors.
+
+### Starting errors: 5
+
+| # | Error | Root cause | Fix |
+|---|-------|-----------|-----|
+| 1–3 | `entry.key` missing `.*` in cg_helpers.zig | For-loop variable iterating `List(DictEntry)` — `DictEntry.key` is `^Expr` | Added for-loop `^T` field tracking |
+| 4 | `en.key` missing `.*` in codegen.zig | Same DictEntry pattern in dict literal codegen | Same fix |
+| 5 | `a.value.*` over-deref in codegen.zig | Stale branch-binding `StmtAssign as a` polluted `ptr_field_bindings` — `Arg.value` is `Expr` not `^Expr` | For-loop var suppresses stale branch deref |
+
+### Key changes
+
+**`except` deref condition (codegen.zbr)**
+Changed from `if in_method and not is_struct_owner` to `if in_method`. Generator is a `struct`, so `is_struct_owner = true`, making the old condition false. But `self` is always `*T` in methods (both structs and classes).
+
+**For-loop `^T` field tracking (codegen.zbr)**
+Added two new Generator fields: `for_loop_deref` (StrSet of `"loopVar.field"` needing `.*`) and `for_loop_vars` (StrSet of active for-loop variable names). In `genForIn`, when iterating over `.entries` (DictEntry list), adds `"entry.key"` and `"entry.value"` to `for_loop_deref`. Auto-deref logic checks `for_loop_vars` first — if variable is a for-loop var, only deref if in `for_loop_deref` (suppressing stale `ptr_field_bindings` from branch bindings).
+
+Fresh StrSets per `withMethodCtx` prevent cross-method contamination (StrSet is a class = reference type, shared across Generator copies within a method).
+
+**`variantStructName` expansions (codegen.zbr)**
+Added missing mappings: `if_expr→ExprIf`, `to_nilable→ExprToNilable`, `type_check→ExprTypeCheck`, `is_nil→ExprIsNil`, `var_→DeclVar`, `arena_scope→StmtArenaScope`, `try_catch→StmtTryCatch`.
+
+**`to_non_nil` in helpers (codegen.zbr)**
+Added `Expr.to_non_nil` handling to `getMemberFieldName`, `getIdentName`, and `isStringExpr`.
+
+**StrSet.removeStartingWith (cg_helpers.zbr)**
+Added method for future use (not used in final solution).
+
+**isKnownStrSetField (codegen.zbr)**
+Added `for_loop_deref` and `for_loop_vars` to the known StrSet field list.
+
+### Architecture insight
+
+The `ptr_field_bindings` mechanism (for branch-case auto-deref) is fundamentally global because StrSet is a reference type shared through Generator struct copies. For-loop variable tracking needed a separate mechanism with per-method scoping to avoid cross-method contamination. The solution layers `for_loop_deref`/`for_loop_vars` on top of `ptr_field_bindings` with priority rules: for-loop vars check `for_loop_deref` exclusively, other vars check `ptr_field_bindings`.
+
+### Results
+
+```
+Selfhost test suites:  8/8  PASS (all existing tests)
+Zig backend tests:     ALL  PASS (zig build test clean)
+Round-trip errors:     5 →  0  ✅  ZERO ERRORS
+Total bugs fixed:      ~103+ (cumulative across all phases)
 ```

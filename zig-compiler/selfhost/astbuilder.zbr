@@ -55,7 +55,8 @@ def stripStringQuotes(text as str) as str
         var result as str = parts.at(1)
         var i as int = 2
         while i < parts.count() - 1
-            result = result + quote + parts.at(i)
+            result = result + quote
+            result = result + parts.at(i)
             i = i + 1
         return result
     return text

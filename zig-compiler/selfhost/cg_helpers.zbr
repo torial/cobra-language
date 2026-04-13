@@ -58,6 +58,13 @@ class StrSet
                 return true
         return false
 
+    def removeStartingWith(prefix as str)
+        var new_items = List(str)()
+        for item in _items
+            if not item.startsWith(prefix)
+                new_items.add(item)
+        _items = new_items
+
     def count() as int
         return _items.count()
 
